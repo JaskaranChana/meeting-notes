@@ -182,36 +182,6 @@ struct AuthenticationView: View {
             .accessibilityIdentifier("auth.signInWithApple")
             .disabled(authSession.isLoading)
 
-            // Secondary: Google. Shows "not configured" alert until the SDK
-            // + OAuth client are wired (see GoogleSignInService.swift).
-            Button {
-                Task {
-                    guard let presenter = topMostViewController() else { return }
-                    await authSession.submitGoogleSignIn(presentingViewController: presenter)
-                }
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: "g.circle.fill")
-                        .font(.title3.weight(.bold))
-                    Text("Sign in with Google")
-                        .font(.headline.weight(.semibold))
-                }
-                .foregroundStyle(AuthPalette.ink)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 14)
-                .background(
-                    RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous)
-                        .fill(Color.white)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous)
-                        .strokeBorder(AuthPalette.secondaryInk.opacity(0.25), lineWidth: 0.8)
-                )
-            }
-            .buttonStyle(PressScaleButtonStyle(scale: 0.985))
-            .accessibilityIdentifier("auth.signInWithGoogle")
-            .disabled(authSession.isLoading)
-
             if authSession.isLoading {
                 HStack(spacing: 10) {
                     ProgressView().tint(AuthPalette.accent)
