@@ -1,4 +1,5 @@
 import SwiftUI
+import EventKit
 
 // MARK: - Aggregated action item
 
@@ -323,7 +324,7 @@ struct ActionItemsView: View {
                     }
                     VStack(spacing: 0) {
                         ForEach(group.items) { item in
-                            ActionItemRow(item: item, onStatusChange: setStatus, onOpen: openMeeting)
+                            ActionItemRow(item: item, onStatusChange: setStatus, onOpen: openMeeting, onAddToReminders: addToReminders)
                             if item.id != group.items.last?.id { EditorialRule() }
                         }
                     }
@@ -337,7 +338,7 @@ struct ActionItemsView: View {
                     }
                     VStack(spacing: 0) {
                         ForEach(group.items) { item in
-                            ActionItemRow(item: item, onStatusChange: setStatus, onOpen: openMeeting)
+                            ActionItemRow(item: item, onStatusChange: setStatus, onOpen: openMeeting, onAddToReminders: addToReminders)
                                 .editorialReveal()
                             if item.id != group.items.last?.id { EditorialRule() }
                         }
@@ -586,6 +587,73 @@ struct ActionItemsView: View {
         HapticEngine.select()
         selectedMeetingID = id
     }
+
+    private func addToReminders(_ item: AggregatedActionItem) {
+        Task {
+            var notes = "From “\(item.meetingTitle)” · captured in Scribeflow"
+            if item.commitment.owner != "Owner not named" {
+                notes = "Owner: \(item.commitment.owner)\n" + notes
+            }
+            let result = await RemindersExporter.add(
+                title: item.commitment.statement,
+                due: item.dueDate,
+                notes: notes
+            )
+            switch result {
+            case .success:
+                HapticEngine.notify(.success)
+                toast = ToastItem(message: "Added to Reminders", icon: "checkmark.circle.fill")
+            case .failure(let error):
+                HapticEngine.notify(.warning)
+                toast = ToastItem(message: error.message, icon: "exclamationmark.triangle.fill")
+            }
+        }
+    }
+}
+
+// MARK: - Reminders export
+
+/// Sends an action item to Apple Reminders (title, due date, context note),
+/// requesting access on first use. No data is stored by Scribeflow for this —
+/// it hands off to the user's own Reminders app.
+enum RemindersExporter {
+    enum ExportError: Error {
+        case accessDenied
+        case noList
+        case saveFailed
+
+        var message: String {
+            switch self {
+            case .accessDenied: return "Allow Reminders access in Settings to add tasks."
+            case .noList:       return "No Reminders list is available to add to."
+            case .saveFailed:   return "Couldn't add to Reminders. Try again."
+            }
+        }
+    }
+
+    @MainActor
+    static func add(title: String, due: Date?, notes: String?) async -> Result<Void, ExportError> {
+        let store = EKEventStore()
+        let granted = (try? await store.requestFullAccessToReminders()) ?? false
+        guard granted else { return .failure(.accessDenied) }
+        guard let list = store.defaultCalendarForNewReminders() else { return .failure(.noList) }
+
+        let reminder = EKReminder(eventStore: store)
+        reminder.title = title
+        reminder.notes = notes
+        reminder.calendar = list
+        if let due {
+            reminder.dueDateComponents = Calendar.current.dateComponents(
+                [.year, .month, .day, .hour, .minute], from: due
+            )
+        }
+        do {
+            try store.save(reminder, commit: true)
+            return .success(())
+        } catch {
+            return .failure(.saveFailed)
+        }
+    }
 }
 
 // MARK: - Row
@@ -594,6 +662,7 @@ private struct ActionItemRow: View {
     let item: AggregatedActionItem
     let onStatusChange: (CommitmentStatus, AggregatedActionItem) -> Void
     let onOpen: (Meeting.ID) -> Void
+    let onAddToReminders: (AggregatedActionItem) -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
@@ -695,6 +764,9 @@ private struct ActionItemRow: View {
                 onStatusChange(.open, item)
             } label: { Label("Reopen", systemImage: "arrow.uturn.backward") }
             Divider()
+            Button {
+                onAddToReminders(item)
+            } label: { Label("Add to Reminders", systemImage: "list.bullet.rectangle") }
             Button {
                 onOpen(item.meetingID)
             } label: { Label("Open meeting", systemImage: "doc.text.magnifyingglass") }
