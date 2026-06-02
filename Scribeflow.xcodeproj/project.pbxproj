@@ -431,6 +431,7 @@
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Scribeflow uses the microphone to record meetings, voice notes, and phone-call notes you choose to capture. Audio stays on this device unless you export it.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Scribeflow uses on-device speech recognition to turn your recordings into searchable transcripts. Audio is processed on your device whenever on-device recognition is supported.";
+				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Scribeflow adds your action items to Apple Reminders, with their due dates, when you choose to.";
 				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Scribeflow can attach your notes to calendar meetings and pre-fill titles so each capture is linked to the right event.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -468,6 +469,7 @@
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Scribeflow uses the microphone to record meetings, voice notes, and phone-call notes you choose to capture. Audio stays on this device unless you export it.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Scribeflow uses on-device speech recognition to turn your recordings into searchable transcripts. Audio is processed on your device whenever on-device recognition is supported.";
+				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Scribeflow adds your action items to Apple Reminders, with their due dates, when you choose to.";
 				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Scribeflow can attach your notes to calendar meetings and pre-fill titles so each capture is linked to the right event.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
