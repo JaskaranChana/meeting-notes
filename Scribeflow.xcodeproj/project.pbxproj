@@ -428,10 +428,10 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "Scribeflow Dev";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Scribeflow uses Face ID to unlock your secure session.";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Scribeflow uses the microphone to record meetings, voice notes, and phone-call notes you choose to capture. Audio stays on this device unless you export it.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Scribeflow uses on-device speech recognition to turn your recordings into searchable transcripts. No audio leaves your device for this.";
 				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Scribeflow can attach your notes to calendar meetings and pre-fill titles so each capture is linked to the right event.";
-				INFOPLIST_KEY_NSContactsUsageDescription = "Scribeflow looks up names so action-item owners can be matched to your contacts. Contact data stays on this device.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
@@ -465,10 +465,10 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Scribeflow;
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Scribeflow uses Face ID to unlock your secure session.";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Scribeflow uses the microphone to record meetings, voice notes, and phone-call notes you choose to capture. Audio stays on this device unless you export it.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Scribeflow uses on-device speech recognition to turn your recordings into searchable transcripts. No audio leaves your device for this.";
 				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Scribeflow can attach your notes to calendar meetings and pre-fill titles so each capture is linked to the right event.";
-				INFOPLIST_KEY_NSContactsUsageDescription = "Scribeflow looks up names so action-item owners can be matched to your contacts. Contact data stays on this device.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
