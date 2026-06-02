@@ -2263,6 +2263,35 @@ struct MeetingDetailView: View {
         .buttonStyle(PressScaleButtonStyle(scale: 0.96))
     }
 
+    private func commitMetaChip(_ text: String, icon: String, tint: Color) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon).font(.caption2.weight(.bold))
+            Text(text).font(.caption2.weight(.semibold)).lineLimit(1)
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(tint.opacity(0.10), in: Capsule())
+    }
+
+    @ViewBuilder
+    private func commitDueChip(_ c: Commitment, capturedAt: Date) -> some View {
+        let due = DueDateParser.date(from: c.dueHint, capturedAt: capturedAt)
+        let isLive = c.status == .open || c.status == .atRisk
+        if isLive, let due, due < Date() {
+            HStack(spacing: 4) {
+                Image(systemName: "clock.badge.exclamationmark.fill").font(.caption2.weight(.bold))
+                Text("Overdue").font(.caption2.weight(.semibold))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(AppPalette.coral, in: Capsule())
+        } else if let hint = c.dueHint, !hint.isEmpty {
+            commitMetaChip(hint.capitalized, icon: "clock.fill", tint: AppPalette.gold)
+        }
+    }
+
     private func commitmentsCard(_ meeting: Meeting) -> some View {
         SurfaceCard(title: "Commitments", subtitle: "Track promises, owners, timing, and whether follow-through is still at risk.") {
             VStack(alignment: .leading, spacing: 12) {
@@ -2284,9 +2313,20 @@ struct MeetingDetailView: View {
                                         .font(.subheadline.weight(.semibold))
                                         .foregroundStyle(AppPalette.ink)
 
-                                    Text("\(commitment.owner) · \(commitment.sourceSpeaker)\(commitment.dueHint.map { " · \($0)" } ?? "")")
-                                        .font(.footnote)
-                                        .foregroundStyle(AppPalette.secondaryInk)
+                                    HStack(spacing: 8) {
+                                        commitMetaChip(
+                                            commitment.owner == "Owner not named" ? "Unassigned" : commitment.owner,
+                                            icon: commitment.owner == "You" ? "person.fill" : "person",
+                                            tint: commitment.owner == "You" ? AppPalette.accent : AppPalette.secondaryInk
+                                        )
+                                        commitDueChip(commitment, capturedAt: meeting.when)
+                                        if !commitment.sourceSpeaker.isEmpty, commitment.sourceSpeaker != "Meeting" {
+                                            Text(commitment.sourceSpeaker)
+                                                .font(.caption2)
+                                                .foregroundStyle(AppPalette.secondaryInk.opacity(0.7))
+                                                .lineLimit(1)
+                                        }
+                                    }
                                 }
 
                                 Spacer(minLength: 0)
