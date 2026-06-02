@@ -27,3 +27,6 @@ skills-lock.json
 QA_CHECKLIST.md
 *_Mockups.html
 scripts/
+
+# App Store Connect upload assets (generated, not part of the product)
+appstore/
