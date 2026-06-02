@@ -24,6 +24,7 @@ struct TodayView: View {
     @State private var autoRecordWatchTimer: Timer?
     @State private var dismissedEventIDs: Set<String> = []
     @AppStorage("homeHeroStyle") private var heroStyleRaw = HeroStyle.briefing.rawValue
+    @AppStorage("scribeflow.currentUserEmail") private var currentUserEmail = ""
 
     private var heroStyle: HeroStyle { HeroStyle(rawValue: heroStyleRaw) ?? .briefing }
 
@@ -86,17 +87,7 @@ struct TodayView: View {
     private var heroView: some View {
         switch heroStyle {
         case .briefing:
-            EditorialHeroCard(
-                today: snap.todayCaptureCount,
-                open: snap.totalOpenLoopsCount,
-                streak: snap.longestStreakDays,
-                week: heroModel.weekTotal,
-                lastWeek: heroModel.lastWeekTotal,
-                onRecord: { onCapture(.record) },
-                onType: { onCapture(.type) },
-                onImport: { showingAudioImporter = true },
-                onOpenTasks: onTasksTap
-            )
+            cinematicBriefing
         case .spotlight:
             HeroSpotlight(
                 model: heroModel,
@@ -151,7 +142,9 @@ struct TodayView: View {
                         onCapture: { captureForEvent(event) }
                     )
                     .motionEntrance(step: 2, active: hasAnimatedIn)
-                } else if let move = snap.nextMove {
+                } else if let move = snap.nextMove, heroStyle != .briefing {
+                    // The briefing hero already surfaces the top move, so this
+                    // nudge only shows for the other hero styles.
                     VStack(alignment: .leading, spacing: 12) {
                         EditorialSectionHead(title: "Up next")
                         NextMoveCard(
@@ -164,8 +157,12 @@ struct TodayView: View {
                     .transition(.opacity.combined(with: .move(edge: .top)))
                 }
 
-                dailyPlanCard
-                    .motionEntrance(step: 2, active: hasAnimatedIn)
+                // The cinematic briefing hero already carries the ranked plan;
+                // only show the standalone card for the other hero styles.
+                if heroStyle != .briefing {
+                    dailyPlanCard
+                        .motionEntrance(step: 2, active: hasAnimatedIn)
+                }
 
                 if upcomingEvents.count > 1 {
                     HomeAgendaSection(events: Array(upcomingEvents.dropFirst()),
@@ -375,6 +372,210 @@ struct TodayView: View {
         f.unitsStyle = .abbreviated
         return f
     }()
+
+    // MARK: - Cinematic briefing hero
+
+    private var briefDateLine: String {
+        let now = Date.now
+        let weekday = now.formatted(.dateTime.weekday(.wide))
+        let monthDay = now.formatted(.dateTime.month(.wide).day())
+        return "\(weekday.uppercased()) · \(monthDay)"
+    }
+
+    private var briefName: String? {
+        guard !currentUserEmail.isEmpty else { return nil }
+        let local = currentUserEmail.split(separator: "@").first.map(String.init) ?? ""
+        let first = local.split(whereSeparator: { ".-_0123456789".contains($0) }).first.map(String.init) ?? local
+        guard first.count >= 2 else { return nil }
+        // Skip generic mailbox names so the greeting never reads "Hi, You."
+        let generic: Set<String> = ["you", "test", "admin", "user", "demo", "me", "hello", "hi", "info", "mail", "contact", "team"]
+        guard !generic.contains(first.lowercased()) else { return nil }
+        return first.prefix(1).uppercased() + first.dropFirst().lowercased()
+    }
+
+    private var briefGreeting: String {
+        let hour = Calendar.current.component(.hour, from: .now)
+        let base: String
+        switch hour {
+        case 5..<12:  base = "Good morning"
+        case 12..<17: base = "Good afternoon"
+        case 17..<22: base = "Good evening"
+        default:      base = "Working late"
+        }
+        if let name = briefName { return "\(base), \(name)." }
+        return "\(base)."
+    }
+
+    private var followThroughPct: Int {
+        let all = store.meetings.flatMap(\.commitments)
+        guard !all.isEmpty else { return 0 }
+        let done = all.filter { $0.status == .fulfilled || $0.status == .superseded }.count
+        return Int((Double(done) / Double(all.count) * 100).rounded())
+    }
+
+    private var weekMeetingCount: Int {
+        let weekAgo = Calendar.current.date(byAdding: .day, value: -7, to: .now) ?? .now
+        return store.meetings.filter { $0.when >= weekAgo }.count
+    }
+
+    private var cinematicBriefing: some View {
+        let plan = dailyPlan
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 7) {
+                    Capsule().fill(AppPalette.accent).frame(width: 40, height: 3)
+                    Text(briefDateLine)
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .kerning(1.0)
+                        .foregroundStyle(AppPalette.accent)
+                    Text(briefGreeting)
+                        .scaledFont(size: 34, weight: .semibold, design: .serif, relativeTo: .largeTitle)
+                        .foregroundStyle(AppPalette.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                CaptureMenuButton(size: 44, onRecord: { onCapture(.record) }, onType: { onCapture(.type) }, onImport: { showingAudioImporter = true })
+            }
+            .padding(.bottom, 20)
+
+            if plan.isEmpty {
+                briefClearState
+            } else {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("\(plan.count)")
+                        .font(.system(size: 17, weight: .bold, design: .serif))
+                        .foregroundStyle(AppPalette.ink)
+                    Text(plan.count == 1 ? "thing needs you" : "things need you")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(AppPalette.secondaryInk)
+                    Spacer()
+                    Text("TODAY")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .kerning(1.2)
+                        .foregroundStyle(AppPalette.tertiaryInk)
+                }
+                .padding(.bottom, 6)
+
+                VStack(spacing: 0) {
+                    ForEach(Array(plan.enumerated()), id: \.element.id) { index, item in
+                        briefRow(item)
+                        if item.id != plan.last?.id {
+                            Rectangle().fill(AppPalette.border.opacity(0.5)).frame(height: 1)
+                        }
+                    }
+                }
+                .padding(.bottom, 14)
+            }
+
+            Rectangle().fill(AppPalette.border.opacity(0.7)).frame(height: 1)
+            HStack(spacing: 8) {
+                briefStat("\(weekMeetingCount)", weekMeetingCount == 1 ? "meeting" : "meetings")
+                Circle().fill(AppPalette.tertiaryInk.opacity(0.5)).frame(width: 3, height: 3)
+                briefStat("\(followThroughPct)%", "follow-through")
+                if followThroughPct >= 60 {
+                    Image(systemName: "arrow.up.right")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(AppPalette.success)
+                }
+                Spacer()
+                Button { onTasksTap() } label: {
+                    HStack(spacing: 4) {
+                        Text("All tasks").font(.caption.weight(.semibold))
+                        Image(systemName: "arrow.right").font(.caption2.weight(.bold))
+                    }
+                    .foregroundStyle(AppPalette.accent)
+                }
+                .buttonStyle(PressScaleButtonStyle(scale: 0.95))
+            }
+            .padding(.top, 12)
+        }
+        .padding(22)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(briefingSurface)
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.xl, style: .continuous)
+                .strokeBorder(AppPalette.border.opacity(0.6), lineWidth: 0.8)
+        )
+        .appShadow(AppShadow.card)
+    }
+
+    @ViewBuilder
+    private var briefingSurface: some View {
+        let shape = RoundedRectangle(cornerRadius: AppRadius.xl, style: .continuous)
+        ZStack {
+            shape.fill(AppPalette.cardBackground)
+            shape.fill(
+                LinearGradient(
+                    colors: [AppPalette.accent.opacity(0.12), .clear],
+                    startPoint: .topLeading, endPoint: .center
+                )
+            )
+            Circle()
+                .fill(RadialGradient(colors: [AppPalette.accent.opacity(0.16), .clear], center: .center, startRadius: 0, endRadius: 130))
+                .frame(width: 250, height: 250)
+                .offset(x: 110, y: -90)
+                .blur(radius: 16)
+        }
+        .clipShape(shape)
+        .allowsHitTesting(false)
+    }
+
+    private func briefRow(_ item: DailyPlanItem) -> some View {
+        NavigationLink(value: item.meetingID) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: planIcon(item))
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(planTint(item))
+                    .frame(width: 22)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.commitment.statement)
+                        .font(.system(size: 16, weight: .medium, design: .serif))
+                        .foregroundStyle(AppPalette.ink)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(planReason(item))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(planTint(item))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(AppPalette.tertiaryInk)
+                    .padding(.top, 4)
+            }
+            .padding(.vertical, 12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(EditorialRowStyle(inset: 6))
+        .accessibilityLabel("\(planReason(item)). \(item.commitment.statement)")
+    }
+
+    private var briefClearState: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "checkmark.seal.fill")
+                .font(.title2.weight(.bold))
+                .foregroundStyle(AppPalette.success)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("You're all clear")
+                    .font(.system(size: 16, weight: .semibold, design: .serif))
+                    .foregroundStyle(AppPalette.ink)
+                Text("Nothing urgent across your meetings. Capture something new or get ahead.")
+                    .font(.caption)
+                    .foregroundStyle(AppPalette.secondaryInk)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.bottom, 8)
+    }
+
+    private func briefStat(_ value: String, _ label: String) -> some View {
+        HStack(spacing: 4) {
+            Text(value).font(.caption.weight(.bold)).foregroundStyle(AppPalette.ink)
+            Text(label).font(.caption.weight(.medium)).foregroundStyle(AppPalette.secondaryInk)
+        }
+    }
 
     @ViewBuilder
     private var dailyPlanCard: some View {
