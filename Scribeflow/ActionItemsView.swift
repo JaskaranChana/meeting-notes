@@ -636,11 +636,13 @@ private struct ActionItemRow: View {
 
                         HStack(spacing: 8) {
                             if item.commitment.owner != "Owner not named" {
-                                metaChip(item.commitment.owner, icon: "person.fill")
+                                metaChip(
+                                    item.commitment.owner,
+                                    icon: item.commitment.owner == "You" ? "person.fill" : "person",
+                                    tint: item.commitment.owner == "You" ? AppPalette.accent : AppPalette.secondaryInk
+                                )
                             }
-                            if let due = item.commitment.dueHint, !due.isEmpty {
-                                metaChip(due, icon: "clock.fill", tint: AppPalette.gold)
-                            }
+                            dueChip
                             priorityChip
                             Spacer(minLength: 0)
                         }
@@ -673,6 +675,15 @@ private struct ActionItemRow: View {
             .buttonStyle(EditorialRowStyle(inset: 6))
         }
         .padding(.vertical, 14)
+        .background(item.isOverdue ? AppPalette.coral.opacity(0.05) : Color.clear)
+        .overlay(alignment: .leading) {
+            if item.isOverdue {
+                Rectangle()
+                    .fill(AppPalette.coral)
+                    .frame(width: 3)
+                    .padding(.vertical, 10)
+            }
+        }
         .contextMenu {
             Button {
                 onStatusChange(.fulfilled, item)
@@ -713,19 +724,35 @@ private struct ActionItemRow: View {
         .background(item.priority.tint.opacity(0.10), in: Capsule())
     }
 
-    private func metaChip(_ text: String, icon: String, tint: Color = AppPalette.secondaryInk) -> some View {
+    private func metaChip(_ text: String, icon: String, tint: Color = AppPalette.secondaryInk, strong: Bool = false) -> some View {
         HStack(spacing: 4) {
             Image(systemName: icon)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(tint)
+                .font(.caption2.weight(.bold))
             Text(text)
                 .font(.caption2.weight(.semibold))
-                .foregroundStyle(tint)
                 .lineLimit(1)
         }
+        .foregroundStyle(strong ? .white : tint)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(tint.opacity(0.08), in: Capsule())
+        .background(
+            strong ? AnyShapeStyle(tint) : AnyShapeStyle(tint.opacity(0.08)),
+            in: Capsule()
+        )
+    }
+
+    @ViewBuilder private var dueChip: some View {
+        if item.isOverdue {
+            metaChip(overdueLabel, icon: "clock.badge.exclamationmark.fill", tint: AppPalette.coral, strong: true)
+        } else if let due = item.commitment.dueHint, !due.isEmpty {
+            metaChip(due.capitalized, icon: "clock.fill", tint: item.isDueSoon ? AppPalette.gold : AppPalette.secondaryInk)
+        }
+    }
+
+    private var overdueLabel: String {
+        guard let due = item.dueDate else { return "Overdue" }
+        let days = Calendar.current.dateComponents([.day], from: due, to: Date()).day ?? 0
+        return days >= 1 ? "Overdue \(days)d" : "Overdue"
     }
 }
 
