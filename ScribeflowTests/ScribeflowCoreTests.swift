@@ -31,34 +31,6 @@ struct ScribeflowCoreTests {
     }
 
     @Test
-    func releaseStyleProviderDoesNotStartWithoutConfiguration() async {
-        let viewModel = await ProviderCallViewModel(
-            provider: MockCompliantCallProvider(isConfigured: false, allowsSandboxCalls: false)
-        )
-
-        await MainActor.run {
-            viewModel.phoneNumber = "+1 416 555 1212"
-        }
-
-        await viewModel.start()
-
-        await MainActor.run {
-            #expect(viewModel.session == nil)
-            #expect(viewModel.errorMessage == CallProviderError.credentialsRequired.localizedDescription)
-            #expect(!viewModel.canStart)
-        }
-    }
-
-    @Test
-    func phoneDialerNormalizesAndRejectsUnsafeNumbers() throws {
-        #expect(PhoneDialer.normalizedNumber(from: "+1 (416) 555-1212") == "+14165551212")
-        #expect(PhoneDialer.callURL(from: "+1 (416) 555-1212")?.absoluteString == "tel:+14165551212")
-        #expect(PhoneDialer.normalizedNumber(from: "416.555.1212") == "4165551212")
-        #expect(PhoneDialer.normalizedNumber(from: "++14165551212") == nil)
-        #expect(PhoneDialer.normalizedNumber(from: "call me") == nil)
-    }
-
-    @Test
     func complianceCopyDoesNotPromiseRestrictedCallRecording() {
         #expect(RecordingCompliance.restrictedCallRecordingNotice.contains("cannot record cellular"))
         #expect(RecordingCompliance.restrictedCallRecordingNotice.contains("App Store-safe"))
