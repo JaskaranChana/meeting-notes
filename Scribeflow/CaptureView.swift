@@ -21,7 +21,6 @@ struct CaptureView: View {
 
     @Environment(MeetingStore.self) private var store
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var selectedMeetingID: Meeting.ID?
     @Binding var toast: ToastItem?
 
@@ -32,7 +31,6 @@ struct CaptureView: View {
     @State private var hasAnimatedIn = false
     @State private var defaultsCleared = false
     @State private var showingDiscardConfirm = false
-    @State private var auroraDrift = false
     @State private var recordingStartedAt: Date?
     @State private var markFlash = false
     @State private var minutePulse = false
@@ -555,13 +553,6 @@ struct CaptureView: View {
         .animation(AppMotion.smooth, value: coordinator.isPaused)
         .animation(AppMotion.smooth, value: coordinator.bookmarks.count)
         .animation(AppMotion.smooth, value: coordinator.catchUpSummary)
-        .onAppear(perform: startAurora)
-    }
-
-    private func startAurora() {
-        // Aurora is rendered statically — animating a blurred layer forces a
-        // per-frame re-rasterization that isn't worth the cost. The depth reads
-        // fine held still.
     }
 
     // MARK: Live controls (during recording)
@@ -794,7 +785,7 @@ struct CaptureView: View {
                 )
                 .frame(width: 300, height: 300)
                 .blur(radius: 44)
-                .offset(x: auroraDrift ? -70 : 50, y: auroraDrift ? -150 : -110)
+                .offset(x: 50, y: -110)
             Circle()
                 .fill(
                     RadialGradient(
@@ -804,7 +795,7 @@ struct CaptureView: View {
                 )
                 .frame(width: 240, height: 240)
                 .blur(radius: 46)
-                .offset(x: auroraDrift ? 90 : -40, y: auroraDrift ? 60 : 130)
+                .offset(x: -40, y: 130)
                 .animation(AppMotion.smooth, value: stageTint)
 
             // Voice-reactive halo — brightens and swells with the live input
