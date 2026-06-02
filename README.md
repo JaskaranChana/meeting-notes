@@ -21,18 +21,16 @@ Capture a meeting, and Scribeflow turns rough notes and live speech into a clean
 
 From a messy meeting to clean follow-through, in four taps.
 
+<div align="center">
+<img src="docs/flow.gif" width="280" alt="Capture → Recap → Today → Ask"/>
+</div>
+
 <table>
 <tr>
-<td width="25%"><img src="docs/capture.png" alt="Capture"/></td>
-<td width="25%"><img src="docs/recap.png" alt="Recap"/></td>
-<td width="25%"><img src="docs/home.png" alt="Today"/></td>
-<td width="25%"><img src="docs/ask.png" alt="Ask"/></td>
-</tr>
-<tr>
-<td align="center"><b>1 · Capture</b><br/>Record or type. On-device transcription, zero ceremony.</td>
-<td align="center"><b>2 · Auto recap</b><br/>Synopsis, decisions, actions &amp; owners, risks — scored.</td>
-<td align="center"><b>3 · Today</b><br/>A briefing of what needs you, ranked by real deadlines.</td>
-<td align="center"><b>4 · Ask</b><br/>Question your entire library and get cited answers.</td>
+<td width="25%" align="center"><b>1 · Capture</b><br/><sub>Record or type. On-device transcription, zero ceremony.</sub></td>
+<td width="25%" align="center"><b>2 · Auto recap</b><br/><sub>Synopsis, decisions, actions &amp; owners, risks — scored.</sub></td>
+<td width="25%" align="center"><b>3 · Today</b><br/><sub>A briefing of what needs you, ranked by real deadlines.</sub></td>
+<td width="25%" align="center"><b>4 · Ask</b><br/><sub>Question your library and get cited answers.</sub></td>
 </tr>
 </table>
 
@@ -47,6 +45,31 @@ Most meeting tools record to the cloud and hand you a transcript. Scribeflow is 
 - 🔁 **It remembers across meetings** — ask your whole history a question, with cited sources.
 - ⚡ **It tells you what matters now** — a ranked briefing, not a wall of numbers.
 - 🔒 **Private by design** — recordings, transcripts, and notes never leave the device.
+
+---
+
+## 🌗 Light & dark
+
+Every surface is built on adaptive tokens — it's beautiful in both.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/home.png" alt="Today — light"/></td>
+<td width="50%"><img src="docs/dark/home.png" alt="Today — dark"/></td>
+</tr>
+<tr>
+<td align="center"><sub>Today · Light</sub></td>
+<td align="center"><sub>Today · Dark</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/recap.png" alt="Recap — light"/></td>
+<td width="50%"><img src="docs/dark/recap.png" alt="Recap — dark"/></td>
+</tr>
+<tr>
+<td align="center"><sub>Recap · Light</sub></td>
+<td align="center"><sub>Recap · Dark</sub></td>
+</tr>
+</table>
 
 ---
 
@@ -68,8 +91,9 @@ Most meeting tools record to the cloud and hand you a transcript. Scribeflow is 
 
 <table>
 <tr>
-<td width="50%"><img src="docs/library.png" alt="Library"/><p align="center"><b>Library</b> — every meeting, searchable, filtered by pinned / audio / actions.</p></td>
-<td width="50%"><img src="docs/ask.png" alt="Ask"/><p align="center"><b>Ask</b> — data-derived suggestions, grounded answers that cite their source.</p></td>
+<td width="33%"><img src="docs/capture.png" alt="Capture"/><p align="center"><sub><b>Capture</b> — calm dark stage, live waveform.</sub></p></td>
+<td width="33%"><img src="docs/library.png" alt="Library"/><p align="center"><sub><b>Library</b> — searchable, filtered.</sub></p></td>
+<td width="33%"><img src="docs/ask.png" alt="Ask"/><p align="center"><sub><b>Ask</b> — grounded, cited answers.</sub></p></td>
 </tr>
 </table>
 
