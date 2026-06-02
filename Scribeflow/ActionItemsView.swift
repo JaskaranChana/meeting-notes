@@ -11,16 +11,28 @@ struct AggregatedActionItem: Identifiable, Hashable {
     let meetingDate: Date
     let isMeetingPinned: Bool
 
+    /// Absolute deadline resolved from the free-text hint relative to capture.
+    var dueDate: Date? { DueDateParser.date(from: commitment.dueHint, capturedAt: meetingDate) }
+
+    private var isLive: Bool { commitment.status == .open || commitment.status == .atRisk }
+
+    /// Past its real deadline and still open — judged by time, not keywords.
+    var isOverdue: Bool {
+        guard isLive, let due = dueDate else { return false }
+        return due < Date()
+    }
+
+    /// Due within the next two days (and not already overdue).
+    var isDueSoon: Bool {
+        guard isLive, let due = dueDate else { return false }
+        let now = Date()
+        guard due >= now, let horizon = Calendar.current.date(byAdding: .day, value: 2, to: now) else { return false }
+        return due <= horizon
+    }
+
     var priority: ActionPriority {
-        if commitment.status == .atRisk { return .high }
-        if let due = commitment.dueHint?.lowercased() {
-            if due.contains("today") || due.contains("now") || due.contains("eod") {
-                return .high
-            }
-            if due.contains("tomorrow") || due.contains("week") || due.contains("urgent") {
-                return .medium
-            }
-        }
+        if commitment.status == .atRisk || isOverdue { return .high }
+        if isDueSoon { return .medium }
         return commitment.status == .open ? .medium : .low
     }
 }
@@ -505,22 +517,28 @@ struct ActionItemsView: View {
 
     // MARK: - Stats
 
+    /// Past their real deadline and still open — time-judged, not keyword-judged.
+    private var overdueItems: [AggregatedActionItem] {
+        allItems.filter { $0.isOverdue }
+    }
+
     /// At-risk commitments — the modeled "needs action now" signal.
     private var atRiskItems: [AggregatedActionItem] {
         allItems.filter { $0.commitment.status == .atRisk }
     }
 
-    /// Open commitments whose free-text due hint reads as imminent.
+    /// Due within the next two days by real date (and not already overdue).
     private var dueSoonItems: [AggregatedActionItem] {
-        let imminent = ["today", "now", "eod", "tonight", "tomorrow", "urgent", "asap"]
-        return allItems.filter { item in
-            guard item.commitment.status == .open,
-                  let due = item.commitment.dueHint?.lowercased() else { return false }
-            return imminent.contains { due.contains($0) }
-        }
+        allItems.filter { $0.isDueSoon }
     }
 
-    private var attentionCount: Int { atRiskItems.count + dueSoonItems.count }
+    /// Distinct items needing attention across overdue / at-risk / due-soon.
+    private var attentionCount: Int {
+        var ids = Set(overdueItems.map(\.id))
+        ids.formUnion(atRiskItems.map(\.id))
+        ids.formUnion(dueSoonItems.map(\.id))
+        return ids.count
+    }
 
     private var attentionHeadline: String {
         let n = attentionCount
@@ -529,8 +547,10 @@ struct ActionItemsView: View {
 
     private var attentionDetail: String {
         var parts: [String] = []
+        if !overdueItems.isEmpty { parts.append("\(overdueItems.count) overdue") }
         if !atRiskItems.isEmpty { parts.append("\(atRiskItems.count) at risk") }
-        if !dueSoonItems.isEmpty { parts.append("\(dueSoonItems.count) due soon") }
+        let dueSoonNotAtRisk = dueSoonItems.filter { $0.commitment.status != .atRisk }
+        if !dueSoonNotAtRisk.isEmpty { parts.append("\(dueSoonNotAtRisk.count) due soon") }
         return parts.joined(separator: " · ")
     }
 

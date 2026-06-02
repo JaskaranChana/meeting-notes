@@ -319,39 +319,47 @@ struct TodayView: View {
         let meetingTitle: String
         let meetingDate: Date
         let weight: Int
+        let dueDate: Date?
     }
 
     /// Ranks open commitments across every meeting into the top three things
-    /// worth doing now: at-risk first, then imminent-due, then the rest by
-    /// recency. Fulfilled / superseded items are excluded.
+    /// worth doing now: overdue / at-risk first, then by real deadline, then
+    /// the rest by recency. Fulfilled / superseded items are excluded.
     private var dailyPlan: [DailyPlanItem] {
-        let imminentHigh = ["today", "now", "eod", "tonight"]
-        let imminentMed  = ["tomorrow", "week", "urgent", "asap"]
-        func weight(_ c: Commitment) -> Int? {
+        let now = Date()
+        let cal = Calendar.current
+        let tomorrow = cal.date(byAdding: .day, value: 1, to: now) ?? now
+        let inFiveDays = cal.date(byAdding: .day, value: 5, to: now) ?? now
+
+        func classify(_ c: Commitment, capturedAt: Date) -> (weight: Int, due: Date?)? {
+            let due = DueDateParser.date(from: c.dueHint, capturedAt: capturedAt)
             switch c.status {
             case .fulfilled, .superseded:
                 return nil
             case .atRisk:
-                return 0
+                return (0, due)
             case .open:
-                if let due = c.dueHint?.lowercased() {
-                    if imminentHigh.contains(where: { due.contains($0) }) { return 1 }
-                    if imminentMed.contains(where: { due.contains($0) })  { return 2 }
+                if let due {
+                    if due < now            { return (0, due) }   // overdue
+                    if due <= tomorrow      { return (1, due) }   // today / tomorrow
+                    if due <= inFiveDays    { return (2, due) }   // this week
                 }
-                return 3
+                return (3, due)
             }
         }
+
         return store.meetings
             .flatMap { meeting in
                 meeting.commitments.compactMap { c -> DailyPlanItem? in
-                    guard let w = weight(c) else { return nil }
+                    guard let cls = classify(c, capturedAt: meeting.when) else { return nil }
                     return DailyPlanItem(
                         id: c.id,
                         commitment: c,
                         meetingID: meeting.id,
                         meetingTitle: meeting.title,
                         meetingDate: meeting.when,
-                        weight: w
+                        weight: cls.weight,
+                        dueDate: cls.due
                     )
                 }
             }
@@ -472,7 +480,13 @@ struct TodayView: View {
         }
     }
 
+    private func isOverdue(_ item: DailyPlanItem) -> Bool {
+        guard let due = item.dueDate else { return false }
+        return due < Date()
+    }
+
     private func planIcon(_ item: DailyPlanItem) -> String {
+        if isOverdue(item) { return "clock.badge.exclamationmark.fill" }
         switch item.weight {
         case 0:     return "exclamationmark.triangle.fill"
         case 1, 2:  return "bolt.fill"
@@ -482,9 +496,9 @@ struct TodayView: View {
 
     private func planReason(_ item: DailyPlanItem) -> String {
         let title = item.meetingTitle.isEmpty ? "a meeting" : item.meetingTitle
+        if item.commitment.status == .atRisk { return "At risk · \(title)" }
+        if isOverdue(item) { return "Overdue · \(title)" }
         switch item.weight {
-        case 0:
-            return "At risk · \(title)"
         case 1, 2:
             if let due = item.commitment.dueHint, !due.isEmpty {
                 return "Due \(due) · \(title)"

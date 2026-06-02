@@ -762,6 +762,55 @@ struct RAGResult: Identifiable, Equatable {
     let score: Double
 }
 
+/// Turns a free-text due hint ("Friday", "tomorrow", "eod", "next week") into
+/// an absolute deadline, resolved relative to when the note was captured — so
+/// "due soon" and "overdue" can be judged by real time, not keyword guesses.
+enum DueDateParser {
+    static func date(from hint: String?, capturedAt ref: Date, calendar: Calendar = .current) -> Date? {
+        guard let raw = hint?.lowercased().trimmingCharacters(in: .whitespaces), !raw.isEmpty else { return nil }
+        let startOfRef = calendar.startOfDay(for: ref)
+
+        func endOf(_ day: Date) -> Date {
+            calendar.date(bySettingHour: 23, minute: 59, second: 59, of: day) ?? day
+        }
+        func addingDays(_ n: Int, to day: Date) -> Date {
+            calendar.date(byAdding: .day, value: n, to: day) ?? day
+        }
+
+        if raw.contains("today") || raw.contains("eod") || raw.contains("tonight") || raw.contains("end of day") {
+            return endOf(startOfRef)
+        }
+        if raw.contains("tomorrow") {
+            return endOf(addingDays(1, to: startOfRef))
+        }
+        if raw.contains("end of week") || raw.contains("eow") || raw.contains("this week") {
+            return endOf(nextWeekday(6, onOrAfter: startOfRef, calendar: calendar)) // Friday
+        }
+        if raw.contains("next week") {
+            return endOf(addingDays(7, to: startOfRef))
+        }
+        if raw.contains("next month") || raw.contains("month") {
+            return endOf(addingDays(30, to: startOfRef))
+        }
+
+        let weekdays: [(String, Int)] = [
+            ("sunday", 1), ("monday", 2), ("tuesday", 3), ("wednesday", 4),
+            ("thursday", 5), ("friday", 6), ("saturday", 7)
+        ]
+        for (name, index) in weekdays where raw.contains(name) {
+            return endOf(nextWeekday(index, onOrAfter: startOfRef, calendar: calendar))
+        }
+        return nil
+    }
+
+    /// Next date whose weekday == target (1=Sun … 7=Sat), on or after `from`.
+    private static func nextWeekday(_ target: Int, onOrAfter from: Date, calendar: Calendar) -> Date {
+        let current = calendar.component(.weekday, from: from)
+        let delta = (target - current + 7) % 7
+        return calendar.date(byAdding: .day, value: delta, to: from) ?? from
+    }
+}
+
 enum LocalRAG {
     private static let stopwords: Set<String> = [
         "the", "and", "for", "with", "you", "your", "this", "that", "from",
