@@ -35,7 +35,6 @@
 		A10000000000000000003005 /* VoiceRecorderViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000003006 /* VoiceRecorderViewModel.swift */; };
 		A10000000000000000003007 /* VoiceRecorderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000003008 /* VoiceRecorderView.swift */; };
 		A10000000000000000003009 /* AudioPlaybackControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000003010 /* AudioPlaybackControls.swift */; };
-		A10000000000000000003011 /* CallProviderService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000003012 /* CallProviderService.swift */; };
 		A10000000000000000004001 /* ScribeflowCoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000004002 /* ScribeflowCoreTests.swift */; };
 		A10000000000000000005001 /* RecordingCompliance.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000005002 /* RecordingCompliance.swift */; };
 		A10000000000000000005003 /* RecordingPrivacyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000005004 /* RecordingPrivacyView.swift */; };
@@ -95,7 +94,6 @@
 		A10000000000000000003006 /* VoiceRecorderViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecorderViewModel.swift; sourceTree = "<group>"; };
 		A10000000000000000003008 /* VoiceRecorderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecorderView.swift; sourceTree = "<group>"; };
 		A10000000000000000003010 /* AudioPlaybackControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPlaybackControls.swift; sourceTree = "<group>"; };
-		A10000000000000000003012 /* CallProviderService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallProviderService.swift; sourceTree = "<group>"; };
 		A10000000000000000004002 /* ScribeflowCoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScribeflowCoreTests.swift; sourceTree = "<group>"; };
 		A10000000000000000004003 /* ScribeflowTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ScribeflowTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000005002 /* RecordingCompliance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingCompliance.swift; sourceTree = "<group>"; };
@@ -169,7 +167,6 @@
 				A10000000000000000003006 /* VoiceRecorderViewModel.swift */,
 				A10000000000000000003008 /* VoiceRecorderView.swift */,
 				A10000000000000000003010 /* AudioPlaybackControls.swift */,
-				A10000000000000000003012 /* CallProviderService.swift */,
 				A10000000000000000005002 /* RecordingCompliance.swift */,
 				A10000000000000000005004 /* RecordingPrivacyView.swift */,
 				A10000000000000000006002 /* MeetingIntelligence.swift */,
@@ -330,7 +327,6 @@
 				A10000000000000000003005 /* VoiceRecorderViewModel.swift in Sources */,
 				A10000000000000000003007 /* VoiceRecorderView.swift in Sources */,
 				A10000000000000000003009 /* AudioPlaybackControls.swift in Sources */,
-				A10000000000000000003011 /* CallProviderService.swift in Sources */,
 				A10000000000000000005001 /* RecordingCompliance.swift in Sources */,
 				A10000000000000000005003 /* RecordingPrivacyView.swift in Sources */,
 				A10000000000000000006001 /* MeetingIntelligence.swift in Sources */,
