@@ -22,3 +22,8 @@ Packages/
 .agent/
 .agents/
 qa-artifacts/
+run_agent.sh
+skills-lock.json
+QA_CHECKLIST.md
+*_Mockups.html
+scripts/
