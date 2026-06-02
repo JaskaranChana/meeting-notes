@@ -2770,10 +2770,10 @@ struct MeetingDetailView: View {
                 )
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Transcript coming soon")
+                Text("No transcript for imported audio")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(AppPalette.ink)
-                Text("Automatic transcription for imported audio is rolling out in a future update. You can still play this recording from the Recordings card.")
+                Text("Imported audio isn't transcribed automatically. You can still play this recording from the Recordings card, or record live for an instant transcript.")
                     .font(.footnote)
                     .foregroundStyle(AppPalette.secondaryInk)
                     .fixedSize(horizontal: false, vertical: true)
