@@ -12,6 +12,7 @@ Capture a meeting, and Scribeflow turns rough notes and live speech into a clean
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-Observation-FA7343?logo=swift&logoColor=white)
 ![AI](https://img.shields.io/badge/AI-on--device-1F8A70)
 ![Privacy](https://img.shields.io/badge/data-stays%20local-2E7D71)
+![License](https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey)
 
 </div>
 
@@ -134,6 +135,10 @@ Covers note→intelligence extraction (`MeetingExtractionTests`), due-date resol
 
 Recordings, transcripts, and notes stay on the device — nothing is uploaded to a Scribeflow server. Speech recognition runs on-device; calendar access is optional and used only to pre-fill meeting context.
 
+## License
+
+© 2026 Jaskaran Singh. **All rights reserved.** The source is published for viewing only — see [LICENSE](LICENSE). It is not licensed for reuse, redistribution, or derivative works without written permission.
+
 <div align="center">
-<sub>Built with SwiftUI · on-device AI · made to be remembered.</sub>
+<sub>Built by Jaskaran Singh · SwiftUI · on-device AI · made to be remembered.</sub>
 </div>
