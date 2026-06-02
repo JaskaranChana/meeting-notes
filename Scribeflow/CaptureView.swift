@@ -1,0 +1,1573 @@
+import SwiftUI
+
+/// Unified capture surface.
+///
+/// One screen replaces the previous trio of LiveMeetingView, NewMeetingView,
+/// and (deleted) PhoneCallCaptureView. The user picks **Record** (audio +
+/// live transcript + notes) or **Type** (notes only). Title, notes, and the
+/// Save flow are shared across modes so the mental model collapses to a
+/// single "take a note" affordance.
+///
+/// State engine: a single `LiveMeetingCoordinator` holds title/objective/
+/// notes/transcript regardless of mode. In Type mode we simply never start
+/// the audio engine. On save, we branch:
+/// - audio captured  → `coordinator.saveMeeting(into:)` (preserves transcript)
+/// - text only       → `store.addMeetingWithTransformation(...)` (clean fast path)
+struct CaptureView: View {
+    enum Mode: String, Hashable {
+        case record
+        case type
+    }
+
+    @Environment(MeetingStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Binding var selectedMeetingID: Meeting.ID?
+    @Binding var toast: ToastItem?
+
+    @State private var mode: Mode
+    @State private var coordinator = LiveMeetingCoordinator()
+    @State private var isSaving = false
+    @State private var savedMeetingID: Meeting.ID?
+    @State private var hasAnimatedIn = false
+    @State private var defaultsCleared = false
+    @State private var showingDiscardConfirm = false
+    @State private var auroraDrift = false
+    @State private var recordingStartedAt: Date?
+    @State private var markFlash = false
+    @State private var minutePulse = false
+    @Namespace private var templateNS
+
+    init(
+        initialMode: Mode = .record,
+        selectedMeetingID: Binding<Meeting.ID?>,
+        toast: Binding<ToastItem?>
+    ) {
+        self._mode = State(initialValue: initialMode)
+        self._selectedMeetingID = selectedMeetingID
+        self._toast = toast
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    modePicker
+                        .motionEntrance(step: 0, active: hasAnimatedIn)
+                    titleBlock
+                        .motionEntrance(step: 1, active: hasAnimatedIn)
+                    templateStrip
+                        .motionEntrance(step: 2, active: hasAnimatedIn)
+                    if mode == .record {
+                        recordPanel
+                            .motionEntrance(step: 3, active: hasAnimatedIn)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+                    if mode == .record, showCopilotRail {
+                        MeetingCopilotRail(
+                            meetings: store.meetings,
+                            attendees: attendeeList,
+                            paragraphs: coordinator.transcriptParagraphs,
+                            isRecording: coordinator.isRecording,
+                            onFile: fileCopilotSignal
+                        )
+                        .motionEntrance(step: 4, active: hasAnimatedIn)
+                        .transition(.opacity)
+                    }
+                    notesPanel
+                        .motionEntrance(step: 4, active: hasAnimatedIn)
+                    if mode == .record, !coordinator.transcriptParagraphs.isEmpty {
+                        transcriptPanel
+                            .motionEntrance(step: 5, active: hasAnimatedIn)
+                            .transition(.opacity)
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 16)
+                .padding(.bottom, 40)
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .background(AppPalette.background.ignoresSafeArea())
+            .accessibilityIdentifier("capture.view")
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Close") {
+                        if canSave {
+                            HapticEngine.tap(.light)
+                            showingDiscardConfirm = true
+                        } else {
+                            coordinator.stopCapture()
+                            dismiss()
+                        }
+                    }
+                    .foregroundStyle(AppPalette.ink)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(isSaving ? "Saving…" : "Save") {
+                        saveAndClose()
+                    }
+                    .disabled(!canSave || isSaving)
+                    .fontWeight(.semibold)
+                    .tint(canSave && !isSaving ? AppPalette.accent : AppPalette.secondaryInk.opacity(0.45))
+                    .accessibilityIdentifier("capture.saveButton")
+                }
+            }
+            .confirmationDialog(
+                "Discard this capture?",
+                isPresented: $showingDiscardConfirm,
+                titleVisibility: .visible
+            ) {
+                Button("Discard", role: .destructive) {
+                    HapticEngine.notify(.warning)
+                    coordinator.stopCapture()
+                    dismiss()
+                }
+                Button("Keep editing", role: .cancel) {}
+            } message: {
+                Text("Your title, notes, and any transcript haven't been saved. This can't be undone.")
+            }
+        }
+        .modifier(ScribeflowChrome())
+        .sensoryFeedback(trigger: coordinator.isRecording) { _, new in
+            new ? .impact(weight: .heavy) : .impact(weight: .light)
+        }
+        .sensoryFeedback(.success, trigger: savedMeetingID)
+        .task {
+            clearDefaultsOnce()
+            consumeUpcomingTitleIfNeeded()
+            if mode == .record {
+                await coordinator.prepare()
+            }
+            hasAnimatedIn = true
+        }
+        .onDisappear {
+            coordinator.stopCapture()
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
+        .onChange(of: coordinator.isRecording) { _, isRec in
+            // Keep the screen awake through a live meeting; capture the start
+            // time for the session stamp.
+            UIApplication.shared.isIdleTimerDisabled = isRec
+            recordingStartedAt = isRec ? .now : nil
+        }
+        .onChange(of: coordinator.elapsedSeconds) { _, secs in
+            // A soft tick + micro-pulse at each whole minute — a calm sense of
+            // time passing, never a distraction.
+            guard coordinator.isRecording, !coordinator.isPaused, secs > 0, secs % 60 == 0 else { return }
+            HapticEngine.tap(.light)
+            minutePulse = true
+            Task {
+                try? await Task.sleep(for: .milliseconds(240))
+                minutePulse = false
+            }
+        }
+        .onChange(of: mode) { _, newMode in
+            if newMode == .record {
+                Task { await coordinator.prepare() }
+            } else if coordinator.isRecording {
+                coordinator.stopCapture()
+            }
+        }
+        .onChange(of: savedMeetingID) { _, newID in
+            // Saved-flow collapse: skip the intermediate MeetingSavedSheet.
+            // Land the user back in the host with a success toast; the
+            // host's `selectedMeetingID` binding routes them to the meeting
+            // detail if they're on Library.
+            guard let id = newID else { return }
+            selectedMeetingID = id
+            toast = ToastItem(message: "Saved — find it in Library", icon: "checkmark.seal.fill")
+            HapticEngine.notify(.success)
+            dismiss()
+        }
+    }
+
+    // MARK: Mode picker
+
+    private var modePicker: some View {
+        HStack(spacing: 4) {
+            modePill(.record, label: "Record", icon: "waveform.badge.mic")
+            modePill(.type, label: "Type", icon: "square.and.pencil")
+        }
+        .padding(4)
+        .background(AppPalette.softSurface, in: Capsule())
+        .overlay(Capsule().strokeBorder(AppPalette.border.opacity(0.25), lineWidth: 0.5))
+    }
+
+    private func modePill(_ pill: Mode, label: String, icon: String) -> some View {
+        Button {
+            HapticEngine.tap(.light)
+            withAnimation(AppMotion.smooth) { mode = pill }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.footnote.weight(.bold))
+                Text(label)
+                    .font(.subheadline.weight(.semibold))
+            }
+            .foregroundStyle(mode == pill ? .white : AppPalette.secondaryInk)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(
+                ZStack {
+                    if mode == pill {
+                        Capsule()
+                            .fill(
+                                LinearGradient(
+                                    colors: [
+                                        AppPalette.accent,
+                                        Color(red: 0.047, green: 0.298, blue: 0.329)
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                    }
+                }
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("capture.mode.\(pill.rawValue)")
+    }
+
+    // MARK: Title block
+
+    private var titleBlock: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField(
+                "",
+                text: $coordinator.title,
+                prompt: Text(mode == .record ? "Meeting title" : "Note title")
+                    .foregroundStyle(AppPalette.ink.opacity(0.42))
+            )
+            .scaledFont(size: 28, weight: .medium, design: .serif, relativeTo: .title)
+            .foregroundStyle(AppPalette.ink)
+            .accessibilityIdentifier("capture.titleField")
+
+            HStack(alignment: .top, spacing: 8) {
+                TextField(
+                    "",
+                    text: $coordinator.objective,
+                    prompt: Text("What is this about?")
+                        .foregroundStyle(AppPalette.secondaryInk.opacity(0.55)),
+                    axis: .vertical
+                )
+                .font(.subheadline)
+                .foregroundStyle(AppPalette.secondaryInk)
+                .lineLimit(2)
+                .accessibilityIdentifier("capture.objectiveField")
+
+                if coordinator.title.isEmpty,
+                   !coordinator.manualNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Button {
+                        coordinator.title = suggestedMeetingTitle(
+                            objective: coordinator.objective,
+                            notes: coordinator.manualNotes,
+                            fallback: mode == .record ? "Meeting" : "Note"
+                        )
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "sparkles")
+                                .font(.caption2.weight(.bold))
+                            Text("Suggest")
+                                .font(.caption.weight(.semibold))
+                        }
+                        .foregroundStyle(AppPalette.accent)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            if mode == .record {
+                HStack(spacing: 7) {
+                    Image(systemName: "person.2")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(AppPalette.secondaryInk.opacity(0.7))
+                    TextField(
+                        "",
+                        text: $coordinator.attendees,
+                        prompt: Text("Who's here? (comma-separated — powers Copilot recall)")
+                            .foregroundStyle(AppPalette.secondaryInk.opacity(0.5))
+                    )
+                    .font(.subheadline)
+                    .foregroundStyle(AppPalette.secondaryInk)
+                    .accessibilityIdentifier("capture.attendeesField")
+                }
+            }
+        }
+    }
+
+    // MARK: Record panel
+
+    /// Spoken-word green used on the dark capture stage (matches design).
+    static let captureGreen = Color(red: 0.490, green: 0.820, blue: 0.639) // #7DD1A3
+
+    private var transcribedWordCount: Int {
+        coordinator.transcriptParagraphs.reduce(0) { $0 + $1.split(whereSeparator: { $0 == " " }).count }
+    }
+
+    /// Most recent meaningful spoken line, for the on-stage live caption.
+    private var liveCaptionText: String? {
+        coordinator.transcriptParagraphs.last { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    /// Stage accent shifts with the chosen template — subtle personalization
+    /// kept inside the brand family so it never reads as noise.
+    private var stageTint: Color {
+        switch coordinator.selectedTemplate {
+        case .discovery, .interview: return AppPalette.accent
+        case .exec, .brainstorm:     return AppPalette.gold
+        case .manager:               return AppPalette.accentDeep
+        case .standup:               return Self.captureGreen
+        }
+    }
+
+    /// One calm status line under the timer that adapts to what's happening.
+    private var stageStatus: String {
+        guard coordinator.isRecording else { return "Tap the mic to begin" }
+        if coordinator.isPaused { return "Paused — resume when ready" }
+        let words = transcribedWordCount
+        return words == 0 ? "Listening…" : "\(words) words · listening"
+    }
+
+    /// Bookmark the current moment with a confirming flash + haptic.
+    private func flashMark() {
+        HapticEngine.notify(.success)
+        coordinator.bookmarkCurrentMoment()
+        withAnimation(AppMotion.snappy) { markFlash = true }
+        Task {
+            try? await Task.sleep(for: .seconds(0.9))
+            withAnimation(AppMotion.fade) { markFlash = false }
+        }
+    }
+
+    /// Dark recording stage: ambient teal glow, recording pill, big mono timer,
+    /// live input waveform, and the record toggle.
+    private var recordPanel: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            // Header — eyebrow + recording / ready pill
+            HStack(alignment: .center) {
+                Text("LIVE CAPTURE · \(coordinator.selectedTemplate.title.uppercased())")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .kerning(0.9)
+                    .foregroundStyle(.white.opacity(0.45))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                if coordinator.isRecording {
+                    let paused = coordinator.isPaused
+                    HStack(spacing: 6) {
+                        if paused {
+                            Image(systemName: "pause.fill")
+                                .font(.system(size: 8, weight: .black))
+                                .foregroundStyle(AppPalette.gold)
+                        } else {
+                            Circle()
+                                .fill(AppPalette.coral)
+                                .frame(width: 6, height: 6)
+                                .shadow(color: AppPalette.coral, radius: 5)
+                        }
+                        Text(paused ? "PAUSED" : "RECORDING")
+                            .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                            .kerning(0.9)
+                            .foregroundStyle(paused ? AppPalette.gold : AppPalette.coral)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background((paused ? AppPalette.gold : AppPalette.coral).opacity(0.20), in: Capsule())
+                } else {
+                    Text("READY")
+                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                        .kerning(0.9)
+                        .foregroundStyle(Self.captureGreen)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Self.captureGreen.opacity(0.16), in: Capsule())
+                }
+            }
+
+            // Big timer
+            VStack(alignment: .leading, spacing: 8) {
+                Text(coordinator.elapsedLabel)
+                    .scaledFont(size: 60, weight: .regular, design: .monospaced, relativeTo: .largeTitle)
+                    .foregroundStyle(.white)
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                    .scaleEffect(minutePulse ? 1.04 : 1.0, anchor: .leading)
+                    .animation(AppMotion.bounce, value: minutePulse)
+                HStack(spacing: 8) {
+                    Text(stageStatus)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .kerning(0.6)
+                        .foregroundStyle(.white.opacity(0.4))
+                    if let started = recordingStartedAt {
+                        Text("· started \(started.formatted(date: .omitted, time: .shortened))")
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .kerning(0.6)
+                            .foregroundStyle(.white.opacity(0.28))
+                    }
+                }
+            }
+
+            // Live caption — the most recent spoken line surfaced large on the
+            // stage, teleprompter-style, for an immersive in-the-moment read.
+            if coordinator.isRecording, let latest = liveCaptionText {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("LIVE CAPTION")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .kerning(0.8)
+                        .foregroundStyle(Self.captureGreen.opacity(0.7))
+                    Text(latest)
+                        .font(.system(size: 18, weight: .medium, design: .serif))
+                        .foregroundStyle(.white.opacity(0.92))
+                        .lineSpacing(3)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .id(latest)
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .offset(y: 8)),
+                            removal: .opacity
+                        ))
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 2)
+                .contentShape(Rectangle())
+                .onTapGesture { flashMark() }
+                .accessibilityHint("Tap to mark this moment")
+                .animation(AppMotion.smooth, value: latest)
+            }
+
+            // Waveform card
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("INPUT · MIC")
+                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                        .kerning(0.6)
+                        .foregroundStyle(.white.opacity(0.45))
+                    Spacer()
+                    Text(coordinator.isRecording ? "● LIVE" : "● IDLE")
+                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                        .kerning(0.6)
+                        .foregroundStyle(coordinator.isRecording ? Self.captureGreen : .white.opacity(0.35))
+                }
+                // Isolated leaf — reads inputLevel itself, so the ~12Hz level
+                // updates re-render only the waveform, not the whole stage.
+                LiveWaveform(coordinator: coordinator)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(height: 36)
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+            )
+
+            if coordinator.isRecording {
+                liveControls
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+
+            if !coordinator.bookmarks.isEmpty {
+                bookmarksStrip
+                    .transition(.opacity)
+            }
+
+            if coordinator.catchUpSummary != nil {
+                catchUpCard
+                    .transition(.opacity.combined(with: .scale(scale: 0.97)))
+            }
+
+            if let errorMessage = coordinator.errorMessage {
+                Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(AppPalette.coral)
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(AppPalette.coral.opacity(0.16), in: RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous))
+            }
+
+            // Record toggle, centered — flanked by Pause while live so the mic
+            // stays optically centered.
+            HStack(spacing: 20) {
+                Spacer()
+                if coordinator.isRecording {
+                    pauseButton
+                }
+                recordToggleButton
+                if coordinator.isRecording {
+                    Color.clear.frame(width: 52, height: 52)
+                }
+                Spacer()
+            }
+            .padding(.top, 2)
+
+            // On-device trust cue — quiet, always reassuring.
+            HStack(spacing: 6) {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 9, weight: .bold))
+                Text("Recording stays on this device")
+                    .font(.system(size: 10.5, weight: .medium))
+            }
+            .foregroundStyle(.white.opacity(0.3))
+            .frame(maxWidth: .infinity)
+        }
+        .padding(22)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(recordPanelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: AppRadius.xl, style: .continuous))
+        .overlay(alignment: .top) {
+            // Ambient elapsed hairline — fills gently over the hour.
+            if coordinator.isRecording {
+                GeometryReader { geo in
+                    Capsule()
+                        .fill(stageTint.opacity(0.85))
+                        .frame(width: geo.size.width * min(1, Double(coordinator.elapsedSeconds) / 3600.0), height: 2)
+                        .animation(.linear(duration: 1), value: coordinator.elapsedSeconds)
+                }
+                .frame(height: 2)
+            }
+        }
+        .overlay {
+            if markFlash {
+                VStack(spacing: 10) {
+                    Image(systemName: "bookmark.fill")
+                        .font(.system(size: 34, weight: .bold))
+                        .foregroundStyle(Self.captureGreen)
+                    Text("Moment marked")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                }
+                .padding(28)
+                .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous))
+                .transition(.scale(scale: 0.9).combined(with: .opacity))
+            }
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.xl, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+        )
+        .appShadow(coordinator.isRecording ? AppShadow.hero : AppShadow.floating)
+        .animation(AppMotion.smooth, value: coordinator.isRecording)
+        .animation(AppMotion.smooth, value: coordinator.isPaused)
+        .animation(AppMotion.smooth, value: coordinator.bookmarks.count)
+        .animation(AppMotion.smooth, value: coordinator.catchUpSummary)
+        .onAppear(perform: startAurora)
+    }
+
+    private func startAurora() {
+        // Aurora is rendered statically — animating a blurred layer forces a
+        // per-frame re-rasterization that isn't worth the cost. The depth reads
+        // fine held still.
+    }
+
+    // MARK: Live controls (during recording)
+
+    private var liveControls: some View {
+        HStack(spacing: 10) {
+            liveControlButton(
+                icon: "bookmark.fill",
+                label: "Mark moment",
+                tint: Self.captureGreen
+            ) {
+                flashMark()
+            }
+            liveControlButton(
+                icon: coordinator.isGeneratingCatchUp ? "ellipsis" : "sparkles",
+                label: coordinator.isGeneratingCatchUp ? "Summarizing…" : "Catch me up",
+                tint: AppPalette.accent
+            ) {
+                HapticEngine.tap(.medium)
+                Task { await coordinator.generateCatchUp() }
+            }
+            .disabled(coordinator.isGeneratingCatchUp)
+        }
+    }
+
+    private func liveControlButton(
+        icon: String,
+        label: String,
+        tint: Color,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Image(systemName: icon)
+                    .font(.footnote.weight(.bold))
+                    .contentTransition(.symbolEffect(.replace))
+                Text(label)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+            }
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(Color.white.opacity(0.06), in: Capsule())
+            .overlay(Capsule().strokeBorder(tint.opacity(0.45), lineWidth: 1))
+        }
+        .buttonStyle(PressScaleButtonStyle(scale: 0.96))
+        .accessibilityLabel(label)
+    }
+
+    private var bookmarksStrip: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("MARKED MOMENTS · \(coordinator.bookmarks.count)")
+                .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                .kerning(0.6)
+                .foregroundStyle(.white.opacity(0.45))
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(coordinator.bookmarks) { bookmark in
+                        Button {
+                            HapticEngine.tap(.light)
+                            coordinator.removeBookmark(bookmark)
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "bookmark.fill")
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundStyle(Self.captureGreen)
+                                Text(bookmark.text)
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(.white.opacity(0.85))
+                                    .lineLimit(1)
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundStyle(.white.opacity(0.4))
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Color.white.opacity(0.05), in: Capsule())
+                            .overlay(Capsule().strokeBorder(.white.opacity(0.10), lineWidth: 0.8))
+                        }
+                        .buttonStyle(.plain)
+                        .frame(maxWidth: 230)
+                        .accessibilityLabel("Marked moment: \(bookmark.text). Tap to remove.")
+                    }
+                }
+            }
+            .scrollClipDisabled()
+        }
+    }
+
+    private var catchUpCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(AppPalette.accent)
+                Text("CATCH ME UP")
+                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                    .kerning(0.6)
+                    .foregroundStyle(.white.opacity(0.55))
+                Spacer()
+                Button {
+                    HapticEngine.tap(.light)
+                    coordinator.catchUpSummary = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.35))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Dismiss catch-up")
+            }
+            Text(coordinator.catchUpSummary ?? "")
+                .font(.system(size: 14))
+                .foregroundStyle(.white.opacity(0.9))
+                .lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            AppPalette.accent.opacity(0.12),
+            in: RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
+                .strokeBorder(AppPalette.accent.opacity(0.30), lineWidth: 1)
+        )
+    }
+
+    private var pauseButton: some View {
+        Button {
+            HapticEngine.tap(.light)
+            withAnimation(AppMotion.snappy) {
+                if coordinator.isPaused { coordinator.resumeCapture() }
+                else { coordinator.pauseCapture() }
+            }
+        } label: {
+            Image(systemName: coordinator.isPaused ? "play.fill" : "pause.fill")
+                .font(.title3.weight(.bold))
+                .foregroundStyle(.white)
+                .frame(width: 52, height: 52)
+                .background(Color.white.opacity(0.08), in: Circle())
+                .overlay(Circle().strokeBorder(.white.opacity(0.16), lineWidth: 1))
+                .contentTransition(.symbolEffect(.replace))
+        }
+        .buttonStyle(PressScaleButtonStyle(scale: 0.92))
+        .accessibilityLabel(coordinator.isPaused ? "Resume recording" : "Pause recording")
+    }
+
+    private var recordToggleButton: some View {
+        Button {
+            HapticEngine.tap(.medium)
+            Task {
+                if coordinator.isRecording {
+                    coordinator.stopCapture()
+                } else {
+                    await coordinator.startCapture()
+                }
+            }
+        } label: {
+            ZStack {
+                // Voice-reactive ring — tracks live input level in real time.
+                // Isolated leaf so per-frame level updates don't re-render the
+                // button (or its parent) — only this ring repaints.
+                if coordinator.isRecording {
+                    ReactiveRing(coordinator: coordinator)
+                }
+                recordButtonCore
+            }
+        }
+        .buttonStyle(PressScaleButtonStyle(scale: 0.92))
+        .accessibilityLabel(coordinator.isRecording ? "Stop recording" : "Start recording")
+        .accessibilityIdentifier("capture.recordToggle")
+    }
+
+    private var recordButtonCore: some View {
+            ZStack {
+                if coordinator.isRecording {
+                    Circle()
+                        .stroke(AppPalette.coral.opacity(0.30), lineWidth: 2)
+                        .frame(width: 80, height: 80)
+                        .scaleEffect(coordinator.isRecording ? 1.3 : 0.9)
+                        .opacity(coordinator.isRecording ? 0 : 1)
+                        .animation(AppMotion.breathe, value: coordinator.isRecording)
+                        .allowsHitTesting(false)
+                }
+                Circle()
+                    .fill(
+                        coordinator.isRecording
+                            ? AnyShapeStyle(
+                                LinearGradient(
+                                    colors: [AppPalette.coral, Color(red: 0.55, green: 0.20, blue: 0.16)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            : AnyShapeStyle(AppPalette.accentButton)
+                    )
+                    .frame(width: 64, height: 64)
+                    .shadow(
+                        color: (coordinator.isRecording ? AppPalette.coral : AppPalette.accent).opacity(0.22),
+                        radius: 12,
+                        y: 5
+                    )
+                Image(systemName: coordinator.isRecording ? "stop.fill" : "mic.fill")
+                    .font(.title2.weight(.bold))
+                    .foregroundStyle(.white)
+                    .contentTransition(.symbolEffect(.replace))
+                    .symbolEffect(.bounce, value: coordinator.isRecording)
+            }
+            .drawingGroup()
+    }
+
+    @ViewBuilder
+    private var recordPanelBackground: some View {
+        ZStack {
+            // Near-black stage
+            Color(red: 0.059, green: 0.067, blue: 0.082) // #0F1115
+
+            // Cinematic aurora — two soft color fields slowly drifting in
+            // opposition for depth that never sits still.
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [AppPalette.accent.opacity(0.30), .clear],
+                        center: .center, startRadius: 0, endRadius: 150
+                    )
+                )
+                .frame(width: 300, height: 300)
+                .blur(radius: 44)
+                .offset(x: auroraDrift ? -70 : 50, y: auroraDrift ? -150 : -110)
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [stageTint.opacity(0.18), .clear],
+                        center: .center, startRadius: 0, endRadius: 130
+                    )
+                )
+                .frame(width: 240, height: 240)
+                .blur(radius: 46)
+                .offset(x: auroraDrift ? 90 : -40, y: auroraDrift ? 60 : 130)
+                .animation(AppMotion.smooth, value: stageTint)
+
+            // Voice-reactive halo — brightens and swells with the live input
+            // level so the stage breathes with the speaker. Isolated leaf so
+            // the level updates don't re-render the whole stage background.
+            if coordinator.isRecording {
+                ReactiveHalo(coordinator: coordinator)
+            }
+
+            // Edge vignette — focuses the eye on the timer/controls and reads
+            // as a finished, cinematic surface.
+            RadialGradient(
+                colors: [.clear, .black.opacity(0.28)],
+                center: .center, startRadius: 130, endRadius: 360
+            )
+        }
+        .allowsHitTesting(false)
+    }
+
+    // MARK: Notes panel
+
+    private var notesPanel: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "square.and.pencil")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(AppPalette.accent)
+                Text("NOTES")
+                    .font(.caption2.weight(.heavy))
+                    .kerning(1.4)
+                    .foregroundStyle(AppPalette.secondaryInk)
+                Spacer()
+                if !coordinator.manualNotes.isEmpty {
+                    let chars = coordinator.manualNotes.count
+                    Text("\(chars)")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(AppPalette.tertiaryInk)
+                        .monospacedDigit()
+                        .contentTransition(.numericText())
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 14)
+            .padding(.bottom, 4)
+
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: $coordinator.manualNotes)
+                    .font(.body)
+                    .foregroundStyle(AppPalette.ink)
+                    .scrollContentBackground(.hidden)
+                    .frame(minHeight: 240)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 6)
+                    .accessibilityIdentifier("capture.notesField")
+
+                if coordinator.manualNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text("Bullets, decisions, owners, risks…")
+                        .font(.body)
+                        .foregroundStyle(AppPalette.secondaryInk.opacity(0.42))
+                        .padding(.top, 14)
+                        .padding(.leading, 17)
+                        .allowsHitTesting(false)
+                }
+            }
+
+            Divider()
+                .background(AppPalette.divider.opacity(0.4))
+
+            HStack(spacing: 12) {
+                Text(mode == .record ? "Write while you record" : "Capture decisions, owners, risks")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(AppPalette.secondaryInk)
+
+                Spacer()
+
+                VoiceNoteButton { transcribed in
+                    let prefix = coordinator.manualNotes.isEmpty ? "" : "\n"
+                    coordinator.manualNotes += prefix + transcribed
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+
+            if coordinator.manualNotes.count > 12 {
+                SmartNotesPreview(
+                    notes: coordinator.manualNotes,
+                    transcriptTail: Array(coordinator.transcriptParagraphs.suffix(12)),
+                    attendees: attendeeList
+                )
+                .equatable()
+                .padding(.horizontal, 12)
+                .padding(.bottom, 12)
+            }
+        }
+        .background(AppPalette.paper, in: RoundedRectangle(cornerRadius: AppRadius.xl, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.xl, style: .continuous)
+                .strokeBorder(AppPalette.border.opacity(0.55), lineWidth: 0.8)
+        )
+        .appShadow(AppShadow.soft)
+    }
+
+    // MARK: Transcript panel (live)
+
+    private var transcriptPanel: some View {
+        let visible = Array(coordinator.transcriptParagraphs.suffix(6).enumerated())
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center) {
+                Text("LIVE POLISH")
+                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                    .kerning(0.9)
+                    .foregroundStyle(.white.opacity(0.45))
+                Spacer()
+                HStack(spacing: 5) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Self.captureGreen)
+                    Text("APPLE INTELLIGENCE")
+                        .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                        .kerning(0.6)
+                        .foregroundStyle(Self.captureGreen)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(AppPalette.accent.opacity(0.30), in: Capsule())
+                .overlay(Capsule().strokeBorder(Self.captureGreen.opacity(0.25), lineWidth: 1))
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(visible, id: \.offset) { offset, paragraph in
+                    let isLast = offset == visible.count - 1
+                    Text(paragraph)
+                        .font(.system(size: 15, design: .serif))
+                        .foregroundStyle(.white.opacity(isLast ? 0.92 : 0.7))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .scale(scale: 0.96, anchor: .leading)).combined(with: .offset(y: 6)),
+                            removal: .opacity
+                        ))
+                }
+            }
+            .animation(AppMotion.smooth, value: coordinator.transcriptParagraphs.count)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: AppRadius.xl, style: .continuous)
+                .fill(Color(red: 0.078, green: 0.086, blue: 0.102)) // #14161A
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.xl, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.07), lineWidth: 1)
+        )
+    }
+
+    // MARK: Save / helpers
+
+    private var canSave: Bool {
+        let hasNotes = !coordinator.manualNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasTranscript = !coordinator.transcriptParagraphs.isEmpty
+        let hasTitle = !coordinator.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return hasNotes || hasTranscript || hasTitle
+    }
+
+    /// The shared coordinator ships with placeholder defaults appropriate
+    /// for the old live-meeting flow. Clear them once on first appear so
+    /// the user sees real empty prompts in both modes.
+    private func clearDefaultsOnce() {
+        guard !defaultsCleared else { return }
+        defaultsCleared = true
+        if coordinator.title == "Live meeting" { coordinator.title = "" }
+        if coordinator.objective == "Capture the key points while I stay present in the meeting." {
+            coordinator.objective = ""
+        }
+    }
+
+    /// Pull a preset title from Home's "Capture" tap on an upcoming calendar
+    /// event. The context is single-shot so subsequent captures start blank.
+    private func consumeUpcomingTitleIfNeeded() {
+        guard coordinator.title.isEmpty else { return }
+        if let preset = UpcomingCaptureContext.shared.consume() {
+            coordinator.title = preset
+        }
+    }
+
+    // MARK: Template strip
+
+    /// Horizontal chip strip letting the user pick the meeting type up front.
+    /// Mirrors Granola's "what kind of meeting?" prompt so the AI scaffolding
+    /// matches the conversation (sales discovery vs. 1:1 coaching vs. standup).
+    /// Defaults to "Discovery" — overwriting on selection is one tap.
+    private var templateStrip: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("TEMPLATE")
+                .font(.caption2.weight(.medium))
+                .kerning(0.6)
+                .foregroundStyle(AppPalette.tertiaryInk)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(NoteTemplate.allCases) { template in
+                        templateChip(template)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            Text(coordinator.selectedTemplate.description)
+                .font(.caption)
+                .foregroundStyle(AppPalette.tertiaryInk)
+                .lineLimit(1)
+                .contentTransition(.opacity)
+                .animation(AppMotion.smooth, value: coordinator.selectedTemplate)
+        }
+    }
+
+    private func templateChip(_ template: NoteTemplate) -> some View {
+        let selected = coordinator.selectedTemplate == template
+        return Button {
+            HapticEngine.tap(.light)
+            withAnimation(AppMotion.snappy) { coordinator.selectedTemplate = template }
+        } label: {
+            Text(template.title)
+                .font(.caption.weight(selected ? .semibold : .medium))
+                .foregroundStyle(selected ? .white : AppPalette.secondaryInk)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .background {
+                    if selected {
+                        Capsule().fill(AppPalette.accentButton)
+                            .matchedGeometryEffect(id: "template.pill", in: templateNS)
+                    } else {
+                        Capsule().fill(AppPalette.softSurface.opacity(0.6))
+                    }
+                }
+        }
+        .buttonStyle(PressScaleButtonStyle())
+        .accessibilityLabel("\(template.title) template")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func saveAndClose() {
+        guard !isSaving else { return }
+        isSaving = true
+
+        Task {
+            if coordinator.isRecording {
+                coordinator.stopCapture()
+            }
+
+            let hasAudio = !coordinator.transcriptParagraphs.isEmpty || mode == .record
+            let id: Meeting.ID
+            if hasAudio && !coordinator.transcriptParagraphs.isEmpty {
+                // Recorded path — preserve transcript + audio metadata.
+                id = await coordinator.saveMeeting(into: store)
+            } else {
+                // Text-only path — quick clean save with Apple Intelligence polish.
+                let finalTitle = coordinator.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "Untitled note"
+                    : coordinator.title
+                let finalObjective = coordinator.objective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "Capture decisions and follow-up clearly."
+                    : coordinator.objective
+                id = await store.addMeetingWithTransformation(
+                    title: finalTitle,
+                    workspace: "Personal workspace",
+                    attendees: [],
+                    objective: finalObjective,
+                    notes: coordinator.manualNotes
+                )
+            }
+
+            isSaving = false
+            savedMeetingID = id
+        }
+    }
+
+    // MARK: Copilot rail
+
+    private var attendeeList: [String] {
+        coordinator.attendees
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// Cheap gate for showing the rail — avoids scanning every meeting on each
+    /// (50Hz) waveform-driven body render. The rail subview itself decides
+    /// section contents, and only re-renders when its inputs actually change.
+    private var showCopilotRail: Bool {
+        coordinator.isRecording
+            || !attendeeList.isEmpty
+            || !coordinator.transcriptParagraphs.isEmpty
+    }
+
+    /// Drop a Copilot signal into the running notes as a labeled bullet.
+    private func fileCopilotSignal(_ signal: CopilotSignal) {
+        let prefix: String
+        switch signal.kind {
+        case .remember: prefix = "Carryover:"
+        case .decision: prefix = "Decision:"
+        case .action:   prefix = "Action:"
+        case .ask:      prefix = "Ask:"
+        }
+        let bullet = "- \(prefix) \(signal.text)"
+        if coordinator.manualNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            coordinator.manualNotes = bullet
+        } else {
+            coordinator.manualNotes += "\n\(bullet)"
+        }
+        toast = ToastItem(message: "Added to notes", icon: "plus.circle.fill")
+    }
+}
+
+// MARK: - Smart Notes preview
+
+/// The "messy notes → clean structure" moment, live and on-device. Runs the
+/// same text-aware extractor that powers the saved meeting, so what you see
+/// while typing is exactly what gets captured. Equatable on its inputs so it
+/// only re-derives when the notes / transcript / attendees actually change.
+struct SmartNotesPreview: View, Equatable {
+    let notes: String
+    let transcriptTail: [String]
+    let attendees: [String]
+
+    static func == (lhs: SmartNotesPreview, rhs: SmartNotesPreview) -> Bool {
+        lhs.notes == rhs.notes
+            && lhs.transcriptTail == rhs.transcriptTail
+            && lhs.attendees == rhs.attendees
+    }
+
+    private var meeting: Meeting {
+        Meeting(
+            title: "",
+            workspace: "Personal",
+            when: .now,
+            durationMinutes: 0,
+            attendees: attendees,
+            status: .ready,
+            stage: "",
+            objective: "",
+            rawNotes: notes,
+            transcript: transcriptTail.map { TranscriptLine(speaker: "You", role: "", text: $0) },
+            summaries: [],
+            prompts: [],
+            destinations: [],
+            selectedTemplate: .discovery,
+            selectedPromptID: nil,
+            isPinned: false
+        )
+    }
+
+    var body: some View {
+        let decisions = MeetingIntelligenceEngine.decisions(for: meeting, limit: 3)
+        let actions = MeetingIntelligenceEngine.structuredActions(for: meeting, limit: 4)
+
+        if !decisions.isEmpty || !actions.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 6) {
+                    Image(systemName: "wand.and.stars").font(.caption2.weight(.bold))
+                    Text("SMART NOTES").font(.caption2.weight(.bold)).tracking(1.0)
+                    Spacer()
+                    Text("on-device").font(.caption2.weight(.medium)).foregroundStyle(AppPalette.tertiaryInk)
+                }
+                .foregroundStyle(AppPalette.accent)
+
+                if !decisions.isEmpty {
+                    smartSection(icon: "checkmark.seal.fill", label: "Decisions", tint: AppPalette.accent)
+                    ForEach(decisions, id: \.self) { decision in
+                        smartBullet(decision, tint: AppPalette.accent)
+                    }
+                }
+
+                if !actions.isEmpty {
+                    smartSection(icon: "arrow.right.circle.fill", label: "Actions", tint: AppPalette.gold)
+                    ForEach(actions) { action in
+                        actionRow(action)
+                    }
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(AppPalette.accentSoft.opacity(0.45), in: RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
+                    .strokeBorder(AppPalette.accent.opacity(0.18), lineWidth: 0.8)
+            )
+            .transition(.opacity)
+        }
+    }
+
+    private func smartSection(icon: String, label: String, tint: Color) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon).font(.caption2.weight(.bold))
+            Text(label.uppercased()).font(.caption2.weight(.bold)).tracking(0.8)
+        }
+        .foregroundStyle(tint)
+    }
+
+    private func smartBullet(_ text: String, tint: Color) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Circle().fill(tint).frame(width: 5, height: 5).padding(.top, 6)
+            Text(text)
+                .font(.system(size: 13))
+                .foregroundStyle(AppPalette.ink)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func actionRow(_ action: ExtractedActionItem) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .top, spacing: 8) {
+                Circle().fill(AppPalette.gold).frame(width: 5, height: 5).padding(.top, 6)
+                Text(action.text)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(AppPalette.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 6) {
+                metaChip(
+                    icon: action.owner == "You" ? "person.fill" : "person",
+                    text: action.owner == "Owner not named" ? "Unassigned" : action.owner,
+                    tint: action.owner == "Owner not named" ? AppPalette.secondaryInk : AppPalette.accent
+                )
+                if let due = action.dueHint {
+                    metaChip(icon: "clock", text: due.capitalized, tint: AppPalette.coral)
+                }
+            }
+            .padding(.leading, 13)
+        }
+    }
+
+    private func metaChip(icon: String, text: String, tint: Color) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon).font(.system(size: 9, weight: .bold))
+            Text(text).font(.system(size: 11, weight: .semibold))
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(tint.opacity(0.12), in: Capsule())
+    }
+}
+
+// MARK: - Live level leaves
+
+/// The mic waveform. Reads `inputLevel` itself so the high-frequency level
+/// stream re-renders only this view, not the whole capture stage.
+private struct LiveWaveform: View {
+    let coordinator: LiveMeetingCoordinator
+    var body: some View {
+        MicLevelMeter(
+            level: coordinator.isRecording ? coordinator.inputLevel : 0,
+            color: CaptureView.captureGreen,
+            bars: 36,
+            maxHeight: 36
+        )
+    }
+}
+
+/// Voice-reactive background halo, isolated from the stage so level updates
+/// don't re-render the whole panel background.
+private struct ReactiveHalo: View {
+    let coordinator: LiveMeetingCoordinator
+    var body: some View {
+        Circle()
+            .fill(
+                RadialGradient(
+                    colors: [CaptureView.captureGreen.opacity(0.08 + coordinator.inputLevel * 0.30), .clear],
+                    center: .center, startRadius: 0, endRadius: 150
+                )
+            )
+            .frame(width: 300, height: 260)
+            .scaleEffect(0.85 + coordinator.inputLevel * 0.45)
+            .blur(radius: 26)
+            .offset(y: -120)
+            .animation(.easeOut(duration: 0.18), value: coordinator.inputLevel)
+    }
+}
+
+/// Voice-reactive ring around the record button, isolated for the same reason.
+private struct ReactiveRing: View {
+    let coordinator: LiveMeetingCoordinator
+    var body: some View {
+        Circle()
+            .stroke(CaptureView.captureGreen.opacity(0.45), lineWidth: 2.5)
+            .frame(width: 72, height: 72)
+            .scaleEffect(1.0 + coordinator.inputLevel * 0.6)
+            .opacity(0.25 + coordinator.inputLevel * 0.55)
+            .animation(.easeOut(duration: 0.15), value: coordinator.inputLevel)
+            .allowsHitTesting(false)
+    }
+}
+
+// MARK: - Copilot rail
+
+/// Live Copilot rail. Isolated as its own view so it recomputes its (meeting-
+/// scanning) signals only when its inputs change — not on every waveform tick
+/// that re-renders the parent capture screen.
+private struct MeetingCopilotRail: View {
+    let meetings: [Meeting]
+    let attendees: [String]
+    let paragraphs: [String]
+    let isRecording: Bool
+    let onFile: (CopilotSignal) -> Void
+
+    var body: some View {
+        // Each feed computed once per render of this view.
+        let remember = MeetingCopilot.remember(attendees: attendees, in: meetings)
+        let detected = MeetingCopilot.detect(paragraphs: paragraphs)
+        let ask = MeetingCopilot.askThem(attendees: attendees, in: meetings)
+
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(AppPalette.accent)
+                Text("COPILOT")
+                    .font(.caption2.weight(.bold))
+                    .tracking(1.4)
+                    .foregroundStyle(AppPalette.accent)
+                Spacer()
+                if isRecording {
+                    Text("● LIVE")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(AppPalette.coral)
+                }
+            }
+
+            section(
+                "REMEMBER", icon: "brain", tint: AppPalette.accent,
+                signals: remember,
+                emptyHint: attendees.isEmpty
+                    ? "Add attendees above to recall open promises with these people."
+                    : "No open items carried over with these people."
+            )
+            section(
+                "DETECTED NOW", icon: "dot.radiowaves.left.and.right", tint: AppPalette.gold,
+                signals: detected,
+                emptyHint: isRecording ? "Listening for decisions and action items…" : nil
+            )
+            section(
+                "ASK THEM", icon: "questionmark.bubble", tint: AppPalette.coral,
+                signals: ask,
+                emptyHint: nil
+            )
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            AppPalette.cardBackground,
+            in: RoundedRectangle(cornerRadius: AppRadius.xl, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.xl, style: .continuous)
+                .strokeBorder(AppPalette.accent.opacity(0.18), lineWidth: 0.8)
+        )
+        .appShadow(AppShadow.soft)
+    }
+
+    @ViewBuilder
+    private func section(
+        _ label: String,
+        icon: String,
+        tint: Color,
+        signals: [CopilotSignal],
+        emptyHint: String?
+    ) -> some View {
+        if !signals.isEmpty || emptyHint != nil {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: icon)
+                        .font(.caption2.weight(.bold))
+                    Text(label)
+                        .font(.caption2.weight(.bold))
+                        .tracking(1.2)
+                }
+                .foregroundStyle(tint)
+
+                if signals.isEmpty, let hint = emptyHint {
+                    Text(hint)
+                        .font(.caption)
+                        .foregroundStyle(AppPalette.secondaryInk.opacity(0.85))
+                } else {
+                    ForEach(signals) { signal in
+                        row(signal, tint: tint)
+                    }
+                }
+            }
+        }
+    }
+
+    private func row(_ signal: CopilotSignal, tint: Color) -> some View {
+        Button {
+            HapticEngine.tap(.light)
+            onFile(signal)
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Circle()
+                    .fill(tint)
+                    .frame(width: 6, height: 6)
+                    .padding(.top, 6)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(signal.text)
+                        .font(.subheadline)
+                        .foregroundStyle(AppPalette.ink)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let detail = signal.detail {
+                        Text(detail)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(AppPalette.secondaryInk)
+                    }
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "plus.circle")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(tint.opacity(0.7))
+            }
+            .padding(.vertical, 7)
+            .padding(.horizontal, 10)
+            .background(
+                tint.opacity(0.06),
+                in: RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous)
+            )
+        }
+        .buttonStyle(PressScaleButtonStyle(scale: 0.98))
+        .accessibilityHint("Adds this to your notes")
+    }
+}
+
+// MARK: - Meeting Copilot engine
+
+/// What a Copilot signal represents. Drives icon, tint, and how it's filed
+/// into notes when tapped.
+enum CopilotSignalKind: Equatable {
+    case remember   // an open promise carried over from a past meeting
+    case decision   // a decision detected in the live transcript
+    case action     // an action item detected in the live transcript
+    case ask        // a suggested question to raise now
+}
+
+struct CopilotSignal: Identifiable, Equatable {
+    let kind: CopilotSignalKind
+    let text: String
+    let detail: String?
+    /// Content-derived identity so repeated recomputation diffs stably.
+    var id: String { "\(kind)|\(text)" }
+}
+
+/// Pure, view-agnostic logic for the Live Meeting Copilot. Splits into three
+/// feeds: memory recall from past meetings with the same people (REMEMBER /
+/// ASK THEM) and live extraction from the running transcript (DETECTED NOW).
+/// Kept as static functions so it stays trivially testable and side-effect free.
+enum MeetingCopilot {
+
+    /// Past meetings that share at least one attendee (by name) with the
+    /// current set. Title is also matched so a "QBR: Meridian" recalls when
+    /// "Meridian" is an attendee. Newest first.
+    static func relatedMeetings(attendees: [String], in meetings: [Meeting]) -> [Meeting] {
+        let needles = attendees.map { $0.lowercased() }.filter { $0.count >= 2 }
+        guard !needles.isEmpty else { return [] }
+        return meetings
+            .filter { meeting in
+                let haystack = (meeting.attendees + [meeting.title]).map { $0.lowercased() }
+                return needles.contains { needle in
+                    haystack.contains { $0.contains(needle) || needle.contains($0) }
+                }
+            }
+            .sorted { $0.when > $1.when }
+    }
+
+    /// REMEMBER — open or at-risk promises from past meetings with these
+    /// people, so nothing carries over forgotten.
+    static func remember(attendees: [String], in meetings: [Meeting], limit: Int = 3) -> [CopilotSignal] {
+        let related = relatedMeetings(attendees: attendees, in: meetings)
+        guard !related.isEmpty else { return [] }
+        var out: [CopilotSignal] = []
+        for meeting in related {
+            for c in meeting.commitments where c.status == .open || c.status == .atRisk {
+                let detail = [ownerLabel(c.owner), meeting.title]
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " · ")
+                out.append(CopilotSignal(kind: .remember, text: clipped(c.statement), detail: detail))
+            }
+        }
+        return Array(dedup(out).prefix(limit))
+    }
+
+    /// ASK THEM — the other side's open promises, turned into questions to
+    /// raise in this meeting.
+    static func askThem(attendees: [String], in meetings: [Meeting], limit: Int = 2) -> [CopilotSignal] {
+        let related = relatedMeetings(attendees: attendees, in: meetings)
+        guard !related.isEmpty else { return [] }
+        var out: [CopilotSignal] = []
+        for meeting in related {
+            for c in meeting.commitments
+            where (c.status == .open || c.status == .atRisk) && !isSelf(c.owner) {
+                out.append(CopilotSignal(kind: .ask, text: question(from: c.statement), detail: ownerLabel(c.owner)))
+            }
+        }
+        return Array(dedup(out).prefix(limit))
+    }
+
+    /// DETECTED NOW — classify the most recent spoken lines into live
+    /// decisions and action items. Newest surfaced first.
+    static func detect(paragraphs: [String], limit: Int = 3) -> [CopilotSignal] {
+        var out: [CopilotSignal] = []
+        for raw in paragraphs.suffix(10) {
+            let p = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard p.count >= 20 else { continue }
+            let lower = p.lowercased()
+            if decisionCues.contains(where: { lower.contains($0) }) {
+                out.append(CopilotSignal(kind: .decision, text: clipped(p), detail: nil))
+            } else if actionCues.contains(where: { lower.contains($0) }) {
+                out.append(CopilotSignal(kind: .action, text: clipped(p), detail: nil))
+            }
+        }
+        return Array(dedup(out.reversed()).prefix(limit))
+    }
+
+    // MARK: Cues
+
+    private static let decisionCues = [
+        "we decided", "let's go with", "going with", "we'll go with", "we agreed",
+        "agreed to", "decision is", "final call", "we're going to", "go ahead with",
+        "settled on", "let's do", "we'll move forward"
+    ]
+
+    private static let actionCues = [
+        "i'll", "i will", "we'll need", "can you", "could you", "please",
+        "need to", "needs to", "make sure", "follow up", "send over", "send the",
+        "by friday", "by monday", "by tomorrow", "by eod", "action item",
+        "take care of", "circle back", "will own", "let me"
+    ]
+
+    // MARK: Helpers
+
+    private static func isSelf(_ owner: String) -> Bool {
+        let o = owner.lowercased().trimmingCharacters(in: .whitespaces)
+        return o.isEmpty || o == "you" || o == "me" || o == "i" || o.contains("myself")
+    }
+
+    private static func ownerLabel(_ owner: String) -> String {
+        isSelf(owner) ? "You owe" : owner
+    }
+
+    private static func question(from statement: String) -> String {
+        let s = clipped(statement)
+        if s.hasSuffix("?") { return s }
+        return "Follow up — \(s)"
+    }
+
+    private static func clipped(_ s: String, max: Int = 120) -> String {
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard t.count > max else { return t }
+        return String(t.prefix(max - 1)).trimmingCharacters(in: .whitespaces) + "…"
+    }
+
+    private static func dedup(_ items: [CopilotSignal]) -> [CopilotSignal] {
+        var seen = Set<String>()
+        var out: [CopilotSignal] = []
+        for item in items where seen.insert(item.text.lowercased()).inserted {
+            out.append(item)
+        }
+        return out
+    }
+}
