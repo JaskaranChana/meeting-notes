@@ -527,3 +527,55 @@ struct MeetingExtractionTests {
         #expect(MeetingIntelligenceEngine.structuredActions(for: m).isEmpty)
     }
 }
+
+// MARK: - Real due dates / overdue
+
+struct DueDateTests {
+    private let cal = Calendar.current
+    private let ref = Date(timeIntervalSince1970: 1_780_000_000) // fixed reference
+
+    @Test
+    func tomorrowResolvesToNextDay() throws {
+        let due = try #require(DueDateParser.date(from: "tomorrow", capturedAt: ref, calendar: cal))
+        let expected = try #require(cal.date(byAdding: .day, value: 1, to: ref))
+        #expect(cal.isDate(due, inSameDayAs: expected))
+    }
+
+    @Test
+    func eodResolvesToSameDay() throws {
+        let due = try #require(DueDateParser.date(from: "eod", capturedAt: ref, calendar: cal))
+        #expect(cal.isDate(due, inSameDayAs: ref))
+    }
+
+    @Test
+    func weekdayResolvesToFridayOnOrAfterRef() throws {
+        let due = try #require(DueDateParser.date(from: "by Friday", capturedAt: ref, calendar: cal))
+        #expect(cal.component(.weekday, from: due) == 6) // Friday
+        #expect(due >= cal.startOfDay(for: ref))
+        let within7 = try #require(cal.date(byAdding: .day, value: 7, to: cal.startOfDay(for: ref)))
+        #expect(due <= within7)
+    }
+
+    @Test
+    func vagueOrMissingHintIsNil() {
+        #expect(DueDateParser.date(from: "q3", capturedAt: ref, calendar: cal) == nil)
+        #expect(DueDateParser.date(from: nil, capturedAt: ref, calendar: cal) == nil)
+    }
+
+    @Test
+    func itemFromPastDeadlineIsOverdue() {
+        let past = cal.date(byAdding: .day, value: -10, to: Date()) ?? Date()
+        let commitment = Commitment(statement: "Send deck", owner: "You", sourceSpeaker: "You", dueHint: "today", status: .open)
+        let item = AggregatedActionItem(commitment: commitment, meetingID: UUID(), meetingTitle: "M", workspace: "W", meetingDate: past, isMeetingPinned: false)
+        #expect(item.isOverdue)
+        #expect(!item.isDueSoon)
+    }
+
+    @Test
+    func itemDueTomorrowIsDueSoonNotOverdue() {
+        let commitment = Commitment(statement: "Reply", owner: "You", sourceSpeaker: "You", dueHint: "tomorrow", status: .open)
+        let item = AggregatedActionItem(commitment: commitment, meetingID: UUID(), meetingTitle: "M", workspace: "W", meetingDate: Date(), isMeetingPinned: false)
+        #expect(item.isDueSoon)
+        #expect(!item.isOverdue)
+    }
+}
