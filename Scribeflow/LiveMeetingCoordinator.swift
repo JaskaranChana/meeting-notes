@@ -252,7 +252,10 @@ final class LiveMeetingCoordinator {
             try configureAudioSession()
             let request = SFSpeechAudioBufferRecognitionRequest()
             request.shouldReportPartialResults = true
-            request.requiresOnDeviceRecognition = false
+            // Prefer on-device recognition so audio never leaves the device when
+            // supported — matching the app's privacy promise. Falls back to
+            // server recognition only where on-device isn't available.
+            request.requiresOnDeviceRecognition = speechRecognizer.supportsOnDeviceRecognition
             request.taskHint = .dictation
 
             if #available(iOS 16.0, *) {
