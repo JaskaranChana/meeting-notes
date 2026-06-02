@@ -43,6 +43,8 @@ final class VoiceNoteManager {
         recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
         guard let recognitionRequest else { return }
         recognitionRequest.shouldReportPartialResults = true
+        // Keep transcription on-device wherever the device supports it.
+        recognitionRequest.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
 
         let inputNode = audioEngine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
