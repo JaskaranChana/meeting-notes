@@ -2990,7 +2990,6 @@ private struct EditorialHeroCard: View {
     var onOpenTasks: () -> Void = {}
 
     @State private var revealed = false
-    @State private var auroraShift = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var greeting: String {
@@ -3098,7 +3097,7 @@ private struct EditorialHeroCard: View {
                     )
                 )
                 .frame(width: 230, height: 230)
-                .offset(x: auroraShift ? 150 : 100, y: auroraShift ? -110 : -80)
+                .offset(x: 100, y: -80)
                 .blur(radius: 14)
             Circle()
                 .fill(
@@ -3108,7 +3107,7 @@ private struct EditorialHeroCard: View {
                     )
                 )
                 .frame(width: 170, height: 170)
-                .offset(x: auroraShift ? -90 : -60, y: auroraShift ? 80 : 110)
+                .offset(x: -60, y: 110)
                 .blur(radius: 20)
         }
         .clipShape(shape)
