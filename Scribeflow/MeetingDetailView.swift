@@ -2258,6 +2258,20 @@ struct MeetingDetailView: View {
         .buttonStyle(PressScaleButtonStyle(scale: 0.96))
     }
 
+    private func addToReminders(_ commitment: Commitment, meeting: Meeting) {
+        Task {
+            let due = DueDateParser.date(from: commitment.dueHint, capturedAt: meeting.when)
+            var notes = "From “\(meeting.title)” · Scribeflow"
+            if commitment.owner != "Owner not named" {
+                notes = "Owner: \(commitment.owner)\n" + notes
+            }
+            switch await RemindersExporter.add(title: commitment.statement, due: due, notes: notes) {
+            case .success: HapticEngine.notify(.success)
+            case .failure: HapticEngine.notify(.warning)
+            }
+        }
+    }
+
     private func commitMetaChip(_ text: String, icon: String, tint: Color) -> some View {
         HStack(spacing: 4) {
             Image(systemName: icon).font(.caption2.weight(.bold))
@@ -2335,6 +2349,15 @@ struct MeetingDetailView: View {
                                     .buttonStyle(.bordered)
                                     .tint(commitment.status == status ? AppPalette.accent : AppPalette.ink)
                                 }
+                                Spacer(minLength: 0)
+                                Button {
+                                    addToReminders(commitment, meeting: meeting)
+                                } label: {
+                                    Image(systemName: "list.bullet.rectangle")
+                                }
+                                .buttonStyle(.bordered)
+                                .tint(AppPalette.secondaryInk)
+                                .accessibilityLabel("Add to Reminders")
                             }
                         }
                         .padding(14)

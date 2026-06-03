@@ -15,7 +15,6 @@ struct MeetingsView: View {
     @State private var hasAnimatedIn = false
     @State private var pendingDeleteMeeting: Meeting?
     @State private var pendingDeleteFinalizeID: UUID?
-    @State private var shareMeeting: Meeting?
     @State private var snapshot = LibrarySnapshot()
     @State private var snapshotBuilder = LibrarySnapshotBuilder()
 
@@ -56,12 +55,6 @@ struct MeetingsView: View {
                                     menuItems: { libraryContextMenu(meeting) },
                                     preview: { LibraryRowPreview(meeting: meeting) }
                                 )
-                                .modifier(LibrarySwipeActions(
-                                    meeting: meeting,
-                                    onShare: { shareMeeting = meeting },
-                                    onPin: { togglePin(meeting) },
-                                    onDelete: { pendingDeleteMeeting = meeting }
-                                ))
                         }
                     }
                     .motionEntrance(step: 3, active: hasAnimatedIn)
@@ -102,12 +95,6 @@ struct MeetingsView: View {
                                             menuItems: { libraryContextMenu(meeting) },
                                             preview: { LibraryRowPreview(meeting: meeting) }
                                         )
-                                        .modifier(LibrarySwipeActions(
-                                            meeting: meeting,
-                                            onShare: { shareMeeting = meeting },
-                                            onPin: { togglePin(meeting) },
-                                            onDelete: { pendingDeleteMeeting = meeting }
-                                        ))
                                 }
                             } header: {
                                 EditorialSectionHead(title: group.title, titleSize: 18) {
@@ -144,9 +131,6 @@ struct MeetingsView: View {
         }
         .onAppear {
             hasAnimatedIn = true
-        }
-        .sheet(item: $shareMeeting) { meeting in
-            ActivityView(items: [meetingDigestMarkdown(meeting, signals: store.signals(for: meeting))])
         }
         .task(id: snapshotKey) {
             await refreshSnapshot(for: snapshotKey)
@@ -642,14 +626,6 @@ struct MeetingsView: View {
         .buttonStyle(PressScaleButtonStyle(scale: 0.985))
     }
 
-    private func togglePin(_ meeting: Meeting) {
-        store.togglePinned(for: meeting.id)
-        toast = ToastItem(
-            message: meeting.isPinned ? "Unpinned" : "Pinned",
-            icon: meeting.isPinned ? AppSymbols.unpin : AppSymbols.pin
-        )
-    }
-
     @ViewBuilder
     private func libraryContextMenu(_ meeting: Meeting) -> some View {
         Group {
@@ -682,35 +658,6 @@ struct MeetingsView: View {
         }
     }
 
-}
-
-/// Row swipe actions shared by the Pinned and date-grouped sections so both
-/// behave identically: leading swipe to Share, trailing to Pin / Delete.
-private struct LibrarySwipeActions: ViewModifier {
-    let meeting: Meeting
-    let onShare: () -> Void
-    let onPin: () -> Void
-    let onDelete: () -> Void
-
-    func body(content: Content) -> some View {
-        content
-            .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                Button(action: onShare) {
-                    Label("Share", systemImage: "square.and.arrow.up")
-                }
-                .tint(AppPalette.gold)
-            }
-            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                Button(role: .destructive, action: onDelete) {
-                    Label("Delete", systemImage: "trash")
-                }
-                Button(action: onPin) {
-                    Label(meeting.isPinned ? "Unpin" : "Pin",
-                          systemImage: meeting.isPinned ? AppSymbols.unpin : AppSymbols.pin)
-                }
-                .tint(AppPalette.accent)
-            }
-    }
 }
 
 /// Compact preview shown on `.contextMenu(preview:)` long-press of a library
