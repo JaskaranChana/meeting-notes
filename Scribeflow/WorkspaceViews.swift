@@ -9,6 +9,7 @@ struct AskView: View {
     @Environment(MeetingStore.self) private var store
 
     @State private var prompt = ""
+    @FocusState private var composerFocused: Bool
     @AppStorage("scribeflow.ask.includeTranscripts") private var includeTranscripts = true
     @AppStorage("scribeflow.ask.model") private var modelSelection: ChatModelSelection = .auto
     @AppStorage("scribeflow.ask.recents") private var recentsRaw = ""
@@ -77,8 +78,14 @@ struct AskView: View {
                     withAnimation(AppMotion.smooth) { proxy.scrollTo(id, anchor: .bottom) }
                 }
             }
-
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            // Lift the composer above the floating tab dock at rest. When the
+            // composer is focused the keyboard covers the dock, so drop the
+            // offset and let keyboard-avoidance pin the bar to the keyboard.
             inputBar
+                .padding(.bottom, composerFocused ? 0 : 76)
+                .animation(AppMotion.smooth, value: composerFocused)
         }
         .background(AppPalette.background.ignoresSafeArea())
         .accessibilityIdentifier("ask.view")
@@ -523,6 +530,7 @@ struct AskView: View {
             Divider().background(AppPalette.divider.opacity(0.4))
             HStack(alignment: .bottom, spacing: 10) {
                 TextField(turns.isEmpty ? "Ask anything about your meetings" : "Ask a follow-up — or anything", text: $prompt, axis: .vertical)
+                    .focused($composerFocused)
                     .font(.subheadline)
                     .lineLimit(5)
                     .padding(.horizontal, 14)
