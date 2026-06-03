@@ -39,6 +39,12 @@ Hit record — or just type. Scribeflow listens, then hands you a clean recap: w
 </tr>
 </table>
 
+<div align="center">
+<img src="docs/capture.gif" width="280" alt="From a live meeting to a clean recap"/>
+
+<sub><b>Talk through the meeting → a clean, owned recap.</b></sub>
+</div>
+
 ---
 
 ## Why it's different
