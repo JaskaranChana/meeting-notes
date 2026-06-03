@@ -435,7 +435,9 @@ struct CaptureView: View {
                 .padding(.vertical, 2)
                 .contentShape(Rectangle())
                 .onTapGesture { flashMark() }
-                .accessibilityHint("Tap to mark this moment")
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel("Mark this moment")
+                .accessibilityHint("Adds the current line to your notes")
                 .animation(AppMotion.smooth, value: latest)
             }
 
