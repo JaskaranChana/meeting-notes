@@ -1,10 +1,8 @@
 <div align="center">
 
-<img src="docs/splash.png" width="140" alt="Scribeflow"/>
+<img src="docs/social.png" width="860" alt="Scribeflow — meetings, remembered, entirely on your device"/>
 
-# Scribeflow
-
-### Meetings, remembered — entirely on your device.
+<br/>
 
 Hit record — or just type. Scribeflow listens, then hands you a clean recap: what was **decided**, who **owns** what, and by **when**. It remembers across every meeting, so you can ask your whole history a question and get a cited answer. All on your iPhone — nothing ever leaves the device.
 
