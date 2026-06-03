@@ -607,7 +607,7 @@ struct MeetingDetailView: View {
         return VStack(alignment: .leading, spacing: 10) {
             EditorialEyebrow(text: "Synopsis · AI")
             Text(synopsis)
-                .font(.system(size: 19, design: .serif))
+                .scaledFont(size: 19, design: .serif, relativeTo: .title3)
                 .italic()
                 .foregroundStyle(AppPalette.ink)
                 .lineSpacing(3)

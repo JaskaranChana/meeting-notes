@@ -234,7 +234,7 @@ struct AskView: View {
                                     .frame(width: 30, height: 30)
                                     .background(AppPalette.accentSoft, in: RoundedRectangle(cornerRadius: AppRadius.sm, style: .continuous))
                                 Text(item.1)
-                                    .font(.system(size: 14, weight: .medium, design: .serif))
+                                    .scaledFont(size: 14, weight: .medium, design: .serif, relativeTo: .body)
                                     .foregroundStyle(AppPalette.ink)
                                     .lineLimit(2)
                                     .multilineTextAlignment(.leading)
@@ -680,7 +680,7 @@ private struct AnswerHighlights: View {
                             .foregroundStyle(AppPalette.accent)
                             .padding(.top, 2)
                         Text(point)
-                            .font(.system(size: 13, weight: .medium))
+                            .scaledFont(size: 13, weight: .medium, relativeTo: .body)
                             .foregroundStyle(AppPalette.ink)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -751,7 +751,7 @@ private struct StructuredAnswer: View {
     private func body(for line: Line) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(line.content)
-                .font(.system(size: 15.5, design: .serif))
+                .scaledFont(size: 15.5, design: .serif, relativeTo: .body)
                 .foregroundStyle(AppPalette.ink)
                 .lineSpacing(2)
                 .fixedSize(horizontal: false, vertical: true)

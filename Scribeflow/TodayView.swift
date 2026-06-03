@@ -529,7 +529,7 @@ struct TodayView: View {
                     .frame(width: 22)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(item.commitment.statement)
-                        .font(.system(size: 16, weight: .medium, design: .serif))
+                        .scaledFont(size: 16, weight: .medium, design: .serif, relativeTo: .body)
                         .foregroundStyle(AppPalette.ink)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
@@ -631,7 +631,7 @@ struct TodayView: View {
                 .foregroundStyle(planTint(item))
 
                 Text(item.commitment.statement)
-                    .font(.system(size: 15, weight: .medium))
+                    .scaledFont(size: 15, weight: .medium, relativeTo: .body)
                     .foregroundStyle(AppPalette.ink)
                     .fixedSize(horizontal: false, vertical: true)
 
