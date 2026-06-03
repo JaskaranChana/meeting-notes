@@ -1,6 +1,12 @@
 import CoreSpotlight
 import SwiftUI
 
+/// Tracks how many detail views are pushed across the tab stacks, so the
+/// floating dock can hide while you're reading a meeting and reappear at root.
+@MainActor @Observable final class NavChrome {
+    var detailDepth = 0
+}
+
 /// Root tab shell. Four tabs only: **Today** (briefing), **Library**
 /// (the actual notes), **Tasks** (action items), **Ask** (workspace-wide AI).
 /// Settings is a sheet from Today's toolbar, not a tab — it's not used often
@@ -22,6 +28,7 @@ struct ContentView: View {
     @State private var toastDismissTask: Task<Void, Never>?
     @StateObject private var pendingInbox = PendingCaptureInbox.shared
     @AppStorage(AppearancePreference.storageKey) private var appearanceRaw = AppearancePreference.system.rawValue
+    @State private var navChrome = NavChrome()
 
     var body: some View {
         ZStack {
@@ -36,6 +43,7 @@ struct ContentView: View {
                 mainTabs
                 #endif
             }
+            .environment(navChrome)
             .fullScreenCover(item: Binding(
                 get: { captureMode.map { CaptureModeWrapper(mode: $0) } },
                 set: { wrapper in captureMode = wrapper?.mode }
@@ -192,7 +200,7 @@ struct ContentView: View {
     /// Reserves bottom space so scroll content (and pushed detail views) clear
     /// the floating dock — the dock is an overlay, so each tab must inset itself.
     private var dockClearance: some View {
-        Color.clear.frame(height: 76)
+        Color.clear.frame(height: navChrome.detailDepth == 0 ? 76 : 0)
     }
 
     private var mainTabs: some View {
@@ -241,23 +249,27 @@ struct ContentView: View {
         }
         .tint(AppPalette.accent)
         .overlay(alignment: .bottom) {
-            FloatingTabDock(
-                items: [
-                    FloatingTabDockItem(id: RootTab.home.rawValue, label: "Today", systemImage: "sparkles"),
-                    FloatingTabDockItem(id: RootTab.library.rawValue, label: "Library", systemImage: "rectangle.stack"),
-                    FloatingTabDockItem(id: RootTab.tasks.rawValue, label: "Tasks", systemImage: "checklist", badge: openActionItemCount),
-                    FloatingTabDockItem(id: RootTab.ask.rawValue, label: "Ask", systemImage: "sparkle.magnifyingglass")
-                ],
-                selection: Binding(
-                    get: { selectedTab.rawValue },
-                    set: { newValue in
-                        if let tab = RootTab(rawValue: newValue) {
-                            selectedTab = tab
+            if navChrome.detailDepth == 0 {
+                FloatingTabDock(
+                    items: [
+                        FloatingTabDockItem(id: RootTab.home.rawValue, label: "Today", systemImage: "sparkles"),
+                        FloatingTabDockItem(id: RootTab.library.rawValue, label: "Library", systemImage: "rectangle.stack"),
+                        FloatingTabDockItem(id: RootTab.tasks.rawValue, label: "Tasks", systemImage: "checklist", badge: openActionItemCount),
+                        FloatingTabDockItem(id: RootTab.ask.rawValue, label: "Ask", systemImage: "sparkle.magnifyingglass")
+                    ],
+                    selection: Binding(
+                        get: { selectedTab.rawValue },
+                        set: { newValue in
+                            if let tab = RootTab(rawValue: newValue) {
+                                selectedTab = tab
+                            }
                         }
-                    }
+                    )
                 )
-            )
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
+        .animation(AppMotion.smooth, value: navChrome.detailDepth)
         .modifier(ScribeflowChrome())
     }
 
