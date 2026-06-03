@@ -9,8 +9,8 @@ struct AskView: View {
     @Environment(MeetingStore.self) private var store
 
     @State private var prompt = ""
-    @State private var includeTranscripts = true
-    @State private var modelSelection: ChatModelSelection = .auto
+    @AppStorage("scribeflow.ask.includeTranscripts") private var includeTranscripts = true
+    @AppStorage("scribeflow.ask.model") private var modelSelection: ChatModelSelection = .auto
     @State private var turns: [AskTurn] = []
     @State private var hasAnimatedIn = false
     @State private var promptTask: Task<Void, Never>?

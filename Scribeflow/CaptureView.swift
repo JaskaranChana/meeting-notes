@@ -33,6 +33,7 @@ struct CaptureView: View {
     @State private var showingDiscardConfirm = false
     @State private var recordingStartedAt: Date?
     @State private var markFlash = false
+    @AppStorage("scribeflow.capture.template") private var lastTemplateRaw = NoteTemplate.discovery.rawValue
     @State private var minutePulse = false
     @Namespace private var templateNS
 
@@ -134,6 +135,7 @@ struct CaptureView: View {
         .sensoryFeedback(.success, trigger: savedMeetingID)
         .task {
             clearDefaultsOnce()
+            coordinator.selectedTemplate = NoteTemplate(rawValue: lastTemplateRaw) ?? .discovery
             consumeUpcomingTitleIfNeeded()
             if mode == .record {
                 await coordinator.prepare()
@@ -1015,6 +1017,7 @@ struct CaptureView: View {
         return Button {
             HapticEngine.tap(.light)
             withAnimation(AppMotion.snappy) { coordinator.selectedTemplate = template }
+            lastTemplateRaw = template.rawValue
         } label: {
             Text(template.title)
                 .font(.caption.weight(selected ? .semibold : .medium))

@@ -6,10 +6,10 @@ struct MeetingsView: View {
     let onAskTap: () -> Void
     @Binding var toast: ToastItem?
     @State private var searchText = ""
-    @State private var segment: LibrarySegment = .all
-    @State private var typeFilter: LibraryTypeFilter = .all
-    @State private var dateFilter: LibraryDateFilter = .all
-    @State private var sortMode: LibrarySortMode = .newest
+    @AppStorage("scribeflow.library.segment") private var segment: LibrarySegment = .all
+    @AppStorage("scribeflow.library.type") private var typeFilter: LibraryTypeFilter = .all
+    @AppStorage("scribeflow.library.date") private var dateFilter: LibraryDateFilter = .all
+    @AppStorage("scribeflow.library.sort") private var sortMode: LibrarySortMode = .newest
     @State private var showingFilters = false
     @AppStorage("hasUsedLibraryFilters") private var hasUsedFilters = false
     @State private var hasAnimatedIn = false
