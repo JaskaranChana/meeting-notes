@@ -236,11 +236,6 @@ struct MeetingDetailView: View {
                                 _ = store.duplicateMeeting(meeting.id)
                                 dismiss()
                             }
-                            Button("Copy share link", systemImage: "link") {
-                                UIPasteboard.general.url = ShareableLink.url(for: meeting.id)
-                                HapticEngine.notify(.success)
-                                AnalyticsLog.shared.log("meeting.copyLink")
-                            }
                             ShareLink(
                                 item: store.safeSharePreview(
                                     for: meeting.id,

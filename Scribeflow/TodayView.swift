@@ -1371,9 +1371,6 @@ struct HomeRecentNotesSection: View {
                                 Button("Duplicate", systemImage: "doc.on.doc") {
                                     _ = store.duplicateMeeting(meeting.id)
                                 }
-                                Button("Copy share link", systemImage: "link") {
-                                    UIPasteboard.general.url = ShareableLink.url(for: meeting.id)
-                                }
                             }
                         }
                     }

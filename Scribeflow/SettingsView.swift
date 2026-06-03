@@ -22,9 +22,9 @@ struct SettingsView: View {
     @State private var showingActivityLog = false
     @Namespace private var appearanceNS
 
-    private let supportEmail = "support@scribeflow.ai"
-    private let privacyPolicyURL = URL(string: "https://scribeflow.ai/privacy")!
-    private let termsURL = URL(string: "https://scribeflow.ai/terms")!
+    private let supportEmail = "jaskaran.chana1302@gmail.com"
+    private let privacyPolicyURL = URL(string: "https://jaskaranchana.github.io/meeting-notes/PRIVACY")!
+    private let termsURL = URL(string: "https://github.com/JaskaranChana/meeting-notes/blob/main/LICENSE")!
     private let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
     private let buildNumber = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
 

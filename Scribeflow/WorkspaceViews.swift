@@ -11,6 +11,17 @@ struct AskView: View {
     @State private var prompt = ""
     @AppStorage("scribeflow.ask.includeTranscripts") private var includeTranscripts = true
     @AppStorage("scribeflow.ask.model") private var modelSelection: ChatModelSelection = .auto
+    @AppStorage("scribeflow.ask.recents") private var recentsRaw = ""
+
+    private var recentQuestions: [String] {
+        recentsRaw.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+    }
+
+    private func rememberQuestion(_ q: String) {
+        var list = recentQuestions.filter { $0.caseInsensitiveCompare(q) != .orderedSame }
+        list.insert(q, at: 0)
+        recentsRaw = list.prefix(5).joined(separator: "\n")
+    }
     @State private var turns: [AskTurn] = []
     @State private var hasAnimatedIn = false
     @State private var promptTask: Task<Void, Never>?
@@ -180,6 +191,33 @@ struct AskView: View {
             if store.meetings.isEmpty {
                 askFirstRunHint
             } else {
+            if !recentQuestions.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    EditorialEyebrow(text: "Recent")
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(recentQuestions, id: \.self) { q in
+                                Button {
+                                    HapticEngine.tap(.light)
+                                    runPrompt(q)
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "clock.arrow.circlepath")
+                                            .font(.caption2.weight(.bold))
+                                        Text(q).font(.caption.weight(.semibold)).lineLimit(1)
+                                    }
+                                    .foregroundStyle(AppPalette.secondaryInk)
+                                    .padding(.horizontal, 12).padding(.vertical, 8)
+                                    .background(AppPalette.softSurface, in: Capsule())
+                                    .overlay(Capsule().strokeBorder(AppPalette.border.opacity(0.5), lineWidth: 0.7))
+                                }
+                                .buttonStyle(PressScaleButtonStyle(scale: 0.95))
+                            }
+                        }
+                    }
+                }
+                .padding(.bottom, 4)
+            }
             VStack(alignment: .leading, spacing: 8) {
                 EditorialEyebrow(text: "Try these · \(smartSuggestions.count)")
                 VStack(spacing: 0) {
@@ -542,6 +580,7 @@ struct AskView: View {
     private func runPrompt(_ text: String) {
         let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return }
+        rememberQuestion(cleaned)
         promptTask?.cancel()
         let turn = AskTurn(question: cleaned)
         let id = turn.id
