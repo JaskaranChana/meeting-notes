@@ -558,6 +558,8 @@ struct PeopleIntelligenceCard: View {
             HapticEngine.select()
             isExpanded.toggle()
         }
+        .accessibilityAddTraits(.isButton)
+        .accessibilityHint(isExpanded ? "Collapse" : "Expand")
     }
 
     private var headerRow: some View {
