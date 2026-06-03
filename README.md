@@ -6,7 +6,7 @@
 
 ### Meetings, remembered — entirely on your device.
 
-Capture a meeting, and Scribeflow turns rough notes and live speech into a clean recap — **decisions, action items with real owners and due dates, and answers across everything you've ever captured**. No cloud. No server account. It all runs on your iPhone.
+Hit record — or just type. Scribeflow listens, then hands you a clean recap: what was **decided**, who **owns** what, and by **when**. It remembers across every meeting, so you can ask your whole history a question and get a cited answer. All on your iPhone — nothing ever leaves the device.
 
 ![iOS](https://img.shields.io/badge/iOS-26-000000?logo=apple&logoColor=white)
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-Observation-FA7343?logo=swift&logoColor=white)
@@ -16,9 +16,9 @@ Capture a meeting, and Scribeflow turns rough notes and live speech into a clean
 
 <br/>
 
-<img src="docs/flow.gif" width="300" alt="Capture → Recap → Today → Ask"/>
+<img src="docs/flow.gif" width="300" alt="Record → Recap → Today → Ask"/>
 
-<sub><b>Capture → Recap → Today → Ask</b> — the whole loop, on device.</sub>
+<sub><b>Record → recap → today's plan → ask anything.</b> The whole loop, on device.</sub>
 
 </div>
 
@@ -34,10 +34,10 @@ Capture a meeting, and Scribeflow turns rough notes and live speech into a clean
 <td width="25%" align="center"><img src="docs/framed/ask.png" width="190" alt="Ask"/></td>
 </tr>
 <tr>
-<td align="center"><b>1 · Capture</b><br/><sub>Record or type. On-device transcription, zero ceremony.</sub></td>
-<td align="center"><b>2 · Auto recap</b><br/><sub>Synopsis, decisions, actions &amp; owners, risks — scored.</sub></td>
-<td align="center"><b>3 · Today</b><br/><sub>A briefing of what needs you, ranked by real deadlines.</sub></td>
-<td align="center"><b>4 · Ask</b><br/><sub>Question your library, get cited answers.</sub></td>
+<td align="center"><b>1 · Capture</b><br/><sub>Hit record or type. Live transcription — no bot joining your call.</sub></td>
+<td align="center"><b>2 · Auto recap</b><br/><sub>Synopsis, decisions, owned action items, risks — scored.</sub></td>
+<td align="center"><b>3 · Today</b><br/><sub>Open to a briefing of exactly what needs you, worst-first.</sub></td>
+<td align="center"><b>4 · Ask</b><br/><sub>"What did we decide with Meridian?" — answered, with sources.</sub></td>
 </tr>
 </table>
 
