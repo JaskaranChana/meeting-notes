@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/splash.png" width="150" alt="Scribeflow"/>
+<img src="docs/splash.png" width="140" alt="Scribeflow"/>
 
 # Scribeflow
 
@@ -14,24 +14,30 @@ Capture a meeting, and Scribeflow turns rough notes and live speech into a clean
 ![Privacy](https://img.shields.io/badge/data-stays%20local-2E7D71)
 ![License](https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey)
 
+<br/>
+
+<img src="docs/flow.gif" width="300" alt="Capture → Recap → Today → Ask"/>
+
+<sub><b>Capture → Recap → Today → Ask</b> — the whole loop, on device.</sub>
+
 </div>
 
 ---
 
-## ✨ The flow
+## ✨ How it works
 
-From a messy meeting to clean follow-through, in four taps.
-
-<div align="center">
-<img src="docs/flow.gif" width="280" alt="Capture → Recap → Today → Ask"/>
-</div>
-
-<table>
+<table border="0">
 <tr>
-<td width="25%" align="center"><b>1 · Capture</b><br/><sub>Record or type. On-device transcription, zero ceremony.</sub></td>
-<td width="25%" align="center"><b>2 · Auto recap</b><br/><sub>Synopsis, decisions, actions &amp; owners, risks — scored.</sub></td>
-<td width="25%" align="center"><b>3 · Today</b><br/><sub>A briefing of what needs you, ranked by real deadlines.</sub></td>
-<td width="25%" align="center"><b>4 · Ask</b><br/><sub>Question your library and get cited answers.</sub></td>
+<td width="25%" align="center"><img src="docs/framed/capture.png" width="190" alt="Capture"/></td>
+<td width="25%" align="center"><img src="docs/framed/recap.png" width="190" alt="Recap"/></td>
+<td width="25%" align="center"><img src="docs/framed/home.png" width="190" alt="Today"/></td>
+<td width="25%" align="center"><img src="docs/framed/ask.png" width="190" alt="Ask"/></td>
+</tr>
+<tr>
+<td align="center"><b>1 · Capture</b><br/><sub>Record or type. On-device transcription, zero ceremony.</sub></td>
+<td align="center"><b>2 · Auto recap</b><br/><sub>Synopsis, decisions, actions &amp; owners, risks — scored.</sub></td>
+<td align="center"><b>3 · Today</b><br/><sub>A briefing of what needs you, ranked by real deadlines.</sub></td>
+<td align="center"><b>4 · Ask</b><br/><sub>Question your library, get cited answers.</sub></td>
 </tr>
 </table>
 
@@ -49,26 +55,18 @@ Most meeting tools record to the cloud and hand you a transcript. Scribeflow is 
 
 ---
 
-## 🌗 Light & dark
+## 🌗 One app, two moods
 
-Every surface is built on adaptive tokens — it's beautiful in both.
+Every surface is built on adaptive tokens — it's beautiful in light and dark, and switches instantly.
 
-<table>
+<div align="center">
+<img src="docs/theme.gif" width="300" alt="Light and dark"/>
+</div>
+
+<table border="0">
 <tr>
-<td width="50%"><img src="docs/home.png" alt="Today — light"/></td>
-<td width="50%"><img src="docs/dark/home.png" alt="Today — dark"/></td>
-</tr>
-<tr>
-<td align="center"><sub>Today · Light</sub></td>
-<td align="center"><sub>Today · Dark</sub></td>
-</tr>
-<tr>
-<td width="50%"><img src="docs/recap.png" alt="Recap — light"/></td>
-<td width="50%"><img src="docs/dark/recap.png" alt="Recap — dark"/></td>
-</tr>
-<tr>
-<td align="center"><sub>Recap · Light</sub></td>
-<td align="center"><sub>Recap · Dark</sub></td>
+<td width="50%" align="center"><img src="docs/framed/recap.png" width="220" alt="Recap light"/><br/><sub>Recap · Light</sub></td>
+<td width="50%" align="center"><img src="docs/framed/recap_dark.png" width="220" alt="Recap dark"/><br/><sub>Recap · Dark</sub></td>
 </tr>
 </table>
 
@@ -83,18 +81,18 @@ Every surface is built on adaptive tokens — it's beautiful in both.
 | **Meeting Copilot** | During a call, recalls open promises with the same people and flags decisions/actions as they're spoken. |
 | **Ask your library** | Retrieval-augmented Q&A across every meeting, with citations and follow-up suggestions. |
 | **Real commitments** | Overdue / due-soon judged by resolved dates; floats urgent work to the top. |
-| **Cinematic briefing** | A "what needs you today" home, ranked by urgency, with follow-through stats. |
+| **Push to Reminders** | Send any action item to Apple Reminders with its due date. |
 | **One-tap recap** | Share a clean Markdown digest — synopsis · decisions · actions · risks · people. |
 
 ---
 
-## More screens
+## The screens
 
-<table>
+<table border="0">
 <tr>
-<td width="33%"><img src="docs/capture.png" alt="Capture"/><p align="center"><sub><b>Capture</b> — calm dark stage, live waveform.</sub></p></td>
-<td width="33%"><img src="docs/library.png" alt="Library"/><p align="center"><sub><b>Library</b> — searchable, filtered.</sub></p></td>
-<td width="33%"><img src="docs/ask.png" alt="Ask"/><p align="center"><sub><b>Ask</b> — grounded, cited answers.</sub></p></td>
+<td width="33%" align="center"><img src="docs/framed/home.png" width="210" alt="Today"/><br/><sub><b>Today</b> — your ranked briefing</sub></td>
+<td width="33%" align="center"><img src="docs/framed/library.png" width="210" alt="Library"/><br/><sub><b>Library</b> — searchable, filtered</sub></td>
+<td width="33%" align="center"><img src="docs/framed/ask.png" width="210" alt="Ask"/><br/><sub><b>Ask</b> — grounded, cited answers</sub></td>
 </tr>
 </table>
 
@@ -106,7 +104,7 @@ Every surface is built on adaptive tokens — it's beautiful in both.
 - **Apple Intelligence** (`FoundationModels`) for note transformation & Q&A, with a deterministic on-device fallback
 - **Speech** (`SFSpeechRecognizer`) + `AVAudioEngine` for live capture
 - Local JSON persistence — debounced, off-main writes with a backup/recovery path
-- **Swift Testing** for the extraction, due-date, and Copilot logic
+- **Swift Testing** — extraction, due-date, and Copilot logic (34 tests, green)
 
 ## Build & run
 
@@ -129,15 +127,13 @@ xcodebuild test \
   -destination 'platform=iOS Simulator,name=iPhone 16 Pro'
 ```
 
-Covers note→intelligence extraction (`MeetingExtractionTests`), due-date resolution (`DueDateTests`), and Copilot recall (`MeetingCopilotTests`).
-
 ## Privacy
 
-Recordings, transcripts, and notes stay on the device — nothing is uploaded to a Scribeflow server. Speech recognition runs on-device; calendar access is optional and used only to pre-fill meeting context.
+Recordings, transcripts, and notes stay on the device — nothing is uploaded to a Scribeflow server. Speech recognition runs on-device wherever supported; calendar access is optional and used only to pre-fill meeting context. Full policy: **[scribeflow privacy](https://jaskaranchana.github.io/meeting-notes/PRIVACY)**.
 
 ## License
 
-© 2026 Jaskaran Singh. **All rights reserved.** The source is published for viewing only — see [LICENSE](LICENSE). It is not licensed for reuse, redistribution, or derivative works without written permission.
+© 2026 Jaskaran Singh. **All rights reserved.** Source published for viewing only — see [LICENSE](LICENSE). Not licensed for reuse or redistribution without written permission.
 
 <div align="center">
 <sub>Built by Jaskaran Singh · SwiftUI · on-device AI · made to be remembered.</sub>
