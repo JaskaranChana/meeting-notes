@@ -293,6 +293,19 @@ struct AskView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+
+            Button {
+                HapticEngine.tap(.medium)
+                PendingCaptureInbox.shared.requestStartRecord()
+            } label: {
+                Label("Capture your first meeting", systemImage: "waveform.badge.mic")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(AppPalette.accentButton, in: Capsule())
+            }
+            .buttonStyle(PressScaleButtonStyle(scale: 0.97))
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
