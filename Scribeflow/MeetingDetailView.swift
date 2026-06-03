@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MeetingDetailView: View {
     @Environment(MeetingStore.self) private var store
+    @Environment(NavChrome.self) private var navChrome
     @Environment(\.dismiss) private var dismiss
     @AppStorage("preferredRewriteStyle") private var preferredRewriteStyleRaw = NoteRewriteStyle.concise.rawValue
     let meetingID: Meeting.ID
@@ -19,6 +20,7 @@ struct MeetingDetailView: View {
     @State var includePrivateNotesInShare = true
     @State var includeTranscriptInShare = false
     @State var hasAnimatedIn = false
+    @State private var didEnterDetail = false
     @State var showEnhanced = false
     @State var trustControlsExpanded = false
     @State var shareOptionsExpanded = false
@@ -370,6 +372,10 @@ struct MeetingDetailView: View {
                 .onAppear {
                     hasAnimatedIn = true
                     store.scoreAndSave(for: meeting.id)
+                    if !didEnterDetail {
+                        didEnterDetail = true
+                        navChrome.detailDepth += 1
+                    }
                 }
                 .task(id: store.revision) {
                     refreshDerived()
@@ -382,6 +388,10 @@ struct MeetingDetailView: View {
                     promptTask?.cancel()
                     rewriteTask = nil
                     promptTask = nil
+                    if didEnterDetail {
+                        didEnterDetail = false
+                        navChrome.detailDepth = max(0, navChrome.detailDepth - 1)
+                    }
                 }
             } else {
                 ContentUnavailableView("Meeting not found", systemImage: "exclamationmark.triangle")
