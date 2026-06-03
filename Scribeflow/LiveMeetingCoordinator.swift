@@ -276,13 +276,14 @@ final class LiveMeetingCoordinator {
                 return
             }
             inputNode.removeTap(onBus: 0)
-            inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+            inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self, request] buffer, _ in
                 guard let self else { return }
                 // While soft-paused, drop audio so the transcript and level
                 // freeze — without tearing down the engine (instant resume).
                 guard !self.audioPaused else { return }
-                // SFSpeechAudioBufferRecognitionRequest.append is thread-safe.
-                self.recognitionRequest?.append(buffer)
+                // Append to the captured request (thread-safe), avoiding a
+                // cross-actor read of the main-isolated `recognitionRequest`.
+                request.append(buffer)
                 self.computeAndPublishLevel(buffer)
             }
 
