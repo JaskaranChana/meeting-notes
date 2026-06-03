@@ -189,6 +189,12 @@ struct ContentView: View {
         }
     }
 
+    /// Reserves bottom space so scroll content (and pushed detail views) clear
+    /// the floating dock — the dock is an overlay, so each tab must inset itself.
+    private var dockClearance: some View {
+        Color.clear.frame(height: 76)
+    }
+
     private var mainTabs: some View {
         TabView(selection: $selectedTab) {
             NavigationStack {
@@ -202,6 +208,7 @@ struct ContentView: View {
                 )
                 .toolbar(.hidden, for: .tabBar)
             }
+            .safeAreaInset(edge: .bottom, spacing: 0) { dockClearance }
             .tag(RootTab.home)
 
             NavigationStack {
@@ -212,6 +219,7 @@ struct ContentView: View {
                 )
                 .toolbar(.hidden, for: .tabBar)
             }
+            .safeAreaInset(edge: .bottom, spacing: 0) { dockClearance }
             .tag(RootTab.library)
 
             NavigationStack {
@@ -221,16 +229,18 @@ struct ContentView: View {
                 )
                 .toolbar(.hidden, for: .tabBar)
             }
+            .safeAreaInset(edge: .bottom, spacing: 0) { dockClearance }
             .tag(RootTab.tasks)
 
             NavigationStack {
                 AskView()
                     .toolbar(.hidden, for: .tabBar)
             }
+            .safeAreaInset(edge: .bottom, spacing: 0) { dockClearance }
             .tag(RootTab.ask)
         }
         .tint(AppPalette.accent)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+        .overlay(alignment: .bottom) {
             FloatingTabDock(
                 items: [
                     FloatingTabDockItem(id: RootTab.home.rawValue, label: "Today", systemImage: "sparkles"),
