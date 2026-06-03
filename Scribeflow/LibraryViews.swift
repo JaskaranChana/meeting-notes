@@ -286,7 +286,7 @@ struct EditorialLibraryRow: View {
                             Circle().fill(AppPalette.accent).frame(width: 6, height: 6)
                         }
                         Text(meeting.title.isEmpty ? "Untitled" : meeting.title)
-                            .font(.system(size: 17, weight: .medium, design: .serif))
+                            .scaledFont(size: 17, weight: .medium, design: .serif, relativeTo: .body)
                             .foregroundStyle(AppPalette.ink)
                             .lineLimit(2)
                             .multilineTextAlignment(.leading)
