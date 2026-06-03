@@ -114,8 +114,8 @@ struct ActionItemsView: View {
     @Binding var selectedMeetingID: Meeting.ID?
     @Binding var toast: ToastItem?
 
-    @State private var filter: ActionItemFilter = .open
-    @State private var sort: ActionItemSort = .priority
+    @AppStorage("scribeflow.tasks.filter") private var filter: ActionItemFilter = .open
+    @AppStorage("scribeflow.tasks.sort") private var sort: ActionItemSort = .priority
     @State private var query: String = ""
     @State private var hasAnimatedIn = false
     /// Built once per store change, not on every render — the counts, filters,
@@ -204,11 +204,11 @@ struct ActionItemsView: View {
             }
 
             HStack(spacing: 0) {
-                statCell(openCount, "Open", AppPalette.accent)
+                statButton(.open, openCount, "Open", AppPalette.accent)
                 cellRule
-                statCell(atRiskCount, "At risk", AppPalette.coral)
+                statButton(.atRisk, atRiskCount, "At risk", AppPalette.coral)
                 cellRule
-                statCell(doneCount, "Done", AppPalette.success)
+                statButton(.done, doneCount, "Done", AppPalette.success)
             }
             .overlay(alignment: .top) { EditorialRule() }
             .overlay(alignment: .bottom) { EditorialRule() }
@@ -217,6 +217,23 @@ struct ActionItemsView: View {
 
     private var cellRule: some View {
         Rectangle().fill(AppPalette.border.opacity(0.7)).frame(width: 1, height: 30)
+    }
+
+    /// Tappable stat — jumps the list straight to that filter.
+    private func statButton(_ target: ActionItemFilter, _ value: Int, _ label: String, _ tint: Color) -> some View {
+        Button {
+            HapticEngine.select()
+            withAnimation(AppMotion.snappy) { filter = target }
+        } label: {
+            statCell(value, label, tint)
+                .overlay(alignment: .bottom) {
+                    if filter == target {
+                        Capsule().fill(tint).frame(height: 2).padding(.horizontal, 12)
+                    }
+                }
+        }
+        .buttonStyle(PressScaleButtonStyle(scale: 0.96))
+        .accessibilityLabel("\(label), \(value). Tap to filter.")
     }
 
     private func statCell(_ value: Int, _ label: String, _ tint: Color) -> some View {
