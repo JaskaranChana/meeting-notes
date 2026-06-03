@@ -1202,7 +1202,7 @@ struct SmartNotesPreview: View, Equatable {
         HStack(alignment: .top, spacing: 8) {
             Circle().fill(tint).frame(width: 5, height: 5).padding(.top, 6)
             Text(text)
-                .font(.system(size: 13))
+                .scaledFont(size: 13, relativeTo: .body)
                 .foregroundStyle(AppPalette.ink)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -1213,7 +1213,7 @@ struct SmartNotesPreview: View, Equatable {
             HStack(alignment: .top, spacing: 8) {
                 Circle().fill(AppPalette.gold).frame(width: 5, height: 5).padding(.top, 6)
                 Text(action.text)
-                    .font(.system(size: 13, weight: .medium))
+                    .scaledFont(size: 13, weight: .medium, relativeTo: .body)
                     .foregroundStyle(AppPalette.ink)
                     .fixedSize(horizontal: false, vertical: true)
             }
