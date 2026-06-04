@@ -1040,6 +1040,18 @@ struct CaptureView: View {
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
+    /// A title taken from the note itself — its first non-empty line, stripped of
+    /// bullet markers and clipped — so a quick note is never labeled "Untitled"
+    /// or given prefilled boilerplate.
+    private func noteTitle(from notes: String) -> String {
+        let firstLine = notes
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " -•\t")) }
+            .first(where: { !$0.isEmpty })
+        guard let line = firstLine, !line.isEmpty else { return "Quick note" }
+        return line.count > 50 ? String(line.prefix(50)).trimmingCharacters(in: .whitespaces) + "…" : line
+    }
+
     private func saveAndClose() {
         guard !isSaving else { return }
         isSaving = true
@@ -1055,19 +1067,20 @@ struct CaptureView: View {
                 // Recorded path — preserve transcript + audio metadata.
                 id = await coordinator.saveMeeting(into: store)
             } else {
-                // Text-only path — quick clean save with Apple Intelligence polish.
-                let finalTitle = coordinator.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? "Untitled note"
-                    : coordinator.title
-                let finalObjective = coordinator.objective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? "Capture decisions and follow-up clearly."
-                    : coordinator.objective
-                id = await store.addMeetingWithTransformation(
-                    title: finalTitle,
+                // Text-only path — preserve exactly what the user typed. We do
+                // NOT auto-rewrite the note: that fabricates structure for thin
+                // or garbage input and discards the original. The title and
+                // objective are derived from the text (never prefilled), and
+                // every surfaced item (synopsis, actions, decisions) is extracted
+                // from the actual note. The user can Enhance on demand later.
+                let typed = coordinator.manualNotes
+                let typedTitle = coordinator.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                id = store.addMeeting(
+                    title: typedTitle.isEmpty ? noteTitle(from: typed) : typedTitle,
                     workspace: "Personal workspace",
                     attendees: [],
-                    objective: finalObjective,
-                    notes: coordinator.manualNotes
+                    objective: coordinator.objective.trimmingCharacters(in: .whitespacesAndNewlines),
+                    notes: typed
                 )
             }
 

@@ -527,6 +527,14 @@ struct MeetingExtractionTests {
     }
 
     @Test
+    func garbageNoteProducesNothingMeaningful() {
+        // Typed junk must not be turned into actions or decisions.
+        let m = meeting(notes: "asdf asdf qwerty zxcvbn\nlorem ipsum dolor sit\n12345 !!! ????")
+        #expect(MeetingIntelligenceEngine.structuredActions(for: m).isEmpty)
+        #expect(MeetingIntelligenceEngine.decisions(for: m).isEmpty)
+    }
+
+    @Test
     func imperativeLineIsAnAction() throws {
         let m = meeting(notes: "- Review the contract and send the redlines")
         let action = try #require(MeetingIntelligenceEngine.structuredActions(for: m).first)
