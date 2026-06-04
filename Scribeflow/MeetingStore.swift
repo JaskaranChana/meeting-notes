@@ -1547,11 +1547,17 @@ final class MeetingStore {
         let decisions = MeetingIntelligenceEngine.decisions(for: meeting, limit: 3)
         let nextSteps = MeetingIntelligenceEngine.structuredActions(for: meeting, limit: 4)
             .map(MeetingIntelligenceEngine.commitmentSentence)
+        // Refine the rest of the note into distilled discussion points — not a
+        // raw line dump. This is what structures a plain note like a meeting.
+        let keyPoints = MeetingIntelligenceEngine.keyPoints(for: meeting, limit: 5)
 
-        func sections(_ decisionsTitle: String, _ stepsTitle: String) -> [SummarySection] {
+        func sections(_ decisionsTitle: String, _ stepsTitle: String, _ pointsTitle: String) -> [SummarySection] {
             var out: [SummarySection] = []
             if !decisions.isEmpty { out.append(SummarySection(title: decisionsTitle, bullets: decisions)) }
             if !nextSteps.isEmpty { out.append(SummarySection(title: stepsTitle, bullets: nextSteps)) }
+            if !keyPoints.isEmpty { out.append(SummarySection(title: pointsTitle, bullets: keyPoints)) }
+            // Last resort only for content-free input (symbols/numbers): echo the
+            // note rather than invent structure.
             if out.isEmpty, !noteLines.isEmpty {
                 out.append(SummarySection(title: "Notes", bullets: Array(noteLines.prefix(5))))
             }
@@ -1565,13 +1571,13 @@ final class MeetingStore {
         return [
             TemplateSummary(template: .discovery, summary: MeetingSummary(
                 eyebrow: "Auto draft", title: title,
-                sections: sections("Decisions", "Next steps"))),
+                sections: sections("Decisions", "Next steps", "Key points"))),
             TemplateSummary(template: .exec, summary: MeetingSummary(
                 eyebrow: "Exec view", title: "Quick readout for \(meeting.workspace).",
-                sections: sections("What was decided", "Owns the follow-through"))),
+                sections: sections("What was decided", "Owns the follow-through", "Context"))),
             TemplateSummary(template: .manager, summary: MeetingSummary(
                 eyebrow: "Coach angle", title: "Turn this capture into coaching and accountability.",
-                sections: sections("Decisions to reinforce", "Hold owners to"))),
+                sections: sections("Decisions to reinforce", "Hold owners to", "Observed"))),
         ]
     }
 

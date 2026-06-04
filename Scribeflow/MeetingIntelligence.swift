@@ -153,6 +153,37 @@ enum MeetingIntelligenceEngine {
         looksActionable(line)
     }
 
+    /// Substantive discussion points distilled from the notes/transcript — the
+    /// lines that carry meeting content but aren't decisions, actions, or
+    /// questions (those are surfaced separately). Cleaned, deduped, ranked by
+    /// signal. Empty for content-free input, so nothing is invented.
+    static func keyPoints(for meeting: Meeting, limit: Int = 5) -> [String] {
+        let source = sourceLines(for: meeting)
+        var seen: Set<String> = []
+        var scored: [(text: String, score: Int)] = []
+        for line in source {
+            let raw = line.text
+            let lower = raw.lowercased()
+            // Skip what's already surfaced elsewhere.
+            if looksActionable(raw) { continue }
+            if decisionCues.contains(where: lower.contains) { continue }
+            if raw.contains("?") { continue }
+
+            let point = polished(raw)
+            guard !point.isEmpty, hasSubstance(point) else { continue }
+            let key = fingerprint(point)
+            guard seen.insert(key).inserted else { continue }
+            scored.append((point, score(raw)))
+        }
+        return scored.sorted { $0.score > $1.score }.prefix(limit).map(\.text)
+    }
+
+    /// True when a line carries real words — at least two letter-runs of 3+
+    /// characters — so symbol/number noise ("12345 !!!") isn't a "key point".
+    private static func hasSubstance(_ text: String) -> Bool {
+        text.split(whereSeparator: { !$0.isLetter }).filter { $0.count >= 3 }.count >= 2
+    }
+
     /// Distilled action text for a single line, or nil if it isn't a real action.
     /// Used by the live copilot, which classifies spoken paragraphs one at a time.
     static func actionItem(from line: String) -> String? {
