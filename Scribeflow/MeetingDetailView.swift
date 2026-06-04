@@ -603,11 +603,34 @@ struct MeetingDetailView: View {
     func overviewCanvas(_ meeting: Meeting) -> some View {
         overviewSnapshot(meeting)
         overviewStatsRow(meeting)
+        editorialYourNotes(meeting)
+        if hasExtractedLayer(meeting) { extractedLayerEyebrow }
         editorialDecisions(meeting)
         editorialActions(meeting)
         editorialQuestions(meeting)
         editorialRisks(meeting)
         overviewPrimaryAction
+    }
+
+    /// True when the engine surfaced anything — so the "extracted for you" label
+    /// only appears when there's an AI layer to introduce.
+    private func hasExtractedLayer(_ meeting: Meeting) -> Bool {
+        !meetingSignals.decisions.isEmpty
+            || !meetingSignals.actions.isEmpty
+            || !meetingSignals.questions.isEmpty
+            || !meetingSignals.risks.isEmpty
+            || meeting.commitments.contains { $0.status == .open || $0.status == .atRisk }
+    }
+
+    /// Marks the boundary between the user's own notes and the AI-extracted
+    /// sections, so the two are never mistaken for each other.
+    private var extractedLayerEyebrow: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "sparkles").font(.system(size: 11, weight: .semibold))
+            Text("EXTRACTED FOR YOU").font(.caption2.weight(.bold)).tracking(1.4)
+        }
+        .foregroundStyle(AppPalette.secondaryInk)
+        .padding(.top, 6)
     }
 
     /// Synopsis rendered as an editorial pull-quote: italic serif with an
@@ -820,6 +843,51 @@ struct MeetingDetailView: View {
             Spacer(minLength: 0)
         }
         .padding(.vertical, 12)
+    }
+
+    /// The user's own words, shown verbatim and visually distinct from the
+    /// AI-extracted sections below — so the brief reflects what *they* captured,
+    /// not just a machine summary (the Granola principle).
+    @ViewBuilder
+    func editorialYourNotes(_ meeting: Meeting) -> some View {
+        let lines = meeting.rawNotes
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " -•\t")) }
+            .filter { !$0.isEmpty && $0 != "Add your key takeaways here" }
+        if !lines.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                EditorialSectionHead(title: "Your notes", titleSize: 18) {
+                    EditorialMeta(text: "your words", tint: AppPalette.accent)
+                }
+                VStack(alignment: .leading, spacing: 7) {
+                    ForEach(Array(lines.prefix(8).enumerated()), id: \.offset) { _, line in
+                        HStack(alignment: .top, spacing: 10) {
+                            Circle()
+                                .fill(AppPalette.accent)
+                                .frame(width: 5, height: 5)
+                                .padding(.top, 8)
+                            Text(line)
+                                .font(.system(size: 16, design: .serif))
+                                .foregroundStyle(AppPalette.ink)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                    if lines.count > 8 {
+                        Text("+\(lines.count - 8) more in Notes")
+                            .font(.caption)
+                            .foregroundStyle(AppPalette.tertiaryInk)
+                            .padding(.leading, 15)
+                    }
+                }
+                .padding(14)
+                .background(AppPalette.accentSoft.opacity(0.45), in: RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
+                        .strokeBorder(AppPalette.accent.opacity(0.22), lineWidth: 1)
+                )
+            }
+        }
     }
 
     @ViewBuilder
