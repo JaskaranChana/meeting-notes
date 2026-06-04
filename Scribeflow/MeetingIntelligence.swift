@@ -113,8 +113,9 @@ enum MeetingIntelligenceEngine {
         let source = sourceLines(for: meeting)
         let corpus = source.map(\.text)
         let decisions = extract(from: corpus, keywords: decisionCues, limit: 4, transform: distilledDecision)
-        let actions = extract(from: corpus, keywords: actionCues, limit: 5, transform: distilledAction)
         let structuredActions = extractStructuredActions(from: source, attendees: meeting.attendees, limit: 5)
+        // One definition of "an action": the strict, distilled structured set.
+        let actions = structuredActions.map(\.text)
         let questions = extractQuestions(from: corpus, limit: 4)
         let followUps = followUps(from: actions, structuredActions: structuredActions, questions: questions, decisions: decisions)
         let summary = summary(from: meeting, corpus: corpus, decisions: decisions, structuredActions: structuredActions)
@@ -241,9 +242,41 @@ enum MeetingIntelligenceEngine {
         "final call", "chose", "settled on", "moving forward with", "we will go"
     ]
 
-    private static func looksActionable(_ lower: String) -> Bool {
+    /// A line is a real action only if it carries a commitment signal: an owner
+    /// marker ("owner: Dana"), a commitment preamble ("I'll", "we need to",
+    /// "Maya will", "action item:"), or an imperative opening ("Send the deck").
+    /// Lines that merely mention a cue word — "the security review is mandatory",
+    /// "the launch went well" — are statements, not tasks, and are excluded.
+    private static func looksActionable(_ line: String) -> Bool {
+        let lower = line.lowercased()
         guard !lower.hasSuffix("?") else { return false }
-        return actionCues.contains(where: lower.contains)
+        if explicitOwner(in: line) != nil { return true }
+        let body = strippedSpeaker(cleanLine(line))
+        if earliestPreambleEnd(in: body, preambles: actionPreambles) != nil { return true }
+        return opensWithImperative(body)
+    }
+
+    /// Base-form verbs that, when a line opens with one, signal an imperative task.
+    private static let imperativeVerbs: Set<String> = [
+        "send", "share", "schedule", "book", "review", "prepare", "draft", "assign",
+        "deliver", "set", "follow", "circle", "reach", "create", "update", "fix",
+        "ship", "email", "call", "confirm", "sync", "finalize", "write", "build",
+        "test", "add", "remove", "check", "plan", "organize", "define", "document",
+        "publish", "deploy", "migrate", "audit", "validate", "investigate", "loop",
+        "pull", "push", "merge", "file", "submit", "approve", "compile", "collect"
+    ]
+
+    /// Linking verbs that turn a verb-first line into a *statement* about a thing
+    /// ("Review is mandatory") rather than an instruction ("Review the deck").
+    private static let linkingVerbs: Set<String> = ["is", "are", "was", "were", "has", "have", "will", "would"]
+
+    private static func opensWithImperative(_ text: String) -> Bool {
+        let words = text.split(separator: " ").map { $0.lowercased() }
+        guard let first = words.first else { return false }
+        let firstClean = first.trimmingCharacters(in: CharacterSet.letters.inverted)
+        guard imperativeVerbs.contains(firstClean) else { return false }
+        if words.count >= 2, linkingVerbs.contains(words[1]) { return false }
+        return true
     }
 
     private static func extractStructuredActions(
@@ -255,7 +288,7 @@ enum MeetingIntelligenceEngine {
         var results: [ExtractedActionItem] = []
 
         for line in source {
-            guard looksActionable(line.text.lowercased()) else { continue }
+            guard looksActionable(line.text) else { continue }
 
             let text = distilledAction(line.text)
             let key = fingerprint(text)
