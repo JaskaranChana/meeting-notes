@@ -527,6 +527,22 @@ struct MeetingExtractionTests {
     }
 
     @Test
+    func keyPointsCaptureDiscussionNotActionsOrDecisions() {
+        let m = meeting(notes: "- Budget is tight this quarter\n- I'll send the deck by Friday\n- We decided to ship in August")
+        let points = MeetingIntelligenceEngine.keyPoints(for: m)
+        #expect(points.contains { $0.localizedCaseInsensitiveContains("budget is tight") })
+        // The action and the decision belong to their own sections, not here.
+        #expect(!points.contains { $0.localizedCaseInsensitiveContains("send the deck") })
+        #expect(!points.contains { $0.localizedCaseInsensitiveContains("ship in august") })
+    }
+
+    @Test
+    func keyPointsAreEmptyForSymbolNoise() {
+        let m = meeting(notes: "12345 !!! ????\n@@@ ###")
+        #expect(MeetingIntelligenceEngine.keyPoints(for: m).isEmpty)
+    }
+
+    @Test
     func garbageNoteProducesNothingMeaningful() {
         // Typed junk must not be turned into actions or decisions.
         let m = meeting(notes: "asdf asdf qwerty zxcvbn\nlorem ipsum dolor sit\n12345 !!! ????")
