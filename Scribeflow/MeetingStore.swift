@@ -1535,18 +1535,27 @@ final class MeetingStore {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
 
-        let first = Array(noteLines.prefix(3))
-        let remaining = Array(noteLines.dropFirst(3).prefix(3))
+        // Build the summary from what was actually extracted — decisions and
+        // accountable next steps (owner · task · due) — not arbitrary line
+        // slices. Fall back to raw notes only when the extractor finds nothing.
+        let decisions = MeetingIntelligenceEngine.decisions(for: meeting, limit: 3)
+        let actions = MeetingIntelligenceEngine.structuredActions(for: meeting, limit: 4)
+        let nextSteps = actions.map(MeetingIntelligenceEngine.commitmentSentence)
+
+        let signals = decisions.isEmpty ? Array(noteLines.prefix(3)) : decisions
+        let steps = nextSteps.isEmpty ? Array(noteLines.dropFirst(3).prefix(3)) : nextSteps
 
         return [
             TemplateSummary(
                 template: .discovery,
                 summary: MeetingSummary(
                     eyebrow: "Auto draft",
-                    title: "This meeting is centered on \(meeting.objective.lowercased()).",
+                    title: meeting.objective.isEmpty
+                        ? "Summary of \(meeting.title)."
+                        : "This meeting is centered on \(meeting.objective.lowercased()).",
                     sections: [
-                        SummarySection(title: "Signals", bullets: first.isEmpty ? ["Add a few bullets in the notes pane and Scribeflow will keep shaping the summary."] : first),
-                        SummarySection(title: "Next steps", bullets: remaining.isEmpty ? ["Clarify the next decision, owner, and deadline."] : remaining),
+                        SummarySection(title: "Decisions & signals", bullets: signals.isEmpty ? ["Add a few bullets in the notes pane and Scribeflow will keep shaping the summary."] : signals),
+                        SummarySection(title: "Next steps", bullets: steps.isEmpty ? ["Clarify the next decision, owner, and deadline."] : steps),
                     ]
                 )
             ),
@@ -1556,8 +1565,8 @@ final class MeetingStore {
                     eyebrow: "Exec view",
                     title: "Quick readout for \(meeting.workspace).",
                     sections: [
-                        SummarySection(title: "What changed", bullets: first.isEmpty ? ["The meeting capture is ready for a concise executive summary."] : first),
-                        SummarySection(title: "Needs follow-through", bullets: remaining.isEmpty ? ["Document the next action and any risk before sharing upward."] : remaining),
+                        SummarySection(title: "What was decided", bullets: signals.isEmpty ? ["The meeting capture is ready for a concise executive summary."] : signals),
+                        SummarySection(title: "Owns the follow-through", bullets: steps.isEmpty ? ["Document the next action and any risk before sharing upward."] : steps),
                     ]
                 )
             ),
@@ -1565,10 +1574,10 @@ final class MeetingStore {
                 template: .manager,
                 summary: MeetingSummary(
                     eyebrow: "Coach angle",
-                    title: "Use this view to turn raw notes into coaching and accountability.",
+                    title: "Turn this capture into coaching and accountability.",
                     sections: [
-                        SummarySection(title: "Observed", bullets: first.isEmpty ? ["Capture more detail in notes to unlock coaching feedback."] : first),
-                        SummarySection(title: "Coach next", bullets: remaining.isEmpty ? ["Name the one follow-up that matters most."] : remaining),
+                        SummarySection(title: "Decisions to reinforce", bullets: signals.isEmpty ? ["Capture more detail in notes to unlock coaching feedback."] : signals),
+                        SummarySection(title: "Hold owners to", bullets: steps.isEmpty ? ["Name the one follow-up that matters most."] : steps),
                     ]
                 )
             ),

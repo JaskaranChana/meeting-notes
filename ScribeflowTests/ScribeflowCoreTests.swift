@@ -498,6 +498,52 @@ struct MeetingExtractionTests {
         let m = meeting(notes: "It was a nice chat about the weather today\nShould we launch next month?")
         #expect(MeetingIntelligenceEngine.structuredActions(for: m).isEmpty)
     }
+
+    // MARK: Distillation — raw conversational lines become crisp items
+
+    @Test
+    func actionIsDistilledToImperativeCore() throws {
+        let m = meeting(notes: "- so yeah I think I'll probably send the pricing deck over by Friday")
+        let action = try #require(MeetingIntelligenceEngine.structuredActions(for: m).first)
+        #expect(action.text.hasPrefix("Send"))
+        #expect(action.text.localizedCaseInsensitiveContains("pricing deck"))
+        // Filler and the commitment preamble are stripped out.
+        #expect(!action.text.localizedCaseInsensitiveContains("i'll"))
+        #expect(!action.text.localizedCaseInsensitiveContains("probably"))
+        #expect(!action.text.localizedCaseInsensitiveContains("i think"))
+        #expect(action.owner == "You")
+        #expect(action.dueHint == "friday")
+    }
+
+    @Test
+    func decisionIsDistilledToOutcome() {
+        let m = meeting(notes: "Okay so we decided to go with the blue theme")
+        let decisions = MeetingIntelligenceEngine.decisions(for: m)
+        #expect(decisions.contains { $0.localizedCaseInsensitiveContains("blue theme") })
+        #expect(!decisions.contains { $0.localizedCaseInsensitiveContains("decided") })
+        #expect(!decisions.contains { $0.localizedCaseInsensitiveContains("okay") })
+    }
+
+    @Test
+    func namedOwnerIsDroppedFromActionText() throws {
+        let m = meeting(notes: "- Maya will review the contract by Monday", attendees: ["Maya"])
+        let action = try #require(MeetingIntelligenceEngine.structuredActions(for: m).first)
+        #expect(action.owner == "Maya")
+        #expect(action.text.hasPrefix("Review"))          // name moved to owner, not text
+        #expect(!action.text.localizedCaseInsensitiveContains("will"))
+    }
+
+    @Test
+    func closingQuestionsAreNotOpenQuestions() {
+        let m = meeting(notes: "Great work everyone today.\nAny questions?")
+        #expect(MeetingIntelligenceEngine.report(for: m).openQuestions.isEmpty)
+    }
+
+    @Test
+    func commitmentSentenceReadsAsOwnerTaskDue() {
+        let action = ExtractedActionItem(text: "Send the deck.", owner: "Maya", dueHint: "friday", sourceSpeaker: "Maya")
+        #expect(MeetingIntelligenceEngine.commitmentSentence(action) == "Maya — send the deck (by Friday)")
+    }
 }
 
 // MARK: - Real due dates / overdue
