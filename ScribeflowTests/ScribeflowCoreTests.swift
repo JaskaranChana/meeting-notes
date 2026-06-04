@@ -516,6 +516,47 @@ struct MeetingExtractionTests {
     }
 
     @Test
+    func statementMentioningCueWordIsNotAnAction() {
+        // "review" is a cue word, but this line is a policy statement, not a task.
+        let m = meeting(notes: "Security review is mandatory before rollout\nThe launch went well")
+        let actions = MeetingIntelligenceEngine.structuredActions(for: m)
+        #expect(!actions.contains { $0.text.localizedCaseInsensitiveContains("mandatory") })
+        #expect(!actions.contains { $0.text.localizedCaseInsensitiveContains("launch went") })
+    }
+
+    @Test
+    func imperativeLineIsAnAction() throws {
+        let m = meeting(notes: "- Review the contract and send the redlines")
+        let action = try #require(MeetingIntelligenceEngine.structuredActions(for: m).first)
+        #expect(action.text.hasPrefix("Review"))
+    }
+
+    @Test
+    func stativeRequirementIsNotAnAction() {
+        // "has to feel lightweight" is a requirement on a thing, not a task.
+        let m = meeting(notes: "If we switch, it has to feel lightweight")
+        let actions = MeetingIntelligenceEngine.structuredActions(for: m)
+        #expect(!actions.contains { $0.text.localizedCaseInsensitiveContains("lightweight") })
+    }
+
+    @Test
+    func seedAllFoundDoesNotProduceStatementActions() throws {
+        let allFound = try #require(Meeting.seed.first { $0.title == "Intro call: AllFound" })
+        let texts = MeetingIntelligenceEngine.structuredActions(for: allFound).map(\.text)
+        #expect(!texts.contains { $0.localizedCaseInsensitiveContains("mandatory") })
+        #expect(!texts.contains { $0.localizedCaseInsensitiveContains("as long as") })
+        #expect(!texts.contains { $0.localizedCaseInsensitiveContains("lightweight") })
+    }
+
+    @Test
+    func abilityPhraseIsNotAnAction() {
+        // "as long as we can understand X" expresses ability/condition, not a commitment.
+        let m = meeting(notes: "As long as we can understand the permissions, I can fast-track it")
+        let actions = MeetingIntelligenceEngine.structuredActions(for: m)
+        #expect(!actions.contains { $0.text.localizedCaseInsensitiveContains("understand the permissions") })
+    }
+
+    @Test
     func decisionIsDistilledToOutcome() {
         let m = meeting(notes: "Okay so we decided to go with the blue theme")
         let decisions = MeetingIntelligenceEngine.decisions(for: m)

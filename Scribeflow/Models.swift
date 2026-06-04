@@ -891,6 +891,8 @@ extension Meeting {
             - Security review is mandatory before rollout
             - Wants a mobile-friendly experience for managers on the road
             - Migration decision is a Q2 priority
+            - I'll send the mobile workflow examples and permission model by Friday
+            - Maya to book the security walkthrough with Jon next week
             """,
             transcript: [
                 TranscriptLine(speaker: "Maya", role: "AE", text: "Can you walk me through what pushed this project to the top of the queue right now?"),

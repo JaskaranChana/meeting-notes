@@ -419,25 +419,23 @@ final class MeetingStore {
     }
 
     func signals(for meeting: Meeting) -> MeetingSignals {
-        let decisions = extractedSignalLines(
-            from: meeting,
-            keywords: ["decision", "decided", "agreed", "approved", "greenlit", "go ahead", "proceed"],
-            fallbackPrefixes: ["decision", "agreed", "approved"],
-            limit: 4
-        )
+        // Decisions and actions come from the same distilling/classifying engine
+        // that powers commitments, so the Overview surfaces meaningful items
+        // ("Maya — send the deck (by Friday)") instead of any raw line that
+        // happens to contain a cue word like "review" or "share".
+        let decisions = MeetingIntelligenceEngine.decisions(for: meeting, limit: 4)
+        let actions = MeetingIntelligenceEngine.structuredActions(for: meeting, limit: 5)
+            .map(MeetingIntelligenceEngine.commitmentSentence)
 
-        let actions = extractedSignalLines(
-            from: meeting,
-            keywords: ["next", "follow-up", "follow up", "owner", "send", "share", "review", "schedule", "book", "update", "prepare"],
-            fallbackPrefixes: ["next", "follow", "owner", "send"],
-            limit: 5
-        )
-
+        // Risks stay as surfaced mentions — they're concerns to notice, not
+        // commitments. Exclude lines that are actually action items so a task
+        // like "book the security walkthrough" doesn't double as a risk.
         let risks = extractedSignalLines(
             from: meeting,
             keywords: ["risk", "concern", "issue", "blocker", "security", "timeline", "budget", "delay", "problem"],
             fallbackPrefixes: ["risk", "concern", "issue"],
-            limit: 4
+            limit: 4,
+            exclude: MeetingIntelligenceEngine.isActionableLine
         )
 
         return MeetingSignals(decisions: decisions, actions: actions, risks: risks)
@@ -2055,7 +2053,8 @@ final class MeetingStore {
         from meeting: Meeting,
         keywords: [String],
         fallbackPrefixes: [String],
-        limit: Int
+        limit: Int,
+        exclude: (String) -> Bool = { _ in false }
     ) -> [String] {
         let noteLines = meeting.rawNotes
             .components(separatedBy: .newlines)
@@ -2074,6 +2073,7 @@ final class MeetingStore {
             let matchesPrefix = fallbackPrefixes.contains { lower.hasPrefix($0) || lower.contains("- \($0)") }
 
             guard matchesKeyword || matchesPrefix else { continue }
+            guard !exclude(line) else { continue }
 
             let polished = polishedSignalLine(line)
             let fingerprint = normalizedFingerprint(polished)

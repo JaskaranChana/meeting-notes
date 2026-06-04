@@ -147,6 +147,12 @@ enum MeetingIntelligenceEngine {
         extract(from: sourceLines(for: meeting).map(\.text), keywords: decisionCues, limit: limit, transform: distilledDecision)
     }
 
+    /// Whether a raw line is a commitment/task — used to keep action lines from
+    /// also surfacing as "risks" just because they share a keyword.
+    static func isActionableLine(_ line: String) -> Bool {
+        looksActionable(line)
+    }
+
     private struct IntelligenceSourceLine {
         let text: String
         let speaker: String?
@@ -223,18 +229,6 @@ enum MeetingIntelligenceEngine {
         return Array(results.prefix(limit))
     }
 
-    /// Cues that signal a commitment/action. Specific enough to avoid the
-    /// "everything with 'will' becomes a task" noise of the old filter.
-    static let actionCues = [
-        "i'll", "i will", "we'll", "we will", "need to", "needs to",
-        "going to", "follow up", "follow-up", "next step", "action item",
-        "to-do", "todo", "send", "share", "schedule", "book", "review",
-        "prepare", "draft", "assign", "owner", "deadline", "deliver",
-        "circle back", "set up", "reach out", "by friday", "by monday",
-        "by tuesday", "by wednesday", "by thursday", "by tomorrow", "by eod",
-        "must ", "responsible for"
-    ]
-
     /// Cues that signal a decision was made.
     static let decisionCues = [
         "decided", "decision", "we agreed", "agreed to", "approved",
@@ -251,6 +245,7 @@ enum MeetingIntelligenceEngine {
         let lower = line.lowercased()
         guard !lower.hasSuffix("?") else { return false }
         if explicitOwner(in: line) != nil { return true }
+        if leadingNamedOwner(in: line) != nil { return true }
         let body = strippedSpeaker(cleanLine(line))
         if earliestPreambleEnd(in: body, preambles: actionPreambles) != nil { return true }
         return opensWithImperative(body)
@@ -279,6 +274,25 @@ enum MeetingIntelligenceEngine {
         return true
     }
 
+    /// Verbs that describe a state or feeling, not a thing to do. A distilled
+    /// item opening with one isn't a task — "it has to feel lightweight" should
+    /// not become the action "Feel lightweight."
+    private static let nonActionOpeners: Set<String> = [
+        "feel", "feels", "be", "is", "are", "was", "were", "seem", "seems",
+        "look", "looks", "sound", "sounds", "become", "becomes", "stay", "stays",
+        "remain", "remains", "want", "wants", "like", "likes", "love", "loves",
+        "know", "knows", "think", "thinks", "hope", "hopes", "believe", "prefer",
+        "matter", "matters", "exist", "depend", "depends", "tolerate"
+    ]
+
+    /// Final gate on a distilled action: long enough, and not a stative phrase.
+    private static func isTaskLike(_ text: String) -> Bool {
+        let words = text.split(separator: " ")
+        guard let first = words.first, text.count >= 3 else { return false }
+        let firstClean = first.lowercased().trimmingCharacters(in: CharacterSet.letters.inverted)
+        return !nonActionOpeners.contains(firstClean)
+    }
+
     private static func extractStructuredActions(
         from source: [IntelligenceSourceLine],
         attendees: [String],
@@ -291,6 +305,9 @@ enum MeetingIntelligenceEngine {
             guard looksActionable(line.text) else { continue }
 
             let text = distilledAction(line.text)
+            // Reject distillations that collapsed to a stative phrase ("Feel
+            // lightweight") — they read as tasks but aren't.
+            guard isTaskLike(text) else { continue }
             let key = fingerprint(text)
             guard !text.isEmpty, !seen.contains(key) else { continue }
 
@@ -498,7 +515,7 @@ enum MeetingIntelligenceEngine {
         "i should", "we should", "you should", "should",
         "i'll", "we'll", "you'll", "they'll", "he'll", "she'll",
         "i will", "we will", "you will", "they will", "he will", "she will", "will",
-        "let's", "let me", "i can", "we can",
+        "let's", "let me",
         "action items:", "action item:", "action:", "to-do:", "to do:", "todo:",
         "next steps:", "next step:", "follow up on", "follow up with", "follow-up on",
         "follow up", "follow-up", "circle back on", "circle back",
@@ -513,7 +530,7 @@ enum MeetingIntelligenceEngine {
         "we will go with", "we'll go with", "moving forward with",
         "we settled on", "settled on", "we chose to", "chose to", "we chose",
         "approved", "greenlit", "locked in on", "locked in",
-        "final call is", "final call:", "decision is", "decision:"
+        "final call:", "decision:"
     ]
 
     /// Single-word discourse filler stripped from the front of a distilled item.
@@ -546,6 +563,13 @@ enum MeetingIntelligenceEngine {
                 with: "",
                 options: .regularExpression
             )
+            // "Maya to book …" / "Dana will send …" → drop the leading name and
+            // connector, keeping the verb (the name is captured as owner).
+            text = text.replacingOccurrences(
+                of: #"^[A-Z][a-z]{1,20}\s+(?:will|to|should|owns|leads|takes|is going to)\s+"#,
+                with: "",
+                options: .regularExpression
+            )
         }
 
         if let end = earliestPreambleEnd(in: text, preambles: preambles) {
@@ -554,6 +578,9 @@ enum MeetingIntelligenceEngine {
 
         text = strippedLeadingFiller(text)
         text = firstClause(text)
+        // The due date is captured separately (dueHint) and shown as its own
+        // chip, so drop a trailing "by Friday" / "next week" from the task text.
+        if stripOwnerMarker { text = strippedTrailingDue(text) }
 
         let trimmed = text.trimmingCharacters(in: CharacterSet(charactersIn: " ,;:-–—.").union(.whitespacesAndNewlines))
         // If distilling over-trimmed (e.g. a name-only "Sam will."), keep the
@@ -617,6 +644,21 @@ enum MeetingIntelligenceEngine {
             }
         }
         return working
+    }
+
+    /// Remove a trailing due phrase ("by Friday", "next week") from a task,
+    /// since the due is surfaced separately as its own chip.
+    private static func strippedTrailingDue(_ text: String) -> String {
+        let patterns = [
+            #"(?i)\s+by\s+(today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|eod|eow|end of day|end of week|end of the week|q[1-4]|next week|this week)\s*$"#,
+            #"(?i)\s+(this week|next week|end of week|end of the week|end of day)\s*$"#,
+            #"(?i)\s+(today|tomorrow|tonight)\s*$"#
+        ]
+        var result = text
+        for pattern in patterns {
+            result = result.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+        }
+        return result
     }
 
     /// Keep only the first sentence/clause so a rambling line stays a single item.
