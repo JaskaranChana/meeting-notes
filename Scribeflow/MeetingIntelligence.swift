@@ -147,6 +147,15 @@ enum MeetingIntelligenceEngine {
         extract(from: sourceLines(for: meeting).map(\.text), keywords: decisionCues, limit: limit, transform: distilledDecision)
     }
 
+    /// Open/unresolved questions raised in the notes or transcript — the
+    /// "what still needs an answer" every meeting template surfaces. Lines that
+    /// are really action items ("need to clarify X") are excluded so they show
+    /// once, under Actions, instead of in both places.
+    static func openQuestions(for meeting: Meeting, limit: Int = 4) -> [String] {
+        let lines = sourceLines(for: meeting).map(\.text).filter { !looksActionable($0) }
+        return extractQuestions(from: lines, limit: limit)
+    }
+
     /// Whether a raw line is a commitment/task — used to keep action lines from
     /// also surfacing as "risks" just because they share a keyword.
     static func isActionableLine(_ line: String) -> Bool {

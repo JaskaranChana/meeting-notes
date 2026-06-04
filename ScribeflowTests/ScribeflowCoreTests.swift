@@ -537,6 +537,15 @@ struct MeetingExtractionTests {
     }
 
     @Test
+    func openQuestionsSurfaceUnresolvedItems() {
+        let m = meeting(notes: "- Who owns the migration?\n- Is the budget approved?\n- We shipped the feature")
+        let qs = MeetingIntelligenceEngine.openQuestions(for: m)
+        #expect(qs.contains { $0.localizedCaseInsensitiveContains("owns the migration") })
+        #expect(qs.contains { $0.localizedCaseInsensitiveContains("budget approved") })
+        #expect(!qs.contains { $0.localizedCaseInsensitiveContains("shipped the feature") })
+    }
+
+    @Test
     func keyPointsAreEmptyForSymbolNoise() {
         let m = meeting(notes: "12345 !!! ????\n@@@ ###")
         #expect(MeetingIntelligenceEngine.keyPoints(for: m).isEmpty)
