@@ -112,12 +112,12 @@ enum MeetingIntelligenceEngine {
     static func report(for meeting: Meeting) -> MeetingIntelligenceReport {
         let source = sourceLines(for: meeting)
         let corpus = source.map(\.text)
-        let decisions = extract(from: corpus, keywords: decisionCues, limit: 4)
-        let actions = extract(from: corpus, keywords: actionCues, limit: 5)
+        let decisions = extract(from: corpus, keywords: decisionCues, limit: 4, transform: distilledDecision)
+        let actions = extract(from: corpus, keywords: actionCues, limit: 5, transform: distilledAction)
         let structuredActions = extractStructuredActions(from: source, attendees: meeting.attendees, limit: 5)
         let questions = extractQuestions(from: corpus, limit: 4)
         let followUps = followUps(from: actions, structuredActions: structuredActions, questions: questions, decisions: decisions)
-        let summary = summary(from: meeting, corpus: corpus, decisions: decisions, actions: actions)
+        let summary = summary(from: meeting, corpus: corpus, decisions: decisions, structuredActions: structuredActions)
         let speakers = speakerSegments(for: meeting)
 
         return MeetingIntelligenceReport(
@@ -143,7 +143,7 @@ enum MeetingIntelligenceEngine {
 
     /// Decisions detected in a meeting's notes/transcript.
     static func decisions(for meeting: Meeting, limit: Int = 4) -> [String] {
-        extract(from: sourceLines(for: meeting).map(\.text), keywords: decisionCues, limit: limit)
+        extract(from: sourceLines(for: meeting).map(\.text), keywords: decisionCues, limit: limit, transform: distilledDecision)
     }
 
     private struct IntelligenceSourceLine {
@@ -170,18 +170,23 @@ enum MeetingIntelligenceEngine {
         return noteLines + transcriptLines + recordingLines
     }
 
-    private static func extract(from corpus: [String], keywords: [String], limit: Int) -> [String] {
+    private static func extract(
+        from corpus: [String],
+        keywords: [String],
+        limit: Int,
+        transform: (String) -> String = polished
+    ) -> [String] {
         var seen: Set<String> = []
         var results: [String] = []
 
         for line in corpus {
             let lower = line.lowercased()
             guard keywords.contains(where: lower.contains) else { continue }
-            let polished = polished(line)
-            let key = fingerprint(polished)
-            guard !polished.isEmpty, !seen.contains(key) else { continue }
+            let distilled = transform(line)
+            let key = fingerprint(distilled)
+            guard !distilled.isEmpty, !seen.contains(key) else { continue }
             seen.insert(key)
-            results.append(polished)
+            results.append(distilled)
         }
 
         return Array(results.prefix(limit))
@@ -200,6 +205,8 @@ enum MeetingIntelligenceEngine {
                 || lower.contains("need to know")
                 || lower.contains("not sure")
             guard looksLikeQuestion else { continue }
+            // Skip rhetorical meeting-closers — they aren't open questions.
+            guard !isClosingQuestion(lower) else { continue }
 
             var polished = polished(line)
             if !polished.hasSuffix("?"), lower.contains("clarify") || lower.contains("question") {
@@ -250,7 +257,7 @@ enum MeetingIntelligenceEngine {
         for line in source {
             guard looksActionable(line.text.lowercased()) else { continue }
 
-            let text = polished(line.text)
+            let text = distilledAction(line.text)
             let key = fingerprint(text)
             guard !text.isEmpty, !seen.contains(key) else { continue }
 
@@ -300,23 +307,33 @@ enum MeetingIntelligenceEngine {
         from meeting: Meeting,
         corpus: [String],
         decisions: [String],
-        actions: [String]
+        structuredActions: [ExtractedActionItem]
     ) -> [String] {
         var bullets: [String] = []
+        var used: Set<String> = []
+
+        // Lead with what was settled, then who owns the next move — the two
+        // things a reader actually needs — phrased as notes, not "signal:" labels.
         if let decision = decisions.first {
-            bullets.append("Decision signal: \(decision)")
+            bullets.append("Decided: \(lowerFirst(decision))")
+            used.insert(fingerprint(decision))
         }
-        if let action = actions.first {
-            bullets.append("Next-step signal: \(action)")
+        if let action = structuredActions.first {
+            bullets.append("Next: \(commitmentSentence(action))")
+            used.insert(fingerprint(action.text))
         }
 
+        // Fill with the most substantive remaining lines, distilled to a clause.
         let ranked = corpus
             .filter { $0.count > 18 }
             .sorted { score($0) > score($1) }
-            .map(polished)
 
-        for line in ranked where !bullets.contains(line) {
-            bullets.append(line)
+        for line in ranked {
+            let clause = polished(line)
+            let key = fingerprint(clause)
+            guard !clause.isEmpty, !used.contains(key) else { continue }
+            used.insert(key)
+            bullets.append(clause)
             if bullets.count == 4 { break }
         }
 
@@ -324,6 +341,29 @@ enum MeetingIntelligenceEngine {
             bullets.append(meeting.objective.isEmpty ? "Capture more detail to generate a stronger brief." : meeting.objective)
         }
         return bullets
+    }
+
+    /// "Maya — send the deck (by Friday)" — owner + task + due, only when known.
+    static func commitmentSentence(_ action: ExtractedActionItem) -> String {
+        let core = action.text.hasSuffix(".") ? String(action.text.dropLast()) : action.text
+        let due = action.dueHint.map { " (by \(displayDue($0)))" } ?? ""
+        if action.owner != "Owner not named", !action.owner.isEmpty {
+            return "\(action.owner) — \(lowerFirst(core))\(due)"
+        }
+        return "\(core)\(due)"
+    }
+
+    /// Capitalize/expand a raw due marker for display (model keeps the raw form).
+    static func displayDue(_ hint: String) -> String {
+        switch hint.lowercased() {
+        case "eow": return "end of week"
+        case "eod": return "end of day"
+        case "q1", "q2", "q3", "q4": return hint.uppercased()
+        case "today", "tomorrow", "this week", "next week", "end of week", "month":
+            return hint
+        default:
+            return hint.prefix(1).uppercased() + hint.dropFirst()
+        }
     }
 
     private static func speakerSegments(for meeting: Meeting) -> [SpeakerSegment] {
@@ -406,6 +446,164 @@ enum MeetingIntelligenceEngine {
     private static func lowerFirst(_ text: String) -> String {
         guard let first = text.first else { return text }
         return first.lowercased() + String(text.dropFirst())
+    }
+
+    // MARK: - Distillation
+    //
+    // Raw spoken/typed lines are conversational: "so yeah I think I'll probably
+    // send the deck over by Friday." A useful action item is the imperative core:
+    // "Send the deck over by Friday." We cut the commitment preamble, drop leading
+    // filler, and keep the first clause — owner and due are captured separately.
+
+    /// Preambles that introduce a commitment. We keep the verb that follows.
+    private static let actionPreambles: [String] = [
+        "i am going to", "i'm going to", "we are going to", "we're going to",
+        "is going to", "are going to", "going to", "gonna",
+        "i need to", "we need to", "you need to", "they need to", "need to", "needs to", "needed to",
+        "i have to", "we have to", "have to", "has to", "had to",
+        "i want to", "we want to", "want to",
+        "i should", "we should", "you should", "should",
+        "i'll", "we'll", "you'll", "they'll", "he'll", "she'll",
+        "i will", "we will", "you will", "they will", "he will", "she will", "will",
+        "let's", "let me", "i can", "we can",
+        "action items:", "action item:", "action:", "to-do:", "to do:", "todo:",
+        "next steps:", "next step:", "follow up on", "follow up with", "follow-up on",
+        "follow up", "follow-up", "circle back on", "circle back",
+        "responsible for", "in charge of", "must"
+    ]
+
+    /// Preambles that introduce a decision. We keep the outcome that follows.
+    private static let decisionPreambles: [String] = [
+        "we have decided to", "we've decided to", "we decided to", "i decided to",
+        "decided to", "we agreed to", "we agreed that", "we agreed", "agreed to", "agreed that",
+        "we are going with", "we're going with", "going with", "go ahead with", "go with",
+        "we will go with", "we'll go with", "moving forward with",
+        "we settled on", "settled on", "we chose to", "chose to", "we chose",
+        "approved", "greenlit", "locked in on", "locked in",
+        "final call is", "final call:", "decision is", "decision:"
+    ]
+
+    /// Single-word discourse filler stripped from the front of a distilled item.
+    private static let leadingFillers: Set<String> = [
+        "so", "um", "uh", "okay", "ok", "well", "yeah", "yep", "right", "now",
+        "basically", "actually", "literally", "honestly", "just", "really",
+        "maybe", "probably", "like", "then", "and", "but", "also"
+    ]
+
+    /// Multi-word filler phrases stripped from the front (checked before words).
+    private static let leadingFillerPhrases: [String] = [
+        "i think", "i guess", "i mean", "you know", "kind of", "sort of", "let's see"
+    ]
+
+    private static func distilledAction(_ raw: String) -> String {
+        distill(raw, preambles: actionPreambles, stripOwnerMarker: true)
+    }
+
+    private static func distilledDecision(_ raw: String) -> String {
+        distill(raw, preambles: decisionPreambles, stripOwnerMarker: false)
+    }
+
+    private static func distill(_ raw: String, preambles: [String], stripOwnerMarker: Bool) -> String {
+        var text = strippedSpeaker(cleanLine(raw))
+
+        if stripOwnerMarker {
+            // "owner: Dana — confirm the seat count" → "confirm the seat count".
+            text = text.replacingOccurrences(
+                of: #"(?i)^\s*owner\b\s*[:\-–]\s*[A-Za-z][A-Za-z '.]{0,30}?\s*[—–-]\s*"#,
+                with: "",
+                options: .regularExpression
+            )
+        }
+
+        if let end = earliestPreambleEnd(in: text, preambles: preambles) {
+            text = String(text[end...])
+        }
+
+        text = strippedLeadingFiller(text)
+        text = firstClause(text)
+
+        let trimmed = text.trimmingCharacters(in: CharacterSet(charactersIn: " ,;:-–—.").union(.whitespacesAndNewlines))
+        // If distilling over-trimmed (e.g. a name-only "Sam will."), keep the
+        // original polished line rather than emit something meaningless.
+        guard trimmed.count >= 3 else { return polished(raw) }
+
+        let capitalized = trimmed.prefix(1).uppercased() + trimmed.dropFirst()
+        if capitalized.hasSuffix(".") || capitalized.hasSuffix("?") || capitalized.hasSuffix("!") {
+            return String(capitalized)
+        }
+        return "\(capitalized)."
+    }
+
+    /// Drop a transcript "Speaker: …" prefix, keeping just the spoken text.
+    private static func strippedSpeaker(_ line: String) -> String {
+        let parts = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: true)
+        guard parts.count == 2,
+              parts[0].count <= 32,
+              parts[0].rangeOfCharacter(from: .decimalDigits) == nil else { return line }
+        return String(parts[1]).trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Index just past the earliest word-bounded preamble match, if any.
+    private static func earliestPreambleEnd(in text: String, preambles: [String]) -> String.Index? {
+        var best: Range<String.Index>?
+        for preamble in preambles {
+            var searchStart = text.startIndex
+            while let range = text.range(of: preamble, options: .caseInsensitive, range: searchStart..<text.endIndex) {
+                let beforeOK = range.lowerBound == text.startIndex
+                    || !text[text.index(before: range.lowerBound)].isLetter
+                // Colon-terminated cues ("action item:") don't need a word boundary after.
+                let afterOK = preamble.hasSuffix(":")
+                    || range.upperBound == text.endIndex
+                    || !text[range.upperBound].isLetter
+                if beforeOK, afterOK {
+                    if best == nil || range.lowerBound < best!.lowerBound { best = range }
+                    break
+                }
+                searchStart = range.upperBound
+                if searchStart >= text.endIndex { break }
+            }
+        }
+        return best?.upperBound
+    }
+
+    private static func strippedLeadingFiller(_ text: String) -> String {
+        var working = text.trimmingCharacters(in: CharacterSet(charactersIn: " ,;:-–—.").union(.whitespacesAndNewlines))
+        var changed = true
+        while changed {
+            changed = false
+            for phrase in leadingFillerPhrases where working.lowercased().hasPrefix(phrase + " ") {
+                working = String(working.dropFirst(phrase.count))
+                    .trimmingCharacters(in: CharacterSet(charactersIn: " ,"))
+                changed = true
+            }
+            let firstWord = working.prefix { $0.isLetter || $0 == "'" }.lowercased()
+            if !firstWord.isEmpty, leadingFillers.contains(firstWord) {
+                working = String(working.dropFirst(firstWord.count))
+                    .trimmingCharacters(in: CharacterSet(charactersIn: " ,"))
+                changed = true
+            }
+        }
+        return working
+    }
+
+    /// Keep only the first sentence/clause so a rambling line stays a single item.
+    private static func firstClause(_ text: String) -> String {
+        if let idx = text.firstIndex(where: { $0 == "." || $0 == "?" || $0 == "!" }) {
+            let head = text[..<idx]
+            if head.trimmingCharacters(in: .whitespaces).count >= 8 { return String(head) }
+        }
+        if text.count > 140, let cut = text.prefix(140).lastIndex(of: " ") {
+            return String(text[..<cut]) + "…"
+        }
+        return text
+    }
+
+    private static func isClosingQuestion(_ lower: String) -> Bool {
+        let closers = [
+            "any questions", "questions?", "anything else", "make sense",
+            "sound good", "does that work", "are we good", "all good"
+        ]
+        return closers.contains { lower.contains($0) } && lower.count < 40
     }
 
     private static func ownerHint(in line: String, attendees: [String]) -> String {
