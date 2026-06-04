@@ -603,34 +603,12 @@ struct MeetingDetailView: View {
     func overviewCanvas(_ meeting: Meeting) -> some View {
         overviewSnapshot(meeting)
         overviewStatsRow(meeting)
-        editorialYourNotes(meeting)
-        if hasExtractedLayer(meeting) { extractedLayerEyebrow }
         editorialDecisions(meeting)
         editorialActions(meeting)
         editorialQuestions(meeting)
         editorialRisks(meeting)
+        editorialYourNotes(meeting)
         overviewPrimaryAction
-    }
-
-    /// True when the engine surfaced anything — so the "extracted for you" label
-    /// only appears when there's an AI layer to introduce.
-    private func hasExtractedLayer(_ meeting: Meeting) -> Bool {
-        !meetingSignals.decisions.isEmpty
-            || !meetingSignals.actions.isEmpty
-            || !meetingSignals.questions.isEmpty
-            || !meetingSignals.risks.isEmpty
-            || meeting.commitments.contains { $0.status == .open || $0.status == .atRisk }
-    }
-
-    /// Marks the boundary between the user's own notes and the AI-extracted
-    /// sections, so the two are never mistaken for each other.
-    private var extractedLayerEyebrow: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "sparkles").font(.system(size: 11, weight: .semibold))
-            Text("EXTRACTED FOR YOU").font(.caption2.weight(.bold)).tracking(1.4)
-        }
-        .foregroundStyle(AppPalette.secondaryInk)
-        .padding(.top, 6)
     }
 
     /// Synopsis rendered as an editorial pull-quote: italic serif with an
