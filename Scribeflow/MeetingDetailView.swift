@@ -714,7 +714,9 @@ struct MeetingDetailView: View {
     func editorialActions(_ meeting: Meeting) -> some View {
         let open = meeting.commitments.filter { $0.status == .open || $0.status == .atRisk }
         let done = meeting.commitments.filter { $0.status == .fulfilled || $0.status == .superseded }
-        let signalActions = Array(meetingSignals.actions.prefix(4))
+        // Commitments and signal actions now come from the same extractor, so
+        // only fall back to the live signal read when there are no commitments.
+        let signalActions = (open.isEmpty && done.isEmpty) ? Array(meetingSignals.actions.prefix(4)) : []
         if !open.isEmpty || !done.isEmpty || !signalActions.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 EditorialSectionHead(title: "Actions", titleSize: 18) {
