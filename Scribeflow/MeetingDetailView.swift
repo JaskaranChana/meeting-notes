@@ -605,6 +605,7 @@ struct MeetingDetailView: View {
         overviewStatsRow(meeting)
         editorialDecisions(meeting)
         editorialActions(meeting)
+        editorialQuestions(meeting)
         editorialRisks(meeting)
         overviewPrimaryAction
     }
@@ -819,6 +820,36 @@ struct MeetingDetailView: View {
             Spacer(minLength: 0)
         }
         .padding(.vertical, 12)
+    }
+
+    @ViewBuilder
+    func editorialQuestions(_ meeting: Meeting) -> some View {
+        let questions = meetingSignals.questions
+        if !questions.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                EditorialSectionHead(title: "Open questions", titleSize: 18) {
+                    EditorialMeta(text: "\(questions.count)", tint: AppPalette.gold)
+                }
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(questions.prefix(4).enumerated()), id: \.offset) { idx, text in
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: "questionmark.circle")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(AppPalette.gold)
+                                .padding(.top, 2)
+                            Text(text)
+                                .font(.system(size: 16, design: .serif))
+                                .foregroundStyle(AppPalette.ink)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(.vertical, 8)
+                        .editorialReveal()
+                        if idx < min(questions.count, 4) - 1 { EditorialRule() }
+                    }
+                }
+            }
+        }
     }
 
     @ViewBuilder

@@ -460,6 +460,7 @@ struct MeetingSignals: Hashable {
     var decisions: [String]
     var actions: [String]
     var risks: [String]
+    var questions: [String] = []
 }
 
 struct OpenLoop: Identifiable, Hashable {

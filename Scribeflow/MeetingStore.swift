@@ -438,7 +438,10 @@ final class MeetingStore {
             exclude: MeetingIntelligenceEngine.isActionableLine
         )
 
-        return MeetingSignals(decisions: decisions, actions: actions, risks: risks)
+        // Open questions — the unresolved items every meeting template surfaces.
+        let questions = MeetingIntelligenceEngine.openQuestions(for: meeting, limit: 4)
+
+        return MeetingSignals(decisions: decisions, actions: actions, risks: risks, questions: questions)
     }
 
     func openLoops(limit: Int = 6) -> [OpenLoop] {
