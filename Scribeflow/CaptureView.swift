@@ -1510,30 +1510,16 @@ enum MeetingCopilot {
         for raw in paragraphs.suffix(10) {
             let p = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             guard p.count >= 20 else { continue }
-            let lower = p.lowercased()
-            if decisionCues.contains(where: { lower.contains($0) }) {
-                out.append(CopilotSignal(kind: .decision, text: clipped(p), detail: nil))
-            } else if actionCues.contains(where: { lower.contains($0) }) {
-                out.append(CopilotSignal(kind: .action, text: clipped(p), detail: nil))
+            // Same distilling/classifying engine as the saved-meeting surfaces,
+            // so live signals read as "Send the MSA" — not the whole spoken line.
+            if let decision = MeetingIntelligenceEngine.decision(from: p) {
+                out.append(CopilotSignal(kind: .decision, text: clipped(decision), detail: nil))
+            } else if let action = MeetingIntelligenceEngine.actionItem(from: p) {
+                out.append(CopilotSignal(kind: .action, text: clipped(action), detail: nil))
             }
         }
         return Array(dedup(out.reversed()).prefix(limit))
     }
-
-    // MARK: Cues
-
-    private static let decisionCues = [
-        "we decided", "let's go with", "going with", "we'll go with", "we agreed",
-        "agreed to", "decision is", "final call", "we're going to", "go ahead with",
-        "settled on", "let's do", "we'll move forward"
-    ]
-
-    private static let actionCues = [
-        "i'll", "i will", "we'll need", "can you", "could you", "please",
-        "need to", "needs to", "make sure", "follow up", "send over", "send the",
-        "by friday", "by monday", "by tomorrow", "by eod", "action item",
-        "take care of", "circle back", "will own", "let me"
-    ]
 
     // MARK: Helpers
 
