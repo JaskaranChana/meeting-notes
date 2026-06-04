@@ -549,14 +549,29 @@ struct CountUpNumber: View, Animatable {
 
 /// Best-effort one-line synopsis from a meeting's summary (or raw notes).
 func meetingSynopsis(for meeting: Meeting, summary: MeetingSummary) -> String {
-    if !summary.title.isEmpty, summary.title.count > 12 { return summary.title }
-    let bullets = summary.sections.flatMap(\.bullets).filter { !$0.isEmpty }
+    // Prefer a real objective the user set, then genuinely extracted highlights
+    // (skipping placeholder prompts), then the user's own first line — never the
+    // templated "This meeting is centered on…" / "Summary of…" title.
+    let objective = meeting.objective.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !objective.isEmpty { return objective }
+    let bullets = summary.sections.flatMap(\.bullets)
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty && !isPlaceholderSummaryBullet($0) }
     if !bullets.isEmpty { return bullets.prefix(2).joined(separator: " · ") }
     let firstLine = meeting.rawNotes
-        .split(separator: "\n").first
-        .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-    if let firstLine, !firstLine.isEmpty { return firstLine }
+        .split(whereSeparator: \.isNewline)
+        .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " -•\t")) }
+        .first(where: { !$0.isEmpty && $0 != "Add your key takeaways here" })
+    if let firstLine { return firstLine }
     return "Captured. Ready to review."
+}
+
+/// Placeholder summary prompts shown when nothing could be extracted — never use
+/// these as a synopsis.
+func isPlaceholderSummaryBullet(_ bullet: String) -> Bool {
+    let starts = ["Add a few bullets", "Add your", "Clarify the next", "Capture more",
+                  "Document the next", "Name the one", "The meeting capture is", "Capture at least"]
+    return starts.contains { bullet.hasPrefix($0) }
 }
 
 /// Markdown digest used by the Detail "Share digest" menu and the Library
@@ -571,7 +586,10 @@ func meetingDigestMarkdown(_ m: Meeting, signals: MeetingSignals) -> String {
     lines.append("# \(m.title.isEmpty ? "Untitled meeting" : m.title)")
     lines.append("_\(date) · \(m.workspace)\(durationStr)_")
     lines.append("")
-    lines.append("## Synopsis")
+    // --- AI summary: what Scribeflow extracted ---
+    lines.append("## Summary")
+    lines.append("_Auto-summarized by Scribeflow._")
+    lines.append("")
     lines.append(synopsis)
 
     if !signals.decisions.isEmpty {
@@ -582,7 +600,10 @@ func meetingDigestMarkdown(_ m: Meeting, signals: MeetingSignals) -> String {
 
     let openCs = m.commitments.filter { $0.status == .open || $0.status == .atRisk }
     let doneCs = m.commitments.filter { $0.status == .fulfilled || $0.status == .superseded }
-    if !openCs.isEmpty || !doneCs.isEmpty || !signals.actions.isEmpty {
+    // Commitments and signal actions are the same extractor — only fall back to
+    // signal actions when there are no commitments, so nothing is listed twice.
+    let signalActions = (openCs.isEmpty && doneCs.isEmpty) ? signals.actions : []
+    if !openCs.isEmpty || !doneCs.isEmpty || !signalActions.isEmpty {
         lines.append("")
         lines.append("## Actions")
         for c in openCs {
@@ -592,13 +613,31 @@ func meetingDigestMarkdown(_ m: Meeting, signals: MeetingSignals) -> String {
             lines.append(parts.joined(separator: " "))
         }
         for c in doneCs { lines.append("- [x] \(c.statement)") }
-        for text in signals.actions { lines.append("- [ ] \(text)") }
+        for text in signalActions { lines.append("- [ ] \(text)") }
+    }
+
+    if !signals.questions.isEmpty {
+        lines.append("")
+        lines.append("## Open questions")
+        for q in signals.questions { lines.append("- \(q)") }
     }
 
     if !signals.risks.isEmpty {
         lines.append("")
         lines.append("## Risks")
         for r in signals.risks { lines.append("- \(r)") }
+    }
+
+    // --- The user's own words, kept separate from the AI summary above ---
+    let yourNotes = m.rawNotes
+        .split(whereSeparator: \.isNewline)
+        .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " -•\t")) }
+        .filter { !$0.isEmpty && $0 != "Add your key takeaways here" }
+    if !yourNotes.isEmpty {
+        lines.append("")
+        lines.append("## Your notes")
+        lines.append("_In your words — captured by you, unedited._")
+        for n in yourNotes { lines.append("- \(n)") }
     }
 
     if !m.attendees.isEmpty {

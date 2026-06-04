@@ -634,32 +634,10 @@ struct MeetingDetailView: View {
         .padding(.top, 4)
     }
 
+    /// Single source of truth lives in `meetingSynopsis` (SharedViews), so the
+    /// brief and the shared/exported digest always read the same.
     func synopsisFor(_ meeting: Meeting, summary: MeetingSummary) -> String {
-        // Prefer a real objective the user actually set.
-        let objective = meeting.objective.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !objective.isEmpty { return objective }
-        // Then genuinely extracted highlights — skip the placeholder prompts
-        // ("Add a few bullets…", "Clarify the next decision…").
-        let bullets = summary.sections.flatMap(\.bullets)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && !Self.isPlaceholderBullet($0) }
-        if !bullets.isEmpty { return bullets.prefix(2).joined(separator: " · ") }
-        // Otherwise, show exactly what the user typed — never a templated line.
-        let firstLine = meeting.rawNotes
-            .split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " -•\t")) }
-            .first(where: { !$0.isEmpty })
-        if let firstLine, !firstLine.isEmpty { return firstLine }
-        return "Captured. Ready to review."
-    }
-
-    /// Placeholder summary prompts shown when nothing could be extracted — these
-    /// should never be presented as the meeting's synopsis.
-    private static func isPlaceholderBullet(_ bullet: String) -> Bool {
-        let starts = ["Add a few bullets", "Add your", "Clarify the next", "Capture more",
-                      "Document the next", "Name the one", "The meeting capture is",
-                      "Capture at least"]
-        return starts.contains { bullet.hasPrefix($0) }
+        meetingSynopsis(for: meeting, summary: summary)
     }
 
     /// Flat decisions / actions / risks / score row, divided by hairlines and
