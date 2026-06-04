@@ -673,7 +673,14 @@ final class MeetingStore {
 
     func scoreAndSave(for id: Meeting.ID) {
         guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
-        meetings[index].score = MeetingScorer.score(for: meetings[index])
+        let meeting = meetings[index]
+        // Only score a meeting that has something to score. The scorer baselines
+        // every dimension at 50, so a thin or empty note would otherwise show a
+        // meaningless mid-range number. No substance → no score (UI shows "—").
+        let hasSubstance = !meeting.commitments.isEmpty
+            || meeting.transcript.count > 3
+            || meeting.rawNotes.trimmingCharacters(in: .whitespacesAndNewlines).count >= 140
+        meetings[index].score = hasSubstance ? MeetingScorer.score(for: meeting) : nil
     }
 
     // MARK: - Action Inbox (Tier 1)
@@ -1530,55 +1537,41 @@ final class MeetingStore {
     private func generatedSummaries(for meeting: Meeting) -> [TemplateSummary] {
         let noteLines = meeting.rawNotes
             .split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " -•\t")) }
             .filter { !$0.isEmpty }
 
-        // Build the summary from what was actually extracted — decisions and
-        // accountable next steps (owner · task · due) — not arbitrary line
-        // slices. Fall back to raw notes only when the extractor finds nothing.
+        // Only ever label something a "decision" or "next step" if it really is
+        // one. When nothing meaningful was extracted, show the user's own note
+        // under a neutral heading — never mislabel note lines as decisions and
+        // never prefill a placeholder prompt.
         let decisions = MeetingIntelligenceEngine.decisions(for: meeting, limit: 3)
-        let actions = MeetingIntelligenceEngine.structuredActions(for: meeting, limit: 4)
-        let nextSteps = actions.map(MeetingIntelligenceEngine.commitmentSentence)
+        let nextSteps = MeetingIntelligenceEngine.structuredActions(for: meeting, limit: 4)
+            .map(MeetingIntelligenceEngine.commitmentSentence)
 
-        let signals = decisions.isEmpty ? Array(noteLines.prefix(3)) : decisions
-        let steps = nextSteps.isEmpty ? Array(noteLines.dropFirst(3).prefix(3)) : nextSteps
+        func sections(_ decisionsTitle: String, _ stepsTitle: String) -> [SummarySection] {
+            var out: [SummarySection] = []
+            if !decisions.isEmpty { out.append(SummarySection(title: decisionsTitle, bullets: decisions)) }
+            if !nextSteps.isEmpty { out.append(SummarySection(title: stepsTitle, bullets: nextSteps)) }
+            if out.isEmpty, !noteLines.isEmpty {
+                out.append(SummarySection(title: "Notes", bullets: Array(noteLines.prefix(5))))
+            }
+            return out
+        }
+
+        let title = meeting.objective.isEmpty
+            ? "Summary of \(meeting.title)."
+            : "This meeting is centered on \(meeting.objective.lowercased())."
 
         return [
-            TemplateSummary(
-                template: .discovery,
-                summary: MeetingSummary(
-                    eyebrow: "Auto draft",
-                    title: meeting.objective.isEmpty
-                        ? "Summary of \(meeting.title)."
-                        : "This meeting is centered on \(meeting.objective.lowercased()).",
-                    sections: [
-                        SummarySection(title: "Decisions & signals", bullets: signals.isEmpty ? ["Add a few bullets in the notes pane and Scribeflow will keep shaping the summary."] : signals),
-                        SummarySection(title: "Next steps", bullets: steps.isEmpty ? ["Clarify the next decision, owner, and deadline."] : steps),
-                    ]
-                )
-            ),
-            TemplateSummary(
-                template: .exec,
-                summary: MeetingSummary(
-                    eyebrow: "Exec view",
-                    title: "Quick readout for \(meeting.workspace).",
-                    sections: [
-                        SummarySection(title: "What was decided", bullets: signals.isEmpty ? ["The meeting capture is ready for a concise executive summary."] : signals),
-                        SummarySection(title: "Owns the follow-through", bullets: steps.isEmpty ? ["Document the next action and any risk before sharing upward."] : steps),
-                    ]
-                )
-            ),
-            TemplateSummary(
-                template: .manager,
-                summary: MeetingSummary(
-                    eyebrow: "Coach angle",
-                    title: "Turn this capture into coaching and accountability.",
-                    sections: [
-                        SummarySection(title: "Decisions to reinforce", bullets: signals.isEmpty ? ["Capture more detail in notes to unlock coaching feedback."] : signals),
-                        SummarySection(title: "Hold owners to", bullets: steps.isEmpty ? ["Name the one follow-up that matters most."] : steps),
-                    ]
-                )
-            ),
+            TemplateSummary(template: .discovery, summary: MeetingSummary(
+                eyebrow: "Auto draft", title: title,
+                sections: sections("Decisions", "Next steps"))),
+            TemplateSummary(template: .exec, summary: MeetingSummary(
+                eyebrow: "Exec view", title: "Quick readout for \(meeting.workspace).",
+                sections: sections("What was decided", "Owns the follow-through"))),
+            TemplateSummary(template: .manager, summary: MeetingSummary(
+                eyebrow: "Coach angle", title: "Turn this capture into coaching and accountability.",
+                sections: sections("Decisions to reinforce", "Hold owners to"))),
         ]
     }
 
