@@ -2107,26 +2107,6 @@ final class MeetingStore {
         return sentence.hasSuffix(".") ? sentence : sentence + "."
     }
 
-    private func extractRelevantLines(
-        from meeting: Meeting,
-        keywords: [String],
-        includeTranscripts: Bool
-    ) -> [String] {
-        var corpus = meeting.rawNotes
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
-        if includeTranscripts {
-            corpus += meeting.transcript.map(\.text)
-        }
-
-        return corpus.filter { line in
-            let lower = line.lowercased()
-            return keywords.contains { lower.contains($0) }
-        }
-    }
-
     private func extractedWorkspaceTags(from meeting: Meeting) -> [String] {
         let corpus = "\(meeting.objective) \(meeting.rawNotes) \(meeting.transcript.map(\.text).joined(separator: " "))".lowercased()
         let tags = [
@@ -2216,11 +2196,11 @@ final class MeetingStore {
         }
 
         if lowerPrompt.contains("action") {
-            let actions = (keyLines + nextLines).prefix(5)
+            let actions = MeetingIntelligenceEngine.structuredActions(for: meeting, limit: 6)
             return actions.isEmpty
                 ? "- Capture at least one owner and next step in the notes to generate action items."
-                : actions.enumerated().map { index, line in
-                    "\(index + 1). \(line)"
+                : actions.enumerated().map { index, action in
+                    "\(index + 1). \(MeetingIntelligenceEngine.commitmentSentence(action))"
                 }.joined(separator: "\n")
         }
 
@@ -2230,32 +2210,23 @@ final class MeetingStore {
         }
 
         if lowerPrompt.contains("risk") || lowerPrompt.contains("blocker") {
-            let riskLines = meeting.rawNotes
-                .components(separatedBy: .newlines)
-                .filter {
-                    let lower = $0.lowercased()
-                    return lower.contains("risk") || lower.contains("concern") || lower.contains("block") || lower.contains("issue")
-                }
+            let riskLines = signals(for: meeting).risks
 
             if riskLines.isEmpty {
                 return "- No explicit blocker was captured, but the biggest open question is whether the team has a clear owner and next step."
             }
 
-            return riskLines.map { "- \($0.trimmingCharacters(in: .whitespacesAndNewlines))" }.joined(separator: "\n")
+            return riskLines.map { "- \($0)" }.joined(separator: "\n")
         }
 
         if lowerPrompt.contains("decision") {
-            let decisionLines = extractRelevantLines(
-                from: meeting,
-                keywords: ["decision", "decided", "agreed", "approved"],
-                includeTranscripts: true
-            )
+            let decisions = MeetingIntelligenceEngine.decisions(for: meeting, limit: 4)
 
-            if decisionLines.isEmpty {
+            if decisions.isEmpty {
                 return "- No explicit decision was captured yet, so the best next step is to clarify what was actually agreed."
             }
 
-            return decisionLines.prefix(4).map { "- \($0)" }.joined(separator: "\n")
+            return decisions.map { "- \($0)" }.joined(separator: "\n")
         }
 
         if lowerPrompt.contains("theme") {
@@ -2291,29 +2262,43 @@ final class MeetingStore {
             }.joined(separator: "\n")
         }
 
-        if lowerPrompt.contains("decision") {
-            let matches = meetings.flatMap { referencedLines(
-                in: $0,
-                keywords: ["decision", "decided", "agreed", "approved"],
-                includeTranscripts: includeTranscripts,
-                limit: 2
-            )}
+        if lowerPrompt.contains("decision") || lowerPrompt.contains("decided") || lowerPrompt.contains("agree") {
+            // Distilled outcomes, attributed to the meeting — not raw lines that
+            // happen to contain "decided".
+            let matches = meetings.flatMap { meeting in
+                MeetingIntelligenceEngine.decisions(for: meeting, limit: 2).map {
+                    "- \($0) — \(meeting.title)"
+                }
+            }
 
             return matches.isEmpty
                 ? "No clear decisions stood out yet across the recent meetings."
                 : Array(matches.prefix(isDeepMode ? 8 : 6)).joined(separator: "\n")
         }
 
-        if lowerPrompt.contains("action") || lowerPrompt.contains("follow") {
-            let matches = meetings.flatMap { referencedLines(
-                in: $0,
-                keywords: ["action", "follow-up", "next", "owner", "send", "review"],
-                includeTranscripts: includeTranscripts,
-                limit: 2
-            )}
+        if lowerPrompt.contains("action") || lowerPrompt.contains("follow")
+            || lowerPrompt.contains("owe") || lowerPrompt.contains("task")
+            || lowerPrompt.contains("owner") || lowerPrompt.contains("to-do") || lowerPrompt.contains("todo") {
+            // "Owner — task (by due)", distilled, instead of any line mentioning
+            // "send" or "review".
+            let matches = meetings.flatMap { meeting in
+                MeetingIntelligenceEngine.structuredActions(for: meeting, limit: 2).map {
+                    "- \(MeetingIntelligenceEngine.commitmentSentence($0)) — \(meeting.title)"
+                }
+            }
 
             return matches.isEmpty
                 ? "No strong follow-up items were detected yet across the recent meetings."
+                : Array(matches.prefix(isDeepMode ? 8 : 6)).joined(separator: "\n")
+        }
+
+        if lowerPrompt.contains("risk") || lowerPrompt.contains("blocker") || lowerPrompt.contains("concern") {
+            let matches = meetings.flatMap { meeting in
+                signals(for: meeting).risks.prefix(2).map { "- \($0) — \(meeting.title)" }
+            }
+
+            return matches.isEmpty
+                ? "Nothing is flagged as a risk or blocker across the recent meetings."
                 : Array(matches.prefix(isDeepMode ? 8 : 6)).joined(separator: "\n")
         }
 
@@ -2348,35 +2333,6 @@ final class MeetingStore {
 
         \(recap)
         """
-    }
-
-    private func referencedLines(
-        in meeting: Meeting,
-        keywords: [String],
-        includeTranscripts: Bool,
-        limit: Int
-    ) -> [String] {
-        var lines = meeting.rawNotes
-            .components(separatedBy: .newlines)
-            .map { ("note", $0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-            .filter { !$0.1.isEmpty }
-
-        if includeTranscripts {
-            lines += meeting.transcript.enumerated().map { index, line in
-                ("transcript \(index + 1)", line.text.trimmingCharacters(in: .whitespacesAndNewlines))
-            }
-        }
-
-        return lines
-            .filter { source, line in
-                let lower = line.lowercased()
-                let matchesKeyword = keywords.contains { lower.contains($0) }
-                return matchesKeyword && !source.isEmpty
-            }
-            .prefix(limit)
-            .map { source, line in
-                "- \(meeting.title): \(line) [source: \(source)]"
-            }
     }
 
     private func polishNotes(
