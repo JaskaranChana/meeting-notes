@@ -153,6 +153,22 @@ enum MeetingIntelligenceEngine {
         looksActionable(line)
     }
 
+    /// Distilled action text for a single line, or nil if it isn't a real action.
+    /// Used by the live copilot, which classifies spoken paragraphs one at a time.
+    static func actionItem(from line: String) -> String? {
+        guard looksActionable(line) else { return nil }
+        let text = distilledAction(line)
+        return isTaskLike(text) ? text : nil
+    }
+
+    /// Distilled decision text for a single line, or nil if it isn't a decision.
+    static func decision(from line: String) -> String? {
+        let lower = line.lowercased()
+        guard decisionCues.contains(where: lower.contains) else { return nil }
+        let text = distilledDecision(line)
+        return text.count >= 3 ? text : nil
+    }
+
     private struct IntelligenceSourceLine {
         let text: String
         let speaker: String?

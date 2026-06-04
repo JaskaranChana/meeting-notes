@@ -424,10 +424,12 @@ struct MeetingCopilotTests {
             "I'll send the MSA over before end of day tomorrow"
         ]
         let signals = MeetingCopilot.detect(paragraphs: paragraphs)
-        #expect(signals.contains { $0.kind == .decision && $0.text.contains("ship the pilot") })
-        #expect(signals.contains { $0.kind == .action && $0.text.contains("send the MSA") })
+        // Text is distilled and sentence-cased ("Ship the pilot"), so match
+        // case-insensitively.
+        #expect(signals.contains { $0.kind == .decision && $0.text.localizedCaseInsensitiveContains("ship the pilot") })
+        #expect(signals.contains { $0.kind == .action && $0.text.localizedCaseInsensitiveContains("send the MSA") })
         // Neutral chatter is not surfaced.
-        #expect(!signals.contains { $0.text.contains("weather") })
+        #expect(!signals.contains { $0.text.localizedCaseInsensitiveContains("weather") })
     }
 
     @Test
