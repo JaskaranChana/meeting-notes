@@ -65,9 +65,10 @@ struct MeetingDetailView: View {
         case .overview:
             return nil
         case .tasks:
+            // Commitments and signal actions are the same extractor now — don't
+            // sum them. Open commitments when present, else the live signals.
             let open = meeting.commitments.filter { $0.status == .open || $0.status == .atRisk }.count
-            let actions = meetingSignals.actions.count
-            let total = open + actions
+            let total = open > 0 ? open : meetingSignals.actions.count
             return total > 0 ? total : nil
         case .transcript:
             return meeting.transcript.isEmpty ? nil : meeting.transcript.count
@@ -644,7 +645,9 @@ struct MeetingDetailView: View {
     /// bracketed top and bottom — the editorial stat strip.
     func overviewStatsRow(_ meeting: Meeting) -> some View {
         let decisions = meetingSignals.decisions.count
-        let actions = meetingSignals.actions.count + meeting.commitments.filter { $0.status == .open || $0.status == .atRisk }.count
+        // Commitments and signal actions are the same extractor now, so don't
+        // sum them — count commitments when present, else the live signals.
+        let actions = meeting.commitments.isEmpty ? meetingSignals.actions.count : meeting.commitments.count
         let risks = meetingSignals.risks.count
         let score = meeting.score?.overall
         return HStack(spacing: 0) {
