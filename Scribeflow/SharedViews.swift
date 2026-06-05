@@ -615,7 +615,9 @@ func meetingDigestMarkdown(_ m: Meeting, signals: MeetingSignals) -> String {
             var parts = ["- [ ] \(c.statement)"]
             if c.owner != "Owner not named" { parts.append("(\(c.owner))") }
             if let due = c.dueHint { parts.append("— due \(due)") }
+            if c.priority?.lowercased() == "high" { parts.append("— high priority") }
             lines.append(parts.joined(separator: " "))
+            if let why = c.rationale, !why.isEmpty { lines.append("  why: \(why)") }
         }
         for c in doneCs { lines.append("- [x] \(c.statement)") }
         for text in signalActions { lines.append("- [ ] \(text)") }
