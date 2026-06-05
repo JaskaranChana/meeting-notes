@@ -679,7 +679,10 @@ final class MeetingStore {
 
     func updateContextMode(_ mode: MeetingContextMode, for id: Meeting.ID) {
         guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        guard meetings[index].contextMode != mode else { return }
         meetings[index].contextMode = mode
+        // Re-tailor the model brief to the chosen lens (no-op without the model).
+        Task { await processWithAI(for: id) }
     }
 
     // MARK: - Meeting Score (Tier 2)
@@ -1535,7 +1538,8 @@ final class MeetingStore {
                 let brief = try await AppleIntelligenceBriefExtractor.extract(
                     title: meeting.title,
                     notes: meeting.rawNotes,
-                    transcriptParagraphs: meeting.transcript.map(\.text)
+                    transcriptParagraphs: meeting.transcript.map(\.text),
+                    focus: meeting.contextMode.aiHint
                 )
                 guard !brief.isEmpty,
                       let index = meetings.firstIndex(where: { $0.id == id }) else { return }
@@ -2604,7 +2608,8 @@ private enum AppleIntelligenceBriefExtractor {
         SystemLanguageModel.default.availability
     }
 
-    static func extract(title: String, notes: String, transcriptParagraphs: [String]) async throws -> AIBriefData {
+    static func extract(title: String, notes: String, transcriptParagraphs: [String], focus: String) async throws -> AIBriefData {
+        let lensLine = focus.isEmpty ? "" : "\n        Lens for this meeting type — emphasize accordingly: \(focus)"
         let session = LanguageModelSession(instructions: """
         You are an expert meeting analyst inside a professional note-taking app.
         Read rough, informal, possibly misspelled notes and turn them into a clean,
@@ -2612,7 +2617,7 @@ private enum AppleIntelligenceBriefExtractor {
         Extract ONLY what the notes (and transcript, if provided) actually support —
         never invent decisions, actions, owners, dates, risks, or facts. If a
         category has nothing, return an empty list for it. Write tasks as short
-        imperative phrases. Keep the summary to one or two sentences.
+        imperative phrases. Keep the summary to one or two sentences.\(lensLine)
 
         For enhancedNotes, treat the user's own bullet points as the skeleton:
         keep each one VERBATIM as the anchor (in their order), and add a short
