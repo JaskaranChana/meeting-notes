@@ -32,7 +32,13 @@ struct AggregatedActionItem: Identifiable, Hashable {
     }
 
     var priority: ActionPriority {
+        // Real-time urgency wins; then the model's judgment; then a heuristic.
         if commitment.status == .atRisk || isOverdue { return .high }
+        if let p = commitment.priority?.lowercased() {
+            if p == "high" { return .high }
+            if p == "low" { return .low }
+            return .medium
+        }
         if isDueSoon { return .medium }
         return commitment.status == .open ? .medium : .low
     }

@@ -1949,7 +1949,9 @@ final class MeetingStore {
                     owner: a.owner.isEmpty ? "Owner not named" : a.owner,
                     sourceSpeaker: "AI",
                     dueHint: a.due.isEmpty ? nil : a.due,
-                    status: status
+                    status: status,
+                    priority: a.priority.isEmpty ? nil : a.priority,
+                    rationale: a.why.isEmpty ? nil : a.why
                 )
             }
         }
@@ -2560,6 +2562,10 @@ private struct GeneratedActionItem {
     var owner: String
     @Guide(description: "Due date if stated, e.g. 'Friday' or 'next week'. Empty string if none.")
     var due: String
+    @Guide(description: "Priority based on urgency and impact stated in the notes: 'high', 'medium', or 'low'. Do not inflate.")
+    var priority: String
+    @Guide(description: "One short clause on why this matters / the consequence, only if the notes support it. Empty otherwise.")
+    var why: String
 }
 
 @available(iOS 26.0, *)
@@ -2634,7 +2640,8 @@ private enum AppleIntelligenceBriefExtractor {
             summary: clean(g.summary),
             decisions: g.decisions.map(clean).filter { !$0.isEmpty },
             actions: g.actions
-                .map { AIActionItem(task: clean($0.task), owner: clean($0.owner), due: clean($0.due)) }
+                .map { AIActionItem(task: clean($0.task), owner: clean($0.owner), due: clean($0.due),
+                                    priority: clean($0.priority).lowercased(), why: clean($0.why)) }
                 .filter { !$0.task.isEmpty },
             openQuestions: g.openQuestions.map(clean).filter { !$0.isEmpty },
             keyPoints: g.keyPoints.map(clean).filter { !$0.isEmpty },

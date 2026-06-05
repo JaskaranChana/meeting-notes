@@ -623,6 +623,11 @@ struct Commitment: Codable, Hashable, Identifiable {
     var sourceSpeaker: String
     var dueHint: String?
     var status: CommitmentStatus
+    /// Model-assigned priority ("high" / "medium" / "low") — drives ranking and
+    /// the urgency flag. Optional so old data and the heuristic path stay valid.
+    var priority: String? = nil
+    /// One line on why this matters, so a task isn't just a verb with no stakes.
+    var rationale: String? = nil
 }
 
 enum SensitiveFlag: String, Codable, CaseIterable, Identifiable {
@@ -676,6 +681,8 @@ struct AIActionItem: Codable, Hashable {
     var task: String
     var owner: String = ""
     var due: String = ""
+    var priority: String = ""   // high / medium / low
+    var why: String = ""        // why it matters
 }
 
 /// A user note kept verbatim (`anchor`) plus the context the model added

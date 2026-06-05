@@ -805,6 +805,12 @@ struct MeetingDetailView: View {
                     .strikethrough(done)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
+                if !done, let why = c.rationale?.trimmingCharacters(in: .whitespacesAndNewlines), !why.isEmpty {
+                    Text(why)
+                        .font(.system(size: 12))
+                        .foregroundStyle(AppPalette.secondaryInk)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 let meta = actionMetaLine(c)
                 if !meta.isEmpty { EditorialMeta(text: meta) }
             }
@@ -818,6 +824,7 @@ struct MeetingDetailView: View {
 
     private func actionMetaLine(_ c: Commitment) -> String {
         var parts: [String] = []
+        if c.priority?.lowercased() == "high" { parts.append("High priority") }
         if c.owner != "Owner not named" { parts.append(c.owner) }
         if let due = c.dueHint { parts.append("due \(due)") }
         return parts.joined(separator: " · ")
