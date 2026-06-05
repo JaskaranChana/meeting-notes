@@ -549,6 +549,11 @@ struct CountUpNumber: View, Animatable {
 
 /// Best-effort one-line synopsis from a meeting's summary (or raw notes).
 func meetingSynopsis(for meeting: Meeting, summary: MeetingSummary) -> String {
+    // The model's own one-line summary wins when it processed this meeting.
+    if let aiSummary = meeting.aiBrief?.summary,
+       !aiSummary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        return aiSummary
+    }
     // Prefer a real objective the user set, then genuinely extracted highlights
     // (skipping placeholder prompts), then the user's own first line — never the
     // templated "This meeting is centered on…" / "Summary of…" title.

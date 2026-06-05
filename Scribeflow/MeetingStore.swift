@@ -419,6 +419,16 @@ final class MeetingStore {
     }
 
     func signals(for meeting: Meeting) -> MeetingSignals {
+        // The on-device model's brief wins when present — it comprehends context
+        // and fixes typos, where the heuristic only matches keywords.
+        if let brief = meeting.aiBrief, !brief.isEmpty {
+            return MeetingSignals(
+                decisions: brief.decisions,
+                actions: brief.actions.map(aiActionSentence),
+                risks: brief.risks,
+                questions: brief.openQuestions
+            )
+        }
         // Decisions and actions come from the same distilling/classifying engine
         // that powers commitments, so the Overview surfaces meaningful items
         // ("Maya — send the deck (by Friday)") instead of any raw line that
@@ -1216,6 +1226,10 @@ final class MeetingStore {
         meeting.selectedPromptID = meeting.prompts.first?.id
         meetings.insert(meeting, at: 0)
         applySupersededCommitments()
+        // Upgrade to a model-processed brief in the background when available;
+        // the heuristic above is shown instantly in the meantime.
+        let newID = meeting.id
+        Task { await processWithAI(for: newID) }
         return meeting.id
     }
 
@@ -1500,6 +1514,44 @@ final class MeetingStore {
         }
     }
 
+    /// Process a meeting's notes with the on-device language model into a clean,
+    /// typo-corrected, structured brief, and store it. The brief's read sites
+    /// (signals, commitments, summaries) prefer it; if the model is unavailable
+    /// or fails, nothing changes and the heuristic engine stays in charge.
+    func processWithAI(for id: Meeting.ID) async {
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, *) {
+            guard case .available = AppleIntelligenceBriefExtractor.availability() else { return }
+            guard let meeting = meeting(withID: id) else { return }
+            do {
+                let brief = try await AppleIntelligenceBriefExtractor.extract(
+                    title: meeting.title,
+                    notes: meeting.rawNotes,
+                    transcriptParagraphs: meeting.transcript.map(\.text)
+                )
+                guard !brief.isEmpty,
+                      let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+                meetings[index].aiBrief = brief
+                refreshSummariesIfNeeded(at: index)
+                meetings[index].score = MeetingScorer.score(for: meetings[index])
+            } catch {
+                // Heuristic stays in charge.
+            }
+        }
+        #endif
+    }
+
+    /// "Maya — send the deck (by Friday)" from an AI action item.
+    func aiActionSentence(_ a: AIActionItem) -> String {
+        let core = a.task.hasSuffix(".") ? String(a.task.dropLast()) : a.task
+        let due = a.due.isEmpty ? "" : " (by \(a.due))"
+        if !a.owner.isEmpty, a.owner != "Owner not named" {
+            let lowered = core.prefix(1).lowercased() + core.dropFirst()
+            return "\(a.owner) — \(lowered)\(due)"
+        }
+        return "\(core)\(due)"
+    }
+
     private func save() {
         let snapshot = meetings
         let url = saveURL
@@ -1543,16 +1595,22 @@ final class MeetingStore {
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " -•\t")) }
             .filter { !$0.isEmpty }
 
-        // Only ever label something a "decision" or "next step" if it really is
-        // one. When nothing meaningful was extracted, show the user's own note
-        // under a neutral heading — never mislabel note lines as decisions and
-        // never prefill a placeholder prompt.
-        let decisions = MeetingIntelligenceEngine.decisions(for: meeting, limit: 3)
-        let nextSteps = MeetingIntelligenceEngine.structuredActions(for: meeting, limit: 4)
-            .map(MeetingIntelligenceEngine.commitmentSentence)
-        // Refine the rest of the note into distilled discussion points — not a
-        // raw line dump. This is what structures a plain note like a meeting.
-        let keyPoints = MeetingIntelligenceEngine.keyPoints(for: meeting, limit: 5)
+        // Prefer the model's structured brief; otherwise fall back to the
+        // heuristic. Only ever label something a "decision" or "next step" if it
+        // really is one — never mislabel note lines or prefill a placeholder.
+        let decisions: [String]
+        let nextSteps: [String]
+        let keyPoints: [String]
+        if let brief = meeting.aiBrief, !brief.isEmpty {
+            decisions = brief.decisions
+            nextSteps = brief.actions.map(aiActionSentence)
+            keyPoints = brief.keyPoints
+        } else {
+            decisions = MeetingIntelligenceEngine.decisions(for: meeting, limit: 3)
+            nextSteps = MeetingIntelligenceEngine.structuredActions(for: meeting, limit: 4)
+                .map(MeetingIntelligenceEngine.commitmentSentence)
+            keyPoints = MeetingIntelligenceEngine.keyPoints(for: meeting, limit: 5)
+        }
 
         func sections(_ decisionsTitle: String, _ stepsTitle: String, _ pointsTitle: String) -> [SummarySection] {
             var out: [SummarySection] = []
@@ -1872,11 +1930,26 @@ final class MeetingStore {
     }
 
     private func generatedCommitments(for meeting: Meeting) -> [Commitment] {
+        // Prefer the model's action items when it has processed this meeting.
+        if let brief = meeting.aiBrief, !brief.actions.isEmpty {
+            return brief.actions.map { a in
+                let lower = a.task.lowercased()
+                let status: CommitmentStatus = (lower.contains("risk") || lower.contains("block")
+                    || lower.contains("stuck") || lower.contains("at risk")) ? .atRisk : .open
+                return Commitment(
+                    statement: a.task,
+                    owner: a.owner.isEmpty ? "Owner not named" : a.owner,
+                    sourceSpeaker: "AI",
+                    dueHint: a.due.isEmpty ? nil : a.due,
+                    status: status
+                )
+            }
+        }
         // Single source of truth: the same text-aware extractor that powers the
         // intelligence report, so persisted commitments match what the user
         // reads — real owners (You / Team / named), due hints, and de-noised
         // action lines instead of any line containing "will" or "by".
-        MeetingIntelligenceEngine.structuredActions(for: meeting, limit: 6).map { action in
+        return MeetingIntelligenceEngine.structuredActions(for: meeting, limit: 6).map { action in
             let lower = action.text.lowercased()
             let status: CommitmentStatus = (lower.contains("risk")
                 || lower.contains("block")
@@ -2467,6 +2540,82 @@ private enum AppleIntelligenceNoteTransformer {
         }
 
         return normalized.joined(separator: "\n")
+    }
+}
+
+@available(iOS 26.0, *)
+@Generable
+private struct GeneratedActionItem {
+    @Guide(description: "The task as a short imperative phrase, e.g. 'Send the deck'. Fix any spelling.")
+    var task: String
+    @Guide(description: "Who owns it: a person's name, 'You', or 'Team'. Empty string if unclear.")
+    var owner: String
+    @Guide(description: "Due date if stated, e.g. 'Friday' or 'next week'. Empty string if none.")
+    var due: String
+}
+
+@available(iOS 26.0, *)
+@Generable
+private struct GeneratedBrief {
+    @Guide(description: "A one or two sentence professional summary of the meeting.")
+    var summary: String
+    @Guide(description: "Decisions that were actually made. Empty if none were made.")
+    var decisions: [String]
+    @Guide(description: "Action items / commitments, each with an owner and due date when stated.")
+    var actions: [GeneratedActionItem]
+    @Guide(description: "Unresolved questions that still need an answer. Empty if none.")
+    var openQuestions: [String]
+    @Guide(description: "Other substantive discussion points that are not decisions or actions.")
+    var keyPoints: [String]
+    @Guide(description: "Risks, blockers, or concerns raised. Empty if none.")
+    var risks: [String]
+}
+
+/// Turns rough, possibly misspelled notes into a clean, professional structured
+/// brief using the on-device model — real comprehension, not keyword matching.
+@available(iOS 26.0, *)
+private enum AppleIntelligenceBriefExtractor {
+    static func availability() -> SystemLanguageModel.Availability {
+        SystemLanguageModel.default.availability
+    }
+
+    static func extract(title: String, notes: String, transcriptParagraphs: [String]) async throws -> AIBriefData {
+        let session = LanguageModelSession(instructions: """
+        You are an expert meeting analyst inside a professional note-taking app.
+        Read rough, informal, possibly misspelled notes and turn them into a clean,
+        well-organized brief. Correct spelling and grammar in everything you output.
+        Extract ONLY what the notes (and transcript, if provided) actually support —
+        never invent decisions, actions, owners, dates, risks, or facts. If a
+        category has nothing, return an empty list for it. Write tasks as short
+        imperative phrases. Keep the summary to one or two sentences.
+        """)
+
+        let transcriptContext = transcriptParagraphs.suffix(12).joined(separator: "\n")
+        let prompt = """
+        Meeting title: \(title.isEmpty ? "(untitled)" : title)
+
+        Notes (may contain typos and shorthand):
+        \(notes.isEmpty ? "(none)" : notes)
+
+        Transcript context:
+        \(transcriptContext.isEmpty ? "(none)" : transcriptContext)
+
+        Produce the structured brief now.
+        """
+
+        let response = try await session.respond(to: prompt, generating: GeneratedBrief.self)
+        let g = response.content
+        let clean: (String) -> String = { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        return AIBriefData(
+            summary: clean(g.summary),
+            decisions: g.decisions.map(clean).filter { !$0.isEmpty },
+            actions: g.actions
+                .map { AIActionItem(task: clean($0.task), owner: clean($0.owner), due: clean($0.due)) }
+                .filter { !$0.task.isEmpty },
+            openQuestions: g.openQuestions.map(clean).filter { !$0.isEmpty },
+            keyPoints: g.keyPoints.map(clean).filter { !$0.isEmpty },
+            risks: g.risks.map(clean).filter { !$0.isEmpty }
+        )
     }
 }
 
