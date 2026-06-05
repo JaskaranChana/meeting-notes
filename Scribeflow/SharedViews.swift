@@ -634,15 +634,25 @@ func meetingDigestMarkdown(_ m: Meeting, signals: MeetingSignals) -> String {
     }
 
     // --- The user's own words, kept separate from the AI summary above ---
-    let yourNotes = m.rawNotes
-        .split(whereSeparator: \.isNewline)
-        .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " -•\t")) }
-        .filter { !$0.isEmpty && $0 != "Add your key takeaways here" }
-    if !yourNotes.isEmpty {
+    if let enhanced = m.aiBrief?.enhancedNotes, !enhanced.isEmpty {
         lines.append("")
         lines.append("## Your notes")
-        lines.append("_In your words — captured by you, unedited._")
-        for n in yourNotes { lines.append("- \(n)") }
+        lines.append("_Your words, expanded with context._")
+        for note in enhanced {
+            lines.append("- \(note.anchor)")
+            if !note.detail.isEmpty { lines.append("  \(note.detail)") }
+        }
+    } else {
+        let yourNotes = m.rawNotes
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " -•\t")) }
+            .filter { !$0.isEmpty && $0 != "Add your key takeaways here" }
+        if !yourNotes.isEmpty {
+            lines.append("")
+            lines.append("## Your notes")
+            lines.append("_In your words — captured by you, unedited._")
+            for n in yourNotes { lines.append("- \(n)") }
+        }
     }
 
     if !m.attendees.isEmpty {

@@ -661,10 +661,14 @@ struct AIBriefData: Codable, Hashable {
     var openQuestions: [String] = []
     var keyPoints: [String] = []
     var risks: [String] = []
+    /// Granola-style: each note the user wrote, expanded with AI context while
+    /// keeping their words as the anchor.
+    var enhancedNotes: [EnhancedNoteData] = []
 
     var isEmpty: Bool {
         summary.isEmpty && decisions.isEmpty && actions.isEmpty
             && openQuestions.isEmpty && keyPoints.isEmpty && risks.isEmpty
+            && enhancedNotes.isEmpty
     }
 }
 
@@ -672,6 +676,13 @@ struct AIActionItem: Codable, Hashable {
     var task: String
     var owner: String = ""
     var due: String = ""
+}
+
+/// A user note kept verbatim (`anchor`) plus the context the model added
+/// around it (`detail`) — rendered as your words + AI detail, visually distinct.
+struct EnhancedNoteData: Codable, Hashable {
+    var anchor: String
+    var detail: String = ""
 }
 
 struct Meeting: Codable, Hashable, Identifiable {
