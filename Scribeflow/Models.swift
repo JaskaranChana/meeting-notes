@@ -650,6 +650,30 @@ enum SensitiveFlag: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// A meeting brief produced by the on-device language model — structured,
+/// typo-corrected, and comprehension-based (vs. the keyword heuristic). Stored
+/// on the meeting so the synchronous UI can read it; nil when the model wasn't
+/// available, in which case the heuristic engine is used instead.
+struct AIBriefData: Codable, Hashable {
+    var summary: String = ""
+    var decisions: [String] = []
+    var actions: [AIActionItem] = []
+    var openQuestions: [String] = []
+    var keyPoints: [String] = []
+    var risks: [String] = []
+
+    var isEmpty: Bool {
+        summary.isEmpty && decisions.isEmpty && actions.isEmpty
+            && openQuestions.isEmpty && keyPoints.isEmpty && risks.isEmpty
+    }
+}
+
+struct AIActionItem: Codable, Hashable {
+    var task: String
+    var owner: String = ""
+    var due: String = ""
+}
+
 struct Meeting: Codable, Hashable, Identifiable {
     var id = UUID()
     var title: String
@@ -678,6 +702,7 @@ struct Meeting: Codable, Hashable, Identifiable {
     var contextMode: MeetingContextMode = .general
     var score: MeetingScore? = nil
     var audioRecordings: [AudioRecordingAttachment] = []
+    var aiBrief: AIBriefData? = nil
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -707,6 +732,7 @@ struct Meeting: Codable, Hashable, Identifiable {
         case contextMode
         case score
         case audioRecordings
+        case aiBrief
     }
 
     init(
@@ -736,7 +762,8 @@ struct Meeting: Codable, Hashable, Identifiable {
         transcriptVisibilityEnabled: Bool = true,
         contextMode: MeetingContextMode = .general,
         score: MeetingScore? = nil,
-        audioRecordings: [AudioRecordingAttachment] = []
+        audioRecordings: [AudioRecordingAttachment] = [],
+        aiBrief: AIBriefData? = nil
     ) {
         self.id = id
         self.title = title
@@ -765,6 +792,7 @@ struct Meeting: Codable, Hashable, Identifiable {
         self.contextMode = contextMode
         self.score = score
         self.audioRecordings = audioRecordings
+        self.aiBrief = aiBrief
     }
 
     init(from decoder: Decoder) throws {
@@ -796,6 +824,7 @@ struct Meeting: Codable, Hashable, Identifiable {
         contextMode = try container.decodeIfPresent(MeetingContextMode.self, forKey: .contextMode) ?? .general
         score = try container.decodeIfPresent(MeetingScore.self, forKey: .score)
         audioRecordings = try container.decodeIfPresent([AudioRecordingAttachment].self, forKey: .audioRecordings) ?? []
+        aiBrief = try container.decodeIfPresent(AIBriefData.self, forKey: .aiBrief)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -827,6 +856,7 @@ struct Meeting: Codable, Hashable, Identifiable {
         try container.encode(contextMode, forKey: .contextMode)
         try container.encodeIfPresent(score, forKey: .score)
         try container.encode(audioRecordings, forKey: .audioRecordings)
+        try container.encodeIfPresent(aiBrief, forKey: .aiBrief)
     }
 }
 
