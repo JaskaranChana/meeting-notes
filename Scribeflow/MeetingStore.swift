@@ -1518,11 +1518,19 @@ final class MeetingStore {
     /// typo-corrected, structured brief, and store it. The brief's read sites
     /// (signals, commitments, summaries) prefer it; if the model is unavailable
     /// or fails, nothing changes and the heuristic engine stays in charge.
+    /// Meetings the model is currently processing — drives the "Processing…"
+    /// indicator in the UI.
+    private(set) var aiProcessingIDs: Set<Meeting.ID> = []
+
+    func isProcessingAI(_ id: Meeting.ID) -> Bool { aiProcessingIDs.contains(id) }
+
     func processWithAI(for id: Meeting.ID) async {
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *) {
             guard case .available = AppleIntelligenceBriefExtractor.availability() else { return }
             guard let meeting = meeting(withID: id) else { return }
+            aiProcessingIDs.insert(id)
+            defer { aiProcessingIDs.remove(id) }
             do {
                 let brief = try await AppleIntelligenceBriefExtractor.extract(
                     title: meeting.title,
