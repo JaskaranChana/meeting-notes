@@ -686,21 +686,23 @@ struct MeetingDetailView: View {
         .accessibilityLabel("\(value) \(suffix ?? "") \(label)")
     }
 
+    /// One calm, consistent treatment for every read-only section: a small
+    /// colored dot + serif line. Keeps the brief from becoming a wall of
+    /// competing icons, bars, and tinted cards.
     @ViewBuilder
-    func editorialDecisions(_ meeting: Meeting) -> some View {
-        let decisions = meetingSignals.decisions
-        if !decisions.isEmpty {
+    func editorialPointList(title: String, items: [String], tint: Color, limit: Int, quiet: Bool = false) -> some View {
+        if !items.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
-                EditorialSectionHead(title: "Decisions", titleSize: 18) {
-                    EditorialMeta(text: "\(decisions.count)", tint: AppPalette.success)
+                EditorialSectionHead(title: title, titleSize: 18) {
+                    EditorialMeta(text: "\(items.count)", tint: tint)
                 }
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(decisions.prefix(6).enumerated()), id: \.offset) { _, text in
+                    ForEach(Array(items.prefix(limit).enumerated()), id: \.offset) { _, text in
                         HStack(alignment: .top, spacing: 10) {
-                            Circle().fill(AppPalette.success).frame(width: 8, height: 8).padding(.top, 8)
+                            Circle().fill(tint).frame(width: 7, height: 7).padding(.top, 8)
                             Text(text)
                                 .font(.system(size: 16, design: .serif))
-                                .foregroundStyle(AppPalette.ink)
+                                .foregroundStyle(quiet ? AppPalette.secondaryInk : AppPalette.ink)
                                 .fixedSize(horizontal: false, vertical: true)
                             Spacer(minLength: 0)
                         }
@@ -710,6 +712,11 @@ struct MeetingDetailView: View {
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    func editorialDecisions(_ meeting: Meeting) -> some View {
+        editorialPointList(title: "Decisions", items: meetingSignals.decisions, tint: AppPalette.success, limit: 6)
     }
 
     @ViewBuilder
@@ -810,97 +817,19 @@ struct MeetingDetailView: View {
             .split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " -•\t")) }
             .filter { !$0.isEmpty && $0 != "Add your key takeaways here" }
-        if !lines.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                EditorialSectionHead(title: "Your notes", titleSize: 18) {
-                    EditorialMeta(text: "your words", tint: AppPalette.accent)
-                }
-                VStack(alignment: .leading, spacing: 7) {
-                    ForEach(Array(lines.prefix(8).enumerated()), id: \.offset) { _, line in
-                        HStack(alignment: .top, spacing: 10) {
-                            Circle()
-                                .fill(AppPalette.accent)
-                                .frame(width: 5, height: 5)
-                                .padding(.top, 8)
-                            Text(line)
-                                .font(.system(size: 16, design: .serif))
-                                .foregroundStyle(AppPalette.ink)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
-                    if lines.count > 8 {
-                        Text("+\(lines.count - 8) more in Notes")
-                            .font(.caption)
-                            .foregroundStyle(AppPalette.tertiaryInk)
-                            .padding(.leading, 15)
-                    }
-                }
-                .padding(14)
-                .background(AppPalette.accentSoft.opacity(0.45), in: RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
-                        .strokeBorder(AppPalette.accent.opacity(0.22), lineWidth: 1)
-                )
-            }
-        }
+        // Same calm treatment as the other sections, just quieter ink so the
+        // user's raw words read as the anchor, not another loud card.
+        editorialPointList(title: "Your notes", items: lines, tint: AppPalette.accent, limit: 8, quiet: true)
     }
 
     @ViewBuilder
     func editorialQuestions(_ meeting: Meeting) -> some View {
-        let questions = meetingSignals.questions
-        if !questions.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                EditorialSectionHead(title: "Open questions", titleSize: 18) {
-                    EditorialMeta(text: "\(questions.count)", tint: AppPalette.gold)
-                }
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(questions.prefix(4).enumerated()), id: \.offset) { idx, text in
-                        HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: "questionmark.circle")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(AppPalette.gold)
-                                .padding(.top, 2)
-                            Text(text)
-                                .font(.system(size: 16, design: .serif))
-                                .foregroundStyle(AppPalette.ink)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .padding(.vertical, 8)
-                        .editorialReveal()
-                        if idx < min(questions.count, 4) - 1 { EditorialRule() }
-                    }
-                }
-            }
-        }
+        editorialPointList(title: "Open questions", items: meetingSignals.questions, tint: AppPalette.gold, limit: 4)
     }
 
     @ViewBuilder
     func editorialRisks(_ meeting: Meeting) -> some View {
-        let risks = meetingSignals.risks
-        if !risks.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                EditorialSectionHead(title: "Risks", titleSize: 18) {
-                    EditorialMeta(text: "\(risks.count)", tint: AppPalette.coral)
-                }
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(risks.prefix(3).enumerated()), id: \.offset) { idx, text in
-                        HStack(alignment: .top, spacing: 10) {
-                            Rectangle().fill(AppPalette.coral).frame(width: 2)
-                            Text(text)
-                                .font(.system(size: 16, design: .serif))
-                                .foregroundStyle(AppPalette.ink)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .padding(.vertical, 8)
-                        .editorialReveal()
-                        if idx < min(risks.count, 3) - 1 { EditorialRule() }
-                    }
-                }
-            }
-        }
+        editorialPointList(title: "Risks", items: meetingSignals.risks, tint: AppPalette.coral, limit: 3)
     }
 
 
