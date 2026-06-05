@@ -2564,6 +2564,15 @@ private struct GeneratedActionItem {
 
 @available(iOS 26.0, *)
 @Generable
+private struct GeneratedEnhancedNote {
+    @Guide(description: "The user's original note point, kept VERBATIM — do not reword, summarize, or fix it.")
+    var anchor: String
+    @Guide(description: "One concise sentence expanding that point with context from the notes or transcript. Empty string if there is nothing to add.")
+    var detail: String
+}
+
+@available(iOS 26.0, *)
+@Generable
 private struct GeneratedBrief {
     @Guide(description: "A one or two sentence professional summary of the meeting.")
     var summary: String
@@ -2577,6 +2586,8 @@ private struct GeneratedBrief {
     var keyPoints: [String]
     @Guide(description: "Risks, blockers, or concerns raised. Empty if none.")
     var risks: [String]
+    @Guide(description: "For each point the user wrote, the original text as the anchor plus added context. Keep the user's structure and order.")
+    var enhancedNotes: [GeneratedEnhancedNote]
 }
 
 /// Turns rough, possibly misspelled notes into a clean, professional structured
@@ -2596,6 +2607,11 @@ private enum AppleIntelligenceBriefExtractor {
         never invent decisions, actions, owners, dates, risks, or facts. If a
         category has nothing, return an empty list for it. Write tasks as short
         imperative phrases. Keep the summary to one or two sentences.
+
+        For enhancedNotes, treat the user's own bullet points as the skeleton:
+        keep each one VERBATIM as the anchor (in their order), and add a short
+        'detail' that fleshes it out using the transcript or surrounding notes.
+        Never reword the anchor. Leave detail empty when there is nothing to add.
         """)
 
         let transcriptContext = transcriptParagraphs.suffix(12).joined(separator: "\n")
@@ -2622,7 +2638,10 @@ private enum AppleIntelligenceBriefExtractor {
                 .filter { !$0.task.isEmpty },
             openQuestions: g.openQuestions.map(clean).filter { !$0.isEmpty },
             keyPoints: g.keyPoints.map(clean).filter { !$0.isEmpty },
-            risks: g.risks.map(clean).filter { !$0.isEmpty }
+            risks: g.risks.map(clean).filter { !$0.isEmpty },
+            enhancedNotes: g.enhancedNotes
+                .map { EnhancedNoteData(anchor: clean($0.anchor), detail: clean($0.detail)) }
+                .filter { !$0.anchor.isEmpty }
         )
     }
 }

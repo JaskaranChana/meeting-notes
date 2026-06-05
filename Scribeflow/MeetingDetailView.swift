@@ -841,13 +841,46 @@ struct MeetingDetailView: View {
     /// not just a machine summary (the Granola principle).
     @ViewBuilder
     func editorialYourNotes(_ meeting: Meeting) -> some View {
-        let lines = meeting.rawNotes
-            .split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " -•\t")) }
-            .filter { !$0.isEmpty && $0 != "Add your key takeaways here" }
-        // Same calm treatment as the other sections, just quieter ink so the
-        // user's raw words read as the anchor, not another loud card.
-        editorialPointList(title: "Your notes", items: lines, tint: AppPalette.accent, limit: 8, quiet: true)
+        if let enhanced = meeting.aiBrief?.enhancedNotes, !enhanced.isEmpty {
+            // Granola-style: your words are the anchor (primary ink); the context
+            // the model fleshed out sits beneath in quieter ink — so it stays
+            // obvious what you wrote versus what the model added.
+            VStack(alignment: .leading, spacing: 6) {
+                EditorialSectionHead(title: "Your notes", titleSize: 18) {
+                    EditorialMeta(text: "enhanced", tint: AppPalette.accent)
+                }
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(Array(enhanced.prefix(10).enumerated()), id: \.offset) { _, note in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(alignment: .top, spacing: 10) {
+                                Circle().fill(AppPalette.accent).frame(width: 7, height: 7).padding(.top, 8)
+                                Text(note.anchor)
+                                    .font(.system(size: 16, design: .serif))
+                                    .foregroundStyle(AppPalette.ink)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            if !note.detail.isEmpty {
+                                Text(note.detail)
+                                    .font(.system(size: 14, design: .serif))
+                                    .foregroundStyle(AppPalette.secondaryInk)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.leading, 17)
+                            }
+                        }
+                        .editorialReveal()
+                    }
+                }
+            }
+        } else {
+            let lines = meeting.rawNotes
+                .split(whereSeparator: \.isNewline)
+                .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " -•\t")) }
+                .filter { !$0.isEmpty && $0 != "Add your key takeaways here" }
+            // No model output yet — show the user's words verbatim, same calm style.
+            editorialPointList(title: "Your notes", items: lines, tint: AppPalette.accent, limit: 8, quiet: true)
+        }
     }
 
     @ViewBuilder
