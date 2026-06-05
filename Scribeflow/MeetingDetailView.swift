@@ -618,7 +618,7 @@ struct MeetingDetailView: View {
             ? synopsisFor(meeting, summary: meeting.summary(for: meeting.selectedTemplate))
             : cachedSynopsis
         return VStack(alignment: .leading, spacing: 10) {
-            EditorialEyebrow(text: "Synopsis · AI")
+            EditorialEyebrow(text: "Synopsis")
             Text(synopsis)
                 .scaledFont(size: 19, design: .serif, relativeTo: .title3)
                 .italic()
@@ -630,8 +630,36 @@ struct MeetingDetailView: View {
                 .overlay(alignment: .leading) {
                     Rectangle().fill(AppPalette.accent).frame(width: 2)
                 }
+            aiStatusRow(meeting)
         }
         .padding(.top, 4)
+        .animation(AppMotion.smooth, value: store.isProcessingAI(meeting.id))
+        .animation(AppMotion.smooth, value: meeting.aiBrief != nil)
+    }
+
+    /// Tells the user which engine produced the brief: a live "Processing…"
+    /// state while the on-device model runs, then an "Enhanced" mark once it has.
+    @ViewBuilder
+    private func aiStatusRow(_ meeting: Meeting) -> some View {
+        if store.isProcessingAI(meeting.id) {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.mini)
+                Text("Processing with Apple Intelligence…")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(AppPalette.accent)
+            }
+            .padding(.leading, 14)
+            .transition(.opacity)
+        } else if meeting.aiBrief != nil {
+            HStack(spacing: 5) {
+                Image(systemName: "sparkles").font(.system(size: 10, weight: .semibold))
+                Text("Enhanced by Apple Intelligence")
+                    .font(.caption2.weight(.semibold))
+            }
+            .foregroundStyle(AppPalette.secondaryInk)
+            .padding(.leading, 14)
+            .transition(.opacity)
+        }
     }
 
     /// Single source of truth lives in `meetingSynopsis` (SharedViews), so the
