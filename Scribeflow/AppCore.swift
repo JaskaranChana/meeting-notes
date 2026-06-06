@@ -471,7 +471,7 @@ final class UpcomingEventsService {
         let status = EKEventStore.authorizationStatus(for: .event)
         authorization = status
         switch status {
-        case .fullAccess, .authorized:
+        case .fullAccess:
             return true
         case .denied, .restricted, .writeOnly:
             return false
@@ -497,7 +497,7 @@ final class UpcomingEventsService {
     }
 
     func fetchUpcoming(hours: Int = 24, limit: Int = 3) -> [UpcomingEvent] {
-        guard authorization == .fullAccess || authorization == .authorized else { return [] }
+        guard authorization == .fullAccess else { return [] }
         let now = Date.now
         guard let end = Calendar.current.date(byAdding: .hour, value: hours, to: now) else { return [] }
         let predicate = store.predicateForEvents(withStart: now, end: end, calendars: nil)
