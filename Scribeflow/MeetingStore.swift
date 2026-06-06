@@ -1535,15 +1535,22 @@ final class MeetingStore {
             aiProcessingIDs.insert(id)
             defer { aiProcessingIDs.remove(id) }
             do {
-                let brief = try await AppleIntelligenceBriefExtractor.extract(
+                let result = try await AppleIntelligenceBriefExtractor.extract(
                     title: meeting.title,
                     notes: meeting.rawNotes,
                     transcriptParagraphs: meeting.transcript.map(\.text),
                     focus: meeting.contextMode.aiHint
                 )
-                guard !brief.isEmpty,
+                guard !result.brief.isEmpty,
                       let index = meetings.firstIndex(where: { $0.id == id }) else { return }
-                meetings[index].aiBrief = brief
+                meetings[index].aiBrief = result.brief
+                // Auto-pick the lens when the user hasn't locked one (i.e. still
+                // General) — so the badge and future re-tailoring match the meeting.
+                if meetings[index].contextMode == .general,
+                   let detected = MeetingContextMode(rawValue: result.detectedType),
+                   detected != .general {
+                    meetings[index].contextMode = detected
+                }
                 refreshSummariesIfNeeded(at: index)
                 meetings[index].score = MeetingScorer.score(for: meetings[index])
             } catch {
@@ -2609,6 +2616,8 @@ private struct GeneratedBrief {
     var enhancedNotes: [GeneratedEnhancedNote]
     @Guide(description: "Sections specific to this meeting type that are NOT already a decision, action, question, or risk. Standup: Done / In progress. Sales: Customer needs / Budget / Stakeholders. 1:1: Wins / Looking ahead. Empty for a general meeting.")
     var sections: [GeneratedSection]
+    @Guide(description: "Classify the meeting into exactly one lens: general, coaching, sales, legal, medical, founder, or product. Use 'general' when none clearly fits.")
+    var detectedType: String
 }
 
 /// Turns rough, possibly misspelled notes into a clean, professional structured
@@ -2619,7 +2628,7 @@ private enum AppleIntelligenceBriefExtractor {
         SystemLanguageModel.default.availability
     }
 
-    static func extract(title: String, notes: String, transcriptParagraphs: [String], focus: String) async throws -> AIBriefData {
+    static func extract(title: String, notes: String, transcriptParagraphs: [String], focus: String) async throws -> (brief: AIBriefData, detectedType: String) {
         let lensLine = focus.isEmpty ? "" : "\n        Lens for this meeting type — emphasize accordingly: \(focus)"
         let session = LanguageModelSession(instructions: """
         You are an expert meeting analyst inside a professional note-taking app.
@@ -2652,7 +2661,7 @@ private enum AppleIntelligenceBriefExtractor {
         let response = try await session.respond(to: prompt, generating: GeneratedBrief.self)
         let g = response.content
         let clean: (String) -> String = { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        return AIBriefData(
+        let brief = AIBriefData(
             summary: clean(g.summary),
             decisions: g.decisions.map(clean).filter { !$0.isEmpty },
             actions: g.actions
@@ -2669,6 +2678,7 @@ private enum AppleIntelligenceBriefExtractor {
                 .map { AIBriefSection(heading: clean($0.heading), items: $0.items.map(clean).filter { !$0.isEmpty }) }
                 .filter { !$0.heading.isEmpty && !$0.items.isEmpty }
         )
+        return (brief, clean(g.detectedType).lowercased())
     }
 }
 
