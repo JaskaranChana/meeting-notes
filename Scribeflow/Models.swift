@@ -852,7 +852,10 @@ struct Meeting: Codable, Hashable, Identifiable {
         contextMode = try container.decodeIfPresent(MeetingContextMode.self, forKey: .contextMode) ?? .general
         score = try container.decodeIfPresent(MeetingScore.self, forKey: .score)
         audioRecordings = try container.decodeIfPresent([AudioRecordingAttachment].self, forKey: .audioRecordings) ?? []
-        aiBrief = try container.decodeIfPresent(AIBriefData.self, forKey: .aiBrief)
+        // Tolerate schema drift in the AI brief: if an older/newer shape can't
+        // decode, drop it (the heuristic takes over and it regenerates) rather
+        // than failing the whole meeting load.
+        aiBrief = (try? container.decodeIfPresent(AIBriefData.self, forKey: .aiBrief)) ?? nil
     }
 
     func encode(to encoder: Encoder) throws {

@@ -552,6 +552,21 @@ struct MeetingExtractionTests {
     }
 
     @Test
+    func malformedAIBriefDegradesToNilNotCrash() throws {
+        // An aiBrief whose shape can't decode (schema drift) must drop to nil and
+        // still load the meeting — never fail the whole decode.
+        var m = Meeting.seed[0]
+        m.aiBrief = nil
+        let encoded = try JSONEncoder().encode(m)
+        var dict = try #require(try JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        dict["aiBrief"] = ["unexpected": "shape", "n": 1]   // not an AIBriefData
+        let tampered = try JSONSerialization.data(withJSONObject: dict)
+        let decoded = try JSONDecoder().decode(Meeting.self, from: tampered)
+        #expect(decoded.aiBrief == nil)
+        #expect(decoded.title == m.title)
+    }
+
+    @Test
     func garbageNoteProducesNothingMeaningful() {
         // Typed junk must not be turned into actions or decisions.
         let m = meeting(notes: "asdf asdf qwerty zxcvbn\nlorem ipsum dolor sit\n12345 !!! ????")
