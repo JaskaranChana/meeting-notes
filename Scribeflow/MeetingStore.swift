@@ -421,13 +421,19 @@ final class MeetingStore {
     func signals(for meeting: Meeting) -> MeetingSignals {
         // The on-device model's brief wins when present — it comprehends context
         // and fixes typos, where the heuristic only matches keywords.
-        if let brief = meeting.aiBrief, !brief.isEmpty {
-            return MeetingSignals(
-                decisions: brief.decisions,
-                actions: brief.actions.map(aiActionSentence),
-                risks: brief.risks,
-                questions: brief.openQuestions
-            )
+        if let brief = meeting.aiBrief {
+            // Nonsense verdict: surface nothing, don't let the heuristic re-invent.
+            if !brief.makesSense {
+                return MeetingSignals(decisions: [], actions: [], risks: [], questions: [])
+            }
+            if !brief.isEmpty {
+                return MeetingSignals(
+                    decisions: brief.decisions,
+                    actions: brief.actions.map(aiActionSentence),
+                    risks: brief.risks,
+                    questions: brief.openQuestions
+                )
+            }
         }
         // Decisions and actions come from the same distilling/classifying engine
         // that powers commitments, so the Overview surfaces meaningful items
@@ -1541,8 +1547,10 @@ final class MeetingStore {
                     transcriptParagraphs: meeting.transcript.map(\.text),
                     focus: meeting.contextMode.aiHint
                 )
-                guard !result.brief.isEmpty,
-                      let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+                guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+                // Store real content OR an explicit "doesn't make sense" verdict;
+                // an empty-but-sensible result adds nothing over the heuristic.
+                guard !result.brief.isEmpty || !result.brief.makesSense else { return }
                 meetings[index].aiBrief = result.brief
                 // Auto-pick the lens when the user hasn't locked one (i.e. still
                 // General) — so the badge and future re-tailoring match the meeting.
@@ -1609,6 +1617,18 @@ final class MeetingStore {
     }
 
     private func generatedSummaries(for meeting: Meeting) -> [TemplateSummary] {
+        // Nonsense verdict → a clarify summary, not fabricated structure.
+        if let brief = meeting.aiBrief, !brief.makesSense {
+            let clarify = MeetingSummary(
+                eyebrow: "Needs input",
+                title: "This does not make sense. Please clarify.",
+                sections: [SummarySection(title: "Try this", bullets: [
+                    "Add clear notes — what was decided, who is doing what, and any deadlines — and it will reprocess."
+                ])]
+            )
+            return [.discovery, .exec, .manager].map { TemplateSummary(template: $0, summary: clarify) }
+        }
+
         let noteLines = meeting.rawNotes
             .split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " -•\t")) }
@@ -1949,6 +1969,8 @@ final class MeetingStore {
     }
 
     private func generatedCommitments(for meeting: Meeting) -> [Commitment] {
+        // Nonsense verdict → no commitments invented from gibberish.
+        if let brief = meeting.aiBrief, !brief.makesSense { return [] }
         // Prefer the model's action items when it has processed this meeting.
         if let brief = meeting.aiBrief, !brief.actions.isEmpty {
             return brief.actions.map { a in
@@ -2600,6 +2622,10 @@ private struct GeneratedSection {
 @available(iOS 26.0, *)
 @Generable
 private struct GeneratedBrief {
+    @Guide(description: "true if the input is real, meaningful notes (even if rough or misspelled); false if it is random, unclear, or meaningless gibberish like 'asdf 123 jkl'.")
+    var makesSense: Bool
+    @Guide(description: "Specific points that are genuinely ambiguous and need the user to clarify. Do NOT guess these. Empty when everything is clear.")
+    var needsClarification: [String]
     @Guide(description: "A one or two sentence professional summary of the meeting.")
     var summary: String
     @Guide(description: "Decisions that were actually made. Empty if none were made.")
@@ -2631,17 +2657,30 @@ private enum AppleIntelligenceBriefExtractor {
     static func extract(title: String, notes: String, transcriptParagraphs: [String], focus: String) async throws -> (brief: AIBriefData, detectedType: String) {
         let lensLine = focus.isEmpty ? "" : "\n        Lens for this meeting type — emphasize accordingly: \(focus)"
         let session = LanguageModelSession(instructions: """
-        You are an expert meeting analyst inside a professional note-taking app.
-        Read rough, informal, possibly misspelled notes and turn them into a clean,
-        well-organized brief. Correct spelling and grammar in everything you output.
-        Extract ONLY what the notes (and transcript, if provided) actually support —
-        never invent decisions, actions, owners, dates, risks, or facts. If a
-        category has nothing, return an empty list for it. Write tasks as short
-        imperative phrases. Keep the summary to one or two sentences.\(lensLine)
+        You are an expert meeting-notes editor inside a professional app. Turn
+        rough notes and ideas into the cleanest, most useful, presentation-ready
+        brief possible. Follow these rules strictly:
+
+        1. NEVER invent anything. Use only what the input (and transcript) supports.
+        2. If the input is random, unclear, or meaningless gibberish, set
+           makesSense=false and leave every other field empty. Do not manufacture
+           meaning from nonsense.
+        3. If the input is real notes, miss NO important detail.
+        4. Be clean, professional, and easy to read.
+        5. Put each piece of information where it belongs: summary, decisions,
+           actions (with the responsible person and deadline when stated),
+           openQuestions, risks/problems, keyPoints, and type-specific sections.
+        6. Language: simple, sharp, professional.
+        7. Remove repetition, but keep every important meaning.
+        8. Lead with what matters most so the meeting is graspable in seconds.
+        9. If a point is genuinely unclear, put it in needsClarification — do not
+           guess it.
+        10. Correct spelling and grammar. Write tasks as short imperative phrases.
+            If a category has nothing, return it empty.\(lensLine)
 
         For enhancedNotes, treat the user's own bullet points as the skeleton:
-        keep each one VERBATIM as the anchor (in their order), and add a short
-        'detail' that fleshes it out using the transcript or surrounding notes.
+        keep each one VERBATIM as the anchor (in their order) and add a short
+        'detail' that fleshes it out from the transcript or surrounding notes.
         Never reword the anchor. Leave detail empty when there is nothing to add.
         """)
 
@@ -2661,6 +2700,13 @@ private enum AppleIntelligenceBriefExtractor {
         let response = try await session.respond(to: prompt, generating: GeneratedBrief.self)
         let g = response.content
         let clean: (String) -> String = { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let detected = clean(g.detectedType).lowercased()
+
+        // Nonsense input → a clear verdict, nothing manufactured (rule 2).
+        guard g.makesSense else {
+            return (AIBriefData(makesSense: false), detected)
+        }
+
         let brief = AIBriefData(
             summary: clean(g.summary),
             decisions: g.decisions.map(clean).filter { !$0.isEmpty },
@@ -2676,9 +2722,11 @@ private enum AppleIntelligenceBriefExtractor {
                 .filter { !$0.anchor.isEmpty },
             sections: g.sections
                 .map { AIBriefSection(heading: clean($0.heading), items: $0.items.map(clean).filter { !$0.isEmpty }) }
-                .filter { !$0.heading.isEmpty && !$0.items.isEmpty }
+                .filter { !$0.heading.isEmpty && !$0.items.isEmpty },
+            makesSense: true,
+            needsClarification: g.needsClarification.map(clean).filter { !$0.isEmpty }
         )
-        return (brief, clean(g.detectedType).lowercased())
+        return (brief, detected)
     }
 }
 

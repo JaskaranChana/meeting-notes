@@ -673,11 +673,16 @@ struct AIBriefData: Codable, Hashable {
     /// action, question, or risk — e.g. standup Done/In progress, sales
     /// Budget/Stakeholders, 1:1 Looking ahead. Empty for a general meeting.
     var sections: [AIBriefSection] = []
+    /// False when the input is random/meaningless — the app then says so instead
+    /// of fabricating structure. True for real (even if rough) notes.
+    var makesSense: Bool = true
+    /// Genuinely unclear points the user should clarify — surfaced, never guessed.
+    var needsClarification: [String] = []
 
     var isEmpty: Bool {
         summary.isEmpty && decisions.isEmpty && actions.isEmpty
             && openQuestions.isEmpty && keyPoints.isEmpty && risks.isEmpty
-            && enhancedNotes.isEmpty && sections.isEmpty
+            && enhancedNotes.isEmpty && sections.isEmpty && needsClarification.isEmpty
     }
 }
 

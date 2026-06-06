@@ -608,8 +608,18 @@ struct MeetingDetailView: View {
         editorialActions(meeting)
         editorialQuestions(meeting)
         editorialRisks(meeting)
+        editorialClarifications(meeting)
         editorialYourNotes(meeting)
         overviewPrimaryAction
+    }
+
+    /// Points the model flagged as genuinely unclear — surfaced for the user to
+    /// resolve, never guessed (rule 9).
+    @ViewBuilder
+    func editorialClarifications(_ meeting: Meeting) -> some View {
+        if let items = meeting.aiBrief?.needsClarification, !items.isEmpty {
+            editorialPointList(title: "Needs clarification", items: items, tint: AppPalette.gold, limit: 5)
+        }
     }
 
     /// Meeting-type-specific sections the model chose (standup Done/Blocked,
