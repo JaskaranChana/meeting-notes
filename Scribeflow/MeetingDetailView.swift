@@ -604,11 +604,24 @@ struct MeetingDetailView: View {
         overviewSnapshot(meeting)
         overviewStatsRow(meeting)
         editorialDecisions(meeting)
+        editorialAISections(meeting)
         editorialActions(meeting)
         editorialQuestions(meeting)
         editorialRisks(meeting)
         editorialYourNotes(meeting)
         overviewPrimaryAction
+    }
+
+    /// Meeting-type-specific sections the model chose (standup Done/Blocked,
+    /// sales Budget/Stakeholders, …) — rendered in the same calm style as the
+    /// universal sections. Empty for a general meeting or the heuristic path.
+    @ViewBuilder
+    func editorialAISections(_ meeting: Meeting) -> some View {
+        if let sections = meeting.aiBrief?.sections {
+            ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
+                editorialPointList(title: section.heading, items: section.items, tint: AppPalette.accent, limit: 6)
+            }
+        }
     }
 
     /// Synopsis rendered as an editorial pull-quote: italic serif with an

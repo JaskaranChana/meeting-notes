@@ -669,12 +669,22 @@ struct AIBriefData: Codable, Hashable {
     /// Granola-style: each note the user wrote, expanded with AI context while
     /// keeping their words as the anchor.
     var enhancedNotes: [EnhancedNoteData] = []
+    /// Sections specific to the meeting type that aren't already a decision,
+    /// action, question, or risk — e.g. standup Done/In progress, sales
+    /// Budget/Stakeholders, 1:1 Looking ahead. Empty for a general meeting.
+    var sections: [AIBriefSection] = []
 
     var isEmpty: Bool {
         summary.isEmpty && decisions.isEmpty && actions.isEmpty
             && openQuestions.isEmpty && keyPoints.isEmpty && risks.isEmpty
-            && enhancedNotes.isEmpty
+            && enhancedNotes.isEmpty && sections.isEmpty
     }
+}
+
+/// A model-chosen, meeting-type-specific section (heading + bullets).
+struct AIBriefSection: Codable, Hashable {
+    var heading: String
+    var items: [String] = []
 }
 
 struct AIActionItem: Codable, Hashable {
