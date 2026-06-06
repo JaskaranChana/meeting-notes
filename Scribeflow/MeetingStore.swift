@@ -2583,6 +2583,15 @@ private struct GeneratedEnhancedNote {
 
 @available(iOS 26.0, *)
 @Generable
+private struct GeneratedSection {
+    @Guide(description: "A section heading specific to the meeting type, e.g. 'Done', 'In progress', 'Budget', 'Stakeholders', 'Looking ahead', 'Customer needs'.")
+    var heading: String
+    @Guide(description: "Concise bullets under this heading. Fix spelling.")
+    var items: [String]
+}
+
+@available(iOS 26.0, *)
+@Generable
 private struct GeneratedBrief {
     @Guide(description: "A one or two sentence professional summary of the meeting.")
     var summary: String
@@ -2598,6 +2607,8 @@ private struct GeneratedBrief {
     var risks: [String]
     @Guide(description: "For each point the user wrote, the original text as the anchor plus added context. Keep the user's structure and order.")
     var enhancedNotes: [GeneratedEnhancedNote]
+    @Guide(description: "Sections specific to this meeting type that are NOT already a decision, action, question, or risk. Standup: Done / In progress. Sales: Customer needs / Budget / Stakeholders. 1:1: Wins / Looking ahead. Empty for a general meeting.")
+    var sections: [GeneratedSection]
 }
 
 /// Turns rough, possibly misspelled notes into a clean, professional structured
@@ -2653,7 +2664,10 @@ private enum AppleIntelligenceBriefExtractor {
             risks: g.risks.map(clean).filter { !$0.isEmpty },
             enhancedNotes: g.enhancedNotes
                 .map { EnhancedNoteData(anchor: clean($0.anchor), detail: clean($0.detail)) }
-                .filter { !$0.anchor.isEmpty }
+                .filter { !$0.anchor.isEmpty },
+            sections: g.sections
+                .map { AIBriefSection(heading: clean($0.heading), items: $0.items.map(clean).filter { !$0.isEmpty }) }
+                .filter { !$0.heading.isEmpty && !$0.items.isEmpty }
         )
     }
 }

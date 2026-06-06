@@ -635,6 +635,13 @@ func meetingDigestMarkdown(_ m: Meeting, signals: MeetingSignals) -> String {
         for r in signals.risks { lines.append("- \(r)") }
     }
 
+    // Meeting-type-specific sections the model chose (standup Done/Blocked, …).
+    for section in m.aiBrief?.sections ?? [] where !section.items.isEmpty {
+        lines.append("")
+        lines.append("## \(section.heading)")
+        for item in section.items { lines.append("- \(item)") }
+    }
+
     // --- The user's own words, kept separate from the AI summary above ---
     if let enhanced = m.aiBrief?.enhancedNotes, !enhanced.isEmpty {
         lines.append("")
