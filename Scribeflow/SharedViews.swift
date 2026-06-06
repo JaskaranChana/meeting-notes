@@ -549,6 +549,10 @@ struct CountUpNumber: View, Animatable {
 
 /// Best-effort one-line synopsis from a meeting's summary (or raw notes).
 func meetingSynopsis(for meeting: Meeting, summary: MeetingSummary) -> String {
+    // The model judged the input to be nonsense — say so, don't fake meaning.
+    if let brief = meeting.aiBrief, !brief.makesSense {
+        return "This does not make sense. Please clarify."
+    }
     // The model's own one-line summary wins when it processed this meeting.
     if let aiSummary = meeting.aiBrief?.summary,
        !aiSummary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -640,6 +644,14 @@ func meetingDigestMarkdown(_ m: Meeting, signals: MeetingSignals) -> String {
         lines.append("")
         lines.append("## \(section.heading)")
         for item in section.items { lines.append("- \(item)") }
+    }
+
+    // Points flagged unclear — surfaced, never guessed.
+    let clarifications = m.aiBrief?.needsClarification ?? []
+    if !clarifications.isEmpty {
+        lines.append("")
+        lines.append("## Needs clarification")
+        for c in clarifications { lines.append("- \(c)") }
     }
 
     // --- The user's own words, kept separate from the AI summary above ---
