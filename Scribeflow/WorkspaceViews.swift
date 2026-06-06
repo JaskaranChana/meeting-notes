@@ -27,6 +27,9 @@ struct AskView: View {
     @State private var hasAnimatedIn = false
     @State private var promptTask: Task<Void, Never>?
     @State private var copiedTurnID: AskTurn.ID?
+    // Cached so typing in the composer doesn't re-scan every meeting per keystroke.
+    @State private var cachedScope = ""
+    @State private var cachedSuggestions: [(String, String)] = []
 
     private var isAnyRunning: Bool { turns.contains { $0.isRunning } }
 
@@ -126,8 +129,16 @@ struct AskView: View {
                 .accessibilityLabel("Ask options")
             }
         }
-        .onAppear { hasAnimatedIn = true }
+        .onAppear { hasAnimatedIn = true; refreshAskDerived() }
+        .onChange(of: store.revision) { refreshAskDerived() }
         .onDisappear { promptTask?.cancel(); promptTask = nil }
+    }
+
+    /// Recompute the meeting-derived header + suggestions only when the library
+    /// changes, not on every keystroke in the composer.
+    private func refreshAskDerived() {
+        cachedScope = scopeSummary
+        cachedSuggestions = smartSuggestions
     }
 
     // MARK: Header
@@ -139,7 +150,7 @@ struct AskView: View {
                 Spacer(minLength: 8)
                 AIModeBadge()
             }
-            Text(scopeSummary)
+            Text(cachedScope.isEmpty ? scopeSummary : cachedScope)
                 .font(.subheadline)
                 .foregroundStyle(AppPalette.secondaryInk)
                 .lineLimit(2)
@@ -226,9 +237,9 @@ struct AskView: View {
                 .padding(.bottom, 4)
             }
             VStack(alignment: .leading, spacing: 8) {
-                EditorialEyebrow(text: "Try these · \(smartSuggestions.count)")
+                EditorialEyebrow(text: "Try these · \(cachedSuggestions.count)")
                 VStack(spacing: 0) {
-                    let suggestions = Array(smartSuggestions.enumerated())
+                    let suggestions = Array(cachedSuggestions.enumerated())
                     ForEach(suggestions, id: \.offset) { index, item in
                         Button {
                             HapticEngine.tap(.light)
