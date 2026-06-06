@@ -1137,6 +1137,9 @@ struct SmartNotesPreview: View, Equatable {
     let transcriptTail: [String]
     let attendees: [String]
 
+    @State private var decisions: [String] = []
+    @State private var actions: [ExtractedActionItem] = []
+
     static func == (lhs: SmartNotesPreview, rhs: SmartNotesPreview) -> Bool {
         lhs.notes == rhs.notes
             && lhs.transcriptTail == rhs.transcriptTail
@@ -1165,9 +1168,7 @@ struct SmartNotesPreview: View, Equatable {
     }
 
     var body: some View {
-        let decisions = MeetingIntelligenceEngine.decisions(for: meeting, limit: 3)
-        let actions = MeetingIntelligenceEngine.structuredActions(for: meeting, limit: 4)
-
+        Group {
         if !decisions.isEmpty || !actions.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 6) {
@@ -1200,6 +1201,16 @@ struct SmartNotesPreview: View, Equatable {
                     .strokeBorder(AppPalette.accent.opacity(0.18), lineWidth: 0.8)
             )
             .transition(.opacity)
+        }
+        }
+        .task(id: notes) {
+            // Debounce: run the extraction engine after a typing pause, not on
+            // every keystroke (which hung the keyboard).
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
+            let m = meeting
+            decisions = MeetingIntelligenceEngine.decisions(for: m, limit: 3)
+            actions = MeetingIntelligenceEngine.structuredActions(for: m, limit: 4)
         }
     }
 

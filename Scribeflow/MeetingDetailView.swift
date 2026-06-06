@@ -376,9 +376,16 @@ struct MeetingDetailView: View {
                     if !didEnterDetail {
                         didEnterDetail = true
                         navChrome.detailDepth += 1
+                        refreshDerived()   // immediate first paint; later updates are debounced via .task
                     }
                 }
                 .task(id: store.revision) {
+                    // Debounce: each keystroke bumps store.revision, which cancels
+                    // and restarts this task. Sleeping first means the heavy
+                    // derived read only runs once the store settles (typing pause),
+                    // not on every keystroke — which is what hung the keyboard.
+                    try? await Task.sleep(for: .milliseconds(300))
+                    guard !Task.isCancelled else { return }
                     refreshDerived()
                 }
                 .navigationDestination(for: DetailRoute.self) { route in
