@@ -703,6 +703,20 @@ struct BreathingDot: View {
 
 // MARK: - FloatingTabDock — premium glass tab bar
 
+enum AppDockMetrics {
+    static let height: CGFloat = 58
+    static let bottomPadding: CGFloat = 10
+    static let horizontalPadding: CGFloat = 18
+    static let maxWidth: CGFloat = 452
+
+    /// Extra room reserved below every root scroll view. The dock is drawn as
+    /// an overlay, so this must be larger than the visible capsule to leave
+    /// tappable bottom controls fully exposed when scrolled to the end.
+    static var scrollClearance: CGFloat {
+        height + bottomPadding + max(UIApplication.shared.bottomSafeAreaInset, 12) + 26
+    }
+}
+
 /// Dock item shown in `FloatingTabDock`. The `id` is the tab's raw value;
 /// drive selection by binding to a `String` matching one of these.
 struct FloatingTabDockItem: Identifiable, Equatable {
@@ -725,17 +739,17 @@ struct FloatingTabDock: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 3) {
             ForEach(items) { item in
                 tabButton(item)
             }
         }
         .padding(5)
-        .frame(height: 58)
-        .frame(maxWidth: 460)
+        .frame(height: AppDockMetrics.height)
+        .frame(maxWidth: AppDockMetrics.maxWidth)
         .background(
             Capsule(style: .continuous)
-                .fill(AppPalette.dockBackground)
+                .fill(reduceTransparency ? AnyShapeStyle(AppPalette.ink.opacity(0.96)) : AnyShapeStyle(AppPalette.dockBackground))
         )
         .overlay(
             Capsule(style: .continuous)
@@ -743,8 +757,8 @@ struct FloatingTabDock: View {
         )
         .appShadow(AppShadow.floating)
         .frame(maxWidth: .infinity, alignment: .center)
-        .padding(.horizontal, 20)
-        .padding(.bottom, 10)
+        .padding(.horizontal, AppDockMetrics.horizontalPadding)
+        .padding(.bottom, AppDockMetrics.bottomPadding)
         .sensoryFeedback(.selection, trigger: selection)
     }
 
@@ -771,8 +785,8 @@ struct FloatingTabDock: View {
                 ZStack(alignment: .topTrailing) {
                     Image(systemName: item.systemImage)
                         .font(.subheadline.weight(.bold))
-                        .frame(minWidth: 18)
-                        .symbolEffect(.bounce, value: isSelected)
+                        .frame(width: 20, height: 20)
+                        .symbolEffect(.bounce, value: reduceMotion ? false : isSelected)
                     if item.badge > 0 {
                         Text(item.badge > 99 ? "99+" : "\(item.badge)")
                             .font(.system(size: 9, weight: .heavy))
@@ -798,7 +812,7 @@ struct FloatingTabDock: View {
                 }
             }
             .foregroundStyle(isSelected ? .white : .white.opacity(0.58))
-            .padding(.horizontal, isSelected ? 16 : 14)
+            .padding(.horizontal, isSelected ? 12 : 10)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background {
                 if isSelected {
@@ -811,10 +825,10 @@ struct FloatingTabDock: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .layoutPriority(isSelected ? 1 : 0)
         .accessibilityLabel(item.label)
         .accessibilityValue(item.badge > 0 ? "\(item.badge) pending" : "")
         .accessibilityIdentifier("dock.tab.\(item.id)")
         .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : [.isButton])
     }
 }
-

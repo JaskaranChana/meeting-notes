@@ -52,6 +52,7 @@
 		A10000000000000000006401 /* GoogleSignInService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000006402 /* GoogleSignInService.swift */; };
 		A10000000000000000006501 /* DeviceAuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000006502 /* DeviceAuthService.swift */; };
 		A10000000000000000007001 /* CaptureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000007002 /* CaptureView.swift */; };
+		A10000000000000000007101 /* MeetingCalendarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000007102 /* MeetingCalendarView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -112,6 +113,8 @@
 		A10000000000000000006402 /* GoogleSignInService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoogleSignInService.swift; sourceTree = "<group>"; };
 		A10000000000000000006502 /* DeviceAuthService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceAuthService.swift; sourceTree = "<group>"; };
 		A10000000000000000007002 /* CaptureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureView.swift; sourceTree = "<group>"; };
+		A10000000000000000007102 /* MeetingCalendarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingCalendarView.swift; sourceTree = "<group>"; };
+		A10000000000000000008001 /* SOURCE_MAP.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = SOURCE_MAP.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -135,53 +138,143 @@
 		A10000000000000000000031 /* Scribeflow */ = {
 			isa = PBXGroup;
 			children = (
+				A10000000000000000008010 /* Documentation */,
+				A10000000000000000008020 /* App */,
+				A10000000000000000008030 /* Core */,
+				A10000000000000000008040 /* Design System */,
+				A10000000000000000008050 /* Features */,
+				A10000000000000000008060 /* Meeting Detail */,
+				A10000000000000000008070 /* Capture And Audio */,
+				A10000000000000000008080 /* Authentication */,
+				A10000000000000000008090 /* Settings And Data */,
+				A100000000000000000080A0 /* Library And Recall */,
+				A100000000000000000080B0 /* Resources */,
+				A10000000000000000004007 /* ../ScribeflowTests */,
+			);
+			path = Scribeflow;
+			sourceTree = "<group>";
+		};
+		A10000000000000000008010 /* Documentation */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000008001 /* SOURCE_MAP.md */,
+			);
+			name = Documentation;
+			sourceTree = "<group>";
+		};
+		A10000000000000000008020 /* App */ = {
+			isa = PBXGroup;
+			children = (
 				A10000000000000000000001 /* ScribeflowApp.swift */,
 				A10000000000000000000002 /* ContentView.swift */,
+			);
+			name = App;
+			sourceTree = "<group>";
+		};
+		A10000000000000000008030 /* Core */ = {
+			isa = PBXGroup;
+			children = (
 				A10000000000000000000003 /* Models.swift */,
 				A10000000000000000000004 /* MeetingStore.swift */,
-				A10000000000000000000007 /* LiveMeetingCoordinator.swift */,
-				A10000000000000000000201 /* SettingsView.swift */,
-				A10000000000000000000501 /* RecallEngine.swift */,
-				A10000000000000000000503 /* RecallView.swift */,
-				A10000000000000000000701 /* DesignTokens.swift */,
-				A10000000000000000000A02 /* AIIntelligenceStatus.swift */,
-				A10000000000000000000801 /* VoiceNoteInput.swift */,
-				A10000000000000000000901 /* Skeleton.swift */,
 				A10000000000000000001002 /* AppCore.swift */,
+			);
+			name = Core;
+			sourceTree = "<group>";
+		};
+		A10000000000000000008040 /* Design System */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000701 /* DesignTokens.swift */,
 				A10000000000000000001004 /* SharedViews.swift */,
-				A10000000000000000001006 /* WorkspaceViews.swift */,
-				A10000000000000000001008 /* LibraryViews.swift */,
-				A10000000000000000006202 /* LibrarySnapshot.swift */,
-				A10000000000000000006302 /* ActionItemsView.swift */,
-				A10000000000000000006402 /* GoogleSignInService.swift */,
-				A10000000000000000006502 /* DeviceAuthService.swift */,
-				A10000000000000000007002 /* CaptureView.swift */,
-				A10000000000000000001014 /* MeetingsView.swift */,
+				A10000000000000000000901 /* Skeleton.swift */,
+				A10000000000000000000A02 /* AIIntelligenceStatus.swift */,
+			);
+			name = "Design System";
+			sourceTree = "<group>";
+		};
+		A10000000000000000008050 /* Features */ = {
+			isa = PBXGroup;
+			children = (
 				A10000000000000000001016 /* TodayView.swift */,
+				A10000000000000000007102 /* MeetingCalendarView.swift */,
+				A10000000000000000001014 /* MeetingsView.swift */,
+				A10000000000000000006302 /* ActionItemsView.swift */,
+				A10000000000000000001006 /* WorkspaceViews.swift */,
+			);
+			name = Features;
+			sourceTree = "<group>";
+		};
+		A10000000000000000008060 /* Meeting Detail */ = {
+			isa = PBXGroup;
+			children = (
 				A10000000000000000001018 /* MeetingDetailView.swift */,
-				A10000000000000000002002 /* AudioSessionManager.swift */,
-				A10000000000000000002004 /* AudioDiagnostics.swift */,
+				A10000000000000000006002 /* MeetingIntelligence.swift */,
 				A10000000000000000002006 /* MeetingSavedSheet.swift */,
-				A10000000000000000003002 /* VoiceRecordingModels.swift */,
-				A10000000000000000003004 /* VoiceRecordingService.swift */,
-				A10000000000000000003006 /* VoiceRecorderViewModel.swift */,
+				A10000000000000000000007 /* LiveMeetingCoordinator.swift */,
+			);
+			name = "Meeting Detail";
+			sourceTree = "<group>";
+		};
+		A10000000000000000008070 /* Capture And Audio */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000007002 /* CaptureView.swift */,
+				A10000000000000000000801 /* VoiceNoteInput.swift */,
 				A10000000000000000003008 /* VoiceRecorderView.swift */,
+				A10000000000000000003006 /* VoiceRecorderViewModel.swift */,
+				A10000000000000000003004 /* VoiceRecordingService.swift */,
+				A10000000000000000003002 /* VoiceRecordingModels.swift */,
 				A10000000000000000003010 /* AudioPlaybackControls.swift */,
+				A10000000000000000002002 /* AudioSessionManager.swift */,
 				A10000000000000000005002 /* RecordingCompliance.swift */,
 				A10000000000000000005004 /* RecordingPrivacyView.swift */,
-				A10000000000000000006002 /* MeetingIntelligence.swift */,
-				A10000000000000000006004 /* DataManagementModels.swift */,
-				A10000000000000000006006 /* DataControlsView.swift */,
-				A10000000000000000006008 /* ProductCapabilityModels.swift */,
+			);
+			name = "Capture And Audio";
+			sourceTree = "<group>";
+		};
+		A10000000000000000008080 /* Authentication */ = {
+			isa = PBXGroup;
+			children = (
 				A10000000000000000006102 /* AuthModels.swift */,
 				A10000000000000000006104 /* AuthKeychainStore.swift */,
 				A10000000000000000006106 /* AuthService.swift */,
 				A10000000000000000006108 /* AuthViews.swift */,
-				A10000000000000000005006 /* PrivacyInfo.xcprivacy */,
-				A10000000000000000004007 /* ../ScribeflowTests */,
-				A10000000000000000000005 /* Assets.xcassets */,
+				A10000000000000000006502 /* DeviceAuthService.swift */,
+				A10000000000000000006402 /* GoogleSignInService.swift */,
 			);
-			path = Scribeflow;
+			name = Authentication;
+			sourceTree = "<group>";
+		};
+		A10000000000000000008090 /* Settings And Data */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000201 /* SettingsView.swift */,
+				A10000000000000000006006 /* DataControlsView.swift */,
+				A10000000000000000006004 /* DataManagementModels.swift */,
+				A10000000000000000006008 /* ProductCapabilityModels.swift */,
+				A10000000000000000002004 /* AudioDiagnostics.swift */,
+			);
+			name = "Settings And Data";
+			sourceTree = "<group>";
+		};
+		A100000000000000000080A0 /* Library And Recall */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000001008 /* LibraryViews.swift */,
+				A10000000000000000006202 /* LibrarySnapshot.swift */,
+				A10000000000000000000501 /* RecallEngine.swift */,
+				A10000000000000000000503 /* RecallView.swift */,
+			);
+			name = "Library And Recall";
+			sourceTree = "<group>";
+		};
+		A100000000000000000080B0 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000005 /* Assets.xcassets */,
+				A10000000000000000005006 /* PrivacyInfo.xcprivacy */,
+			);
+			name = Resources;
 			sourceTree = "<group>";
 		};
 		A10000000000000000000033 /* Products */ = {
@@ -342,6 +435,7 @@
 				A10000000000000000006401 /* GoogleSignInService.swift in Sources */,
 				A10000000000000000006501 /* DeviceAuthService.swift in Sources */,
 				A10000000000000000007001 /* CaptureView.swift in Sources */,
+				A10000000000000000007101 /* MeetingCalendarView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -541,7 +635,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 2;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 73R6HFHCC5;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = ScribeflowTests;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -565,7 +659,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 2;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 73R6HFHCC5;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = ScribeflowTests;
 				LD_RUNPATH_SEARCH_PATHS = (

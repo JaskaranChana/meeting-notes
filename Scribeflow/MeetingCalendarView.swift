@@ -1,0 +1,941 @@
+import SwiftUI
+
+struct MeetingCalendarView: View {
+    @Environment(MeetingStore.self) private var store
+    @Environment(\.openURL) private var openURL
+    @Binding var selectedMeetingID: Meeting.ID?
+    let onCapture: (CaptureView.Mode) -> Void
+    @Binding var toast: ToastItem?
+
+    @State private var displayedMonth = Self.startOfMonth(for: .now)
+    @State private var selectedDate = Calendar.current.startOfDay(for: .now)
+    @State private var accessState: CalendarAccessState = .notDetermined
+    @State private var calendarEvents: [CalendarEventSnapshot] = []
+    @State private var isRequestingAccess = false
+    @State private var snapshot = MeetingCalendarSnapshot()
+    @State private var snapshotBuilder = MeetingCalendarSnapshotBuilder()
+
+    private var snapshotKey: MeetingCalendarSnapshotKey {
+        MeetingCalendarSnapshotKey(
+            revision: store.revision,
+            displayedMonth: displayedMonth,
+            selectedDate: selectedDate,
+            events: calendarEvents
+        )
+    }
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 18, pinnedViews: []) {
+                    Color.clear.frame(height: 0).id("calendar.top")
+                    calendarHeader
+                    calendarTimelineStrip
+                    calendarGrid
+
+                    if accessState != .allowed {
+                        calendarAccessCard
+                    }
+
+                    selectedDayAgenda
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 16)
+                .padding(.bottom, 12)
+                .readingWidth()
+            }
+            .background(AppPalette.background.ignoresSafeArea())
+            .navigationTitle("Calendar")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        HapticEngine.tap(.light)
+                        jumpToToday()
+                    } label: {
+                        Image(systemName: "calendar.badge.clock")
+                            .font(.body.weight(.medium))
+                    }
+                    .tint(AppPalette.ink)
+                    .accessibilityLabel("Jump to today")
+                }
+            }
+            .refreshable {
+                HapticEngine.tap(.light)
+                await refreshCalendarEvents()
+                toast = ToastItem(message: "Calendar refreshed", icon: "arrow.clockwise")
+            }
+            .navigationDestination(for: Meeting.ID.self) { id in
+                MeetingDetailView(meetingID: id)
+            }
+            .task(id: displayedMonth) {
+                await refreshCalendarEvents()
+            }
+            .task(id: snapshotKey) {
+                await refreshSnapshot(for: snapshotKey)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .scribeflowDockScrollToTop)) { note in
+                guard (note.object as? String) == "calendar" else { return }
+                withAnimation(AppMotion.smooth) {
+                    proxy.scrollTo("calendar.top", anchor: .top)
+                }
+            }
+        }
+    }
+
+    private var calendarHeader: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .center, spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    EditorialMeta(text: "Calendar")
+                    Text(displayedMonth.formatted(.dateTime.month(.wide).year()))
+                        .font(.system(size: 30, weight: .medium, design: .serif))
+                        .foregroundStyle(AppPalette.ink)
+                        .contentTransition(.numericText())
+                }
+
+                Spacer(minLength: 8)
+
+                HStack(spacing: 8) {
+                    monthButton("chevron.left") { moveMonth(by: -1) }
+                    monthButton("chevron.right") { moveMonth(by: 1) }
+                }
+            }
+
+            HStack(spacing: 0) {
+                calendarStat("\(snapshot.monthMeetingCount)", "notes", AppPalette.accent)
+                calendarRule
+                calendarStat("\(snapshot.monthEventCount)", "events", AppPalette.gold)
+                calendarRule
+                calendarStat("\(snapshot.selectedOpenLoopCount)", "open", AppPalette.coral)
+            }
+            .overlay(alignment: .top) { EditorialRule() }
+            .overlay(alignment: .bottom) { EditorialRule() }
+
+            calendarLegend
+        }
+        .accessibilityIdentifier("calendar.header")
+    }
+
+    private var calendarTimelineStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(snapshot.selectedWeekDays) { day in
+                    Button {
+                        selectDay(day)
+                    } label: {
+                        VStack(spacing: 7) {
+                            Text(day.date.formatted(.dateTime.weekday(.abbreviated)))
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(day.isSelected ? .white.opacity(0.78) : AppPalette.tertiaryInk)
+                            Text("\(day.dayNumber)")
+                                .font(.system(size: 17, weight: .bold, design: .rounded))
+                                .foregroundStyle(day.isSelected ? .white : AppPalette.ink)
+                            HStack(spacing: 3) {
+                                if day.noteCount > 0 {
+                                    miniDot(AppPalette.accent)
+                                }
+                                if day.eventCount > 0 {
+                                    miniDot(AppPalette.gold)
+                                }
+                                if day.hasOpenActions {
+                                    miniDot(AppPalette.coral)
+                                }
+                                if !day.hasAnyActivity {
+                                    miniDot(AppPalette.border.opacity(0.65))
+                                }
+                            }
+                            .frame(height: 5)
+                        }
+                        .frame(width: 54, height: 76)
+                        .background(
+                            RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
+                                .fill(day.isSelected ? AppPalette.ink : AppPalette.cardBackground)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
+                                .strokeBorder(day.isToday ? AppPalette.accent.opacity(0.55) : AppPalette.border.opacity(0.45), lineWidth: 0.8)
+                        )
+                    }
+                    .buttonStyle(PressScaleButtonStyle(scale: 0.95))
+                    .accessibilityLabel(accessibilityLabel(for: day))
+                }
+            }
+            .padding(.horizontal, 2)
+            .padding(.vertical, 1)
+        }
+        .accessibilityIdentifier("calendar.weekStrip")
+    }
+
+    private var calendarLegend: some View {
+        HStack(spacing: 8) {
+            legendChip("Notes", tint: AppPalette.accent)
+            legendChip("Events", tint: AppPalette.gold)
+            legendChip("Open loops", tint: AppPalette.coral)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var calendarGrid: some View {
+        VStack(spacing: 10) {
+            LazyVGrid(columns: Self.weekColumns, spacing: 8) {
+                ForEach(Self.weekdaySymbols(), id: \.self) { symbol in
+                    Text(symbol)
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(AppPalette.tertiaryInk)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+
+            LazyVGrid(columns: Self.weekColumns, spacing: 8) {
+                ForEach(snapshot.days) { day in
+                    Button {
+                        selectDay(day)
+                    } label: {
+                        MeetingCalendarDayCell(day: day)
+                    }
+                    .buttonStyle(PressScaleButtonStyle(scale: 0.96))
+                    .accessibilityLabel(accessibilityLabel(for: day))
+                }
+            }
+        }
+        .padding(14)
+        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: AppRadius.xl, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.xl, style: .continuous)
+                .strokeBorder(AppPalette.border.opacity(0.6), lineWidth: 0.8)
+        )
+        .appShadow(AppShadow.hairline)
+        .accessibilityIdentifier("calendar.monthGrid")
+    }
+
+    @ViewBuilder
+    private var calendarAccessCard: some View {
+        if accessState == .notDetermined {
+            MeetingCalendarAccessCard(
+                title: "Connect calendar events",
+                subtitle: "Saved Scribeflow notes already appear here. Connect Calendar to add your real meetings beside them.",
+                systemImage: "calendar.badge.plus",
+                actionTitle: "Connect",
+                isLoading: isRequestingAccess,
+                tint: AppPalette.accent,
+                action: requestCalendarAccess
+            )
+        } else {
+            MeetingCalendarAccessCard(
+                title: "Calendar access is off",
+                subtitle: "Open Settings to reconnect events. Your saved Scribeflow notes still appear by date.",
+                systemImage: "calendar.badge.exclamationmark",
+                actionTitle: "Settings",
+                isLoading: false,
+                tint: AppPalette.coral
+            ) {
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    openURL(url)
+                }
+            }
+        }
+    }
+
+    private var selectedDayAgenda: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            EditorialSectionHead(title: selectedDateTitle, titleSize: 22) {
+                EditorialMeta(text: snapshot.selectedSummary)
+            }
+
+            if snapshot.selectedMeetings.isEmpty && snapshot.selectedEvents.isEmpty {
+                EmptyStateCard(
+                    title: "No meetings on this day",
+                    subtitle: "Add a note for this date, or connect Calendar to pull in scheduled meetings.",
+                    systemImage: "calendar",
+                    tint: AppPalette.accent
+                )
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    if !snapshot.selectedMeetings.isEmpty {
+                        agendaSectionTitle("Scribeflow notes", count: snapshot.selectedMeetings.count)
+                        ForEach(snapshot.selectedMeetings) { meeting in
+                            NavigationLink(value: meeting.id) {
+                                MeetingCalendarMeetingRow(meeting: meeting)
+                            }
+                            .buttonStyle(PressScaleButtonStyle(scale: 0.98))
+                        }
+                    }
+
+                    if !snapshot.selectedEvents.isEmpty {
+                        agendaSectionTitle("Calendar events", count: snapshot.selectedEvents.count)
+                            .padding(.top, snapshot.selectedMeetings.isEmpty ? 0 : 8)
+                        ForEach(snapshot.selectedEvents) { event in
+                            MeetingCalendarEventRow(
+                                event: event,
+                                linkedMeeting: snapshot.linkedMeeting(for: event),
+                                onPrep: prepareNote(for:),
+                                onCapture: capture(for:)
+                            )
+                        }
+                    }
+                }
+            }
+
+            Button {
+                HapticEngine.tap(.light)
+                createNoteForSelectedDay()
+            } label: {
+                Label("Add note on this day", systemImage: "square.and.pencil")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(AppPalette.ink)
+        }
+        .accessibilityIdentifier("calendar.selectedAgenda")
+    }
+
+    private var selectedDateTitle: String {
+        if Calendar.current.isDateInToday(selectedDate) {
+            return "Today"
+        }
+        return selectedDate.formatted(.dateTime.weekday(.wide).month(.wide).day())
+    }
+
+    private var calendarRule: some View {
+        Rectangle().fill(AppPalette.border.opacity(0.7)).frame(width: 1, height: 30)
+    }
+
+    private func legendChip(_ label: String, tint: Color) -> some View {
+        HStack(spacing: 6) {
+            miniDot(tint)
+            Text(label)
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(AppPalette.secondaryInk)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(AppPalette.softSurface, in: Capsule())
+    }
+
+    private func miniDot(_ tint: Color) -> some View {
+        Circle()
+            .fill(tint)
+            .frame(width: 5, height: 5)
+    }
+
+    private func monthButton(_ systemImage: String, action: @escaping () -> Void) -> some View {
+        Button {
+            HapticEngine.select()
+            withAnimation(AppMotion.snappy) { action() }
+        } label: {
+            Image(systemName: systemImage)
+                .font(.subheadline.weight(.bold))
+                .foregroundStyle(AppPalette.ink)
+                .frame(width: 38, height: 38)
+                .background(AppPalette.softSurface, in: Circle())
+                .overlay(Circle().strokeBorder(AppPalette.border.opacity(0.65), lineWidth: 0.8))
+        }
+        .accessibilityLabel(systemImage.contains("left") ? "Previous month" : "Next month")
+    }
+
+    private func selectDay(_ day: MeetingCalendarDay) {
+        HapticEngine.select()
+        withAnimation(AppMotion.snappy) {
+            selectedDate = day.date
+            if !day.isInDisplayedMonth {
+                displayedMonth = Self.startOfMonth(for: day.date)
+            }
+        }
+    }
+
+    private func calendarStat(_ value: String, _ label: String, _ tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(value)
+                .font(.system(size: 24, weight: .medium, design: .serif))
+                .foregroundStyle(tint)
+            Text(label.uppercased())
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(AppPalette.tertiaryInk)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 12)
+        .padding(.horizontal, 12)
+    }
+
+    private func agendaSectionTitle(_ title: String, count: Int) -> some View {
+        HStack {
+            Text(title)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(AppPalette.ink)
+            Spacer()
+            EditorialMeta(text: "\(count)")
+        }
+    }
+
+    private func refreshCalendarEvents() async {
+        let service = CalendarService.shared
+        let access = service.refreshAccessState()
+        let range = Self.visibleDateRange(for: displayedMonth)
+        let events = access.canReadEvents
+            ? service.fetchEvents(from: range.start, to: range.end, limit: 180)
+            : []
+
+        guard !Task.isCancelled else { return }
+        accessState = access
+        calendarEvents = events
+    }
+
+    private func refreshSnapshot(for key: MeetingCalendarSnapshotKey) async {
+        let meetings = store.meetings
+        let nextSnapshot = await snapshotBuilder.make(
+            meetings: meetings,
+            events: key.events,
+            displayedMonth: key.displayedMonth,
+            selectedDate: key.selectedDate
+        )
+        guard !Task.isCancelled, key == snapshotKey else { return }
+        snapshot = nextSnapshot
+    }
+
+    private func requestCalendarAccess() {
+        guard !isRequestingAccess else { return }
+        isRequestingAccess = true
+        Task {
+            let granted = await CalendarService.shared.requestAccessIfNeeded()
+            await refreshCalendarEvents()
+            isRequestingAccess = false
+            toast = ToastItem(
+                message: granted ? "Calendar connected" : "Calendar not connected",
+                icon: granted ? "calendar.badge.checkmark" : "calendar.badge.exclamationmark"
+            )
+        }
+    }
+
+    private func prepareNote(for event: CalendarEventSnapshot) {
+        if let existing = snapshot.linkedMeeting(for: event) {
+            selectedMeetingID = existing.id
+            toast = ToastItem(message: "That event already has a note", icon: "doc.text.fill")
+            HapticEngine.tap(.light)
+            return
+        }
+
+        let id = store.addMeeting(
+            title: event.title,
+            workspace: event.isVideoCall ? "Calls" : "Meetings",
+            attendees: event.attendees,
+            objective: event.objective,
+            notes: event.prepNotesTemplate,
+            when: event.startDate,
+            stage: "Prepared from calendar",
+            durationMinutes: event.durationMinutes,
+            audioRecordings: [],
+            calendarEventID: event.id,
+            calendarStartDate: event.startDate,
+            calendarEndDate: event.endDate
+        )
+        selectedDate = Calendar.current.startOfDay(for: event.startDate)
+        selectedMeetingID = id
+        HapticEngine.notify(.success)
+        toast = ToastItem(message: "Prep note added to calendar", icon: "calendar.badge.checkmark")
+    }
+
+    private func capture(for event: CalendarEventSnapshot) {
+        UpcomingCaptureContext.shared.preferredEvent = event
+        HapticEngine.tap(.light)
+        onCapture(.record)
+    }
+
+    private func createNoteForSelectedDay() {
+        let title = "Meeting · \(selectedDate.formatted(.dateTime.month(.abbreviated).day()))"
+        let id = store.addMeeting(
+            title: title,
+            workspace: "Meetings",
+            attendees: ["You"],
+            objective: "Planned from calendar view",
+            notes: "- Agenda:\n- Decisions:\n- Risks:\n- Next steps:",
+            when: selectedDate,
+            stage: "Created from calendar",
+            durationMinutes: 30,
+            audioRecordings: []
+        )
+        selectedMeetingID = id
+        HapticEngine.notify(.success)
+        toast = ToastItem(message: "Note added for \(selectedDate.formatted(.dateTime.month(.abbreviated).day()))", icon: "square.and.pencil")
+    }
+
+    private func moveMonth(by delta: Int) {
+        guard let nextMonth = Calendar.current.date(byAdding: .month, value: delta, to: displayedMonth) else { return }
+        displayedMonth = Self.startOfMonth(for: nextMonth)
+        selectedDate = displayedMonth
+    }
+
+    private func jumpToToday() {
+        let today = Calendar.current.startOfDay(for: .now)
+        displayedMonth = Self.startOfMonth(for: today)
+        selectedDate = today
+    }
+
+    private func accessibilityLabel(for day: MeetingCalendarDay) -> String {
+        var parts = [day.date.formatted(.dateTime.weekday(.wide).month(.wide).day())]
+        if day.noteCount > 0 { parts.append("\(day.noteCount) Scribeflow note\(day.noteCount == 1 ? "" : "s")") }
+        if day.eventCount > 0 { parts.append("\(day.eventCount) calendar event\(day.eventCount == 1 ? "" : "s")") }
+        if day.hasOpenActions { parts.append("has open actions") }
+        if day.isSelected { parts.append("selected") }
+        return parts.joined(separator: ", ")
+    }
+
+    private static let weekColumns = Array(
+        repeating: GridItem(.flexible(minimum: 34), spacing: 8, alignment: .center),
+        count: 7
+    )
+
+    private static let weekdayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        return formatter
+    }()
+
+    private static func weekdaySymbols() -> [String] {
+        let formatter = weekdayFormatter
+        let symbols = formatter.veryShortStandaloneWeekdaySymbols ?? formatter.veryShortWeekdaySymbols ?? ["S", "M", "T", "W", "T", "F", "S"]
+        let first = Calendar.current.firstWeekday - 1
+        return Array(symbols[first...] + symbols[..<first])
+    }
+
+    private static func startOfMonth(for date: Date) -> Date {
+        let calendar = Calendar.current
+        let comps = calendar.dateComponents([.year, .month], from: date)
+        return calendar.date(from: comps).map { calendar.startOfDay(for: $0) } ?? calendar.startOfDay(for: date)
+    }
+
+    private static func visibleDateRange(for month: Date) -> (start: Date, end: Date) {
+        let calendar = Calendar.current
+        let start = startOfMonth(for: month)
+        let firstWeekday = calendar.component(.weekday, from: start)
+        let leadingDays = (firstWeekday - calendar.firstWeekday + 7) % 7
+        let gridStart = calendar.date(byAdding: .day, value: -leadingDays, to: start) ?? start
+        let gridEnd = calendar.date(byAdding: .day, value: 42, to: gridStart) ?? start
+        return (gridStart, gridEnd)
+    }
+}
+
+private struct MeetingCalendarSnapshotKey: Hashable {
+    let revision: Int
+    let displayedMonth: Date
+    let selectedDate: Date
+    let events: [CalendarEventSnapshot]
+}
+
+private actor MeetingCalendarSnapshotBuilder {
+    func make(
+        meetings: [Meeting],
+        events: [CalendarEventSnapshot],
+        displayedMonth: Date,
+        selectedDate: Date
+    ) -> MeetingCalendarSnapshot {
+        MeetingCalendarSnapshot(
+            meetings: meetings,
+            events: events,
+            displayedMonth: displayedMonth,
+            selectedDate: selectedDate
+        )
+    }
+}
+
+private struct MeetingCalendarSnapshot {
+    var days: [MeetingCalendarDay] = []
+    var selectedWeekDays: [MeetingCalendarDay] = []
+    var selectedMeetings: [Meeting] = []
+    var selectedEvents: [CalendarEventSnapshot] = []
+    var linkedMeetingsByEventID: [String: Meeting] = [:]
+    var monthMeetingCount = 0
+    var monthEventCount = 0
+    var selectedOpenLoopCount = 0
+
+    var selectedSummary: String {
+        let total = selectedMeetings.count + selectedEvents.count
+        return total == 0 ? "clear" : "\(total) item\(total == 1 ? "" : "s")"
+    }
+
+    init() {}
+
+    init(meetings: [Meeting], events: [CalendarEventSnapshot], displayedMonth: Date, selectedDate: Date) {
+        let calendar = Calendar.current
+        let monthStart = Self.startOfMonth(for: displayedMonth, calendar: calendar)
+        let monthInterval = calendar.dateInterval(of: .month, for: monthStart)
+        let selectedDay = calendar.startOfDay(for: selectedDate)
+        let range = Self.visibleDateRange(for: monthStart, calendar: calendar)
+
+        let meetingsByDay = Dictionary(grouping: meetings, by: { meeting in
+            calendar.startOfDay(for: meeting.calendarStartDate ?? meeting.when)
+        })
+        let eventsByDay = Dictionary(grouping: events, by: { event in
+            calendar.startOfDay(for: event.startDate)
+        })
+
+        selectedMeetings = (meetingsByDay[selectedDay] ?? []).sorted(by: Self.sortMeetingsByTime)
+        selectedEvents = (eventsByDay[selectedDay] ?? []).sorted { $0.startDate < $1.startDate }
+        for meeting in meetings {
+            guard let eventID = meeting.calendarEventID else { continue }
+            linkedMeetingsByEventID[eventID] = meeting
+        }
+        selectedOpenLoopCount = selectedMeetings.reduce(0) { total, meeting in
+            total + meeting.commitments.filter { $0.status == .open || $0.status == .atRisk }.count
+        }
+
+        if let monthInterval {
+            monthMeetingCount = meetings.filter {
+                monthInterval.contains($0.calendarStartDate ?? $0.when)
+            }.count
+            monthEventCount = events.filter { monthInterval.contains($0.startDate) }.count
+        }
+
+        days = (0..<42).compactMap { offset -> MeetingCalendarDay? in
+            guard let date = calendar.date(byAdding: .day, value: offset, to: range.start) else { return nil }
+            let day = calendar.startOfDay(for: date)
+            let dayMeetings = meetingsByDay[day] ?? []
+            let dayEvents = eventsByDay[day] ?? []
+            return MeetingCalendarDay(
+                date: day,
+                dayNumber: calendar.component(.day, from: day),
+                isInDisplayedMonth: calendar.isDate(day, equalTo: monthStart, toGranularity: .month),
+                isToday: calendar.isDateInToday(day),
+                isSelected: calendar.isDate(day, inSameDayAs: selectedDay),
+                noteCount: dayMeetings.count,
+                eventCount: dayEvents.count,
+                hasOpenActions: dayMeetings.contains { meeting in
+                    meeting.commitments.contains { $0.status == .open || $0.status == .atRisk }
+                }
+            )
+        }
+
+        if let selectedWeek = calendar.dateInterval(of: .weekOfYear, for: selectedDay) {
+            selectedWeekDays = days.filter { selectedWeek.contains($0.date) }
+        } else {
+            selectedWeekDays = Array(days.prefix(7))
+        }
+    }
+
+    func linkedMeeting(for event: CalendarEventSnapshot) -> Meeting? {
+        linkedMeetingsByEventID[event.id]
+    }
+
+    private static func sortMeetingsByTime(_ lhs: Meeting, _ rhs: Meeting) -> Bool {
+        let lhsDate = lhs.calendarStartDate ?? lhs.when
+        let rhsDate = rhs.calendarStartDate ?? rhs.when
+        if lhsDate == rhsDate { return Meeting.sortDescending(lhs, rhs) }
+        return lhsDate < rhsDate
+    }
+
+    private static func startOfMonth(for date: Date, calendar: Calendar) -> Date {
+        let comps = calendar.dateComponents([.year, .month], from: date)
+        return calendar.date(from: comps).map { calendar.startOfDay(for: $0) } ?? calendar.startOfDay(for: date)
+    }
+
+    private static func visibleDateRange(for month: Date, calendar: Calendar) -> (start: Date, end: Date) {
+        let start = startOfMonth(for: month, calendar: calendar)
+        let firstWeekday = calendar.component(.weekday, from: start)
+        let leadingDays = (firstWeekday - calendar.firstWeekday + 7) % 7
+        let gridStart = calendar.date(byAdding: .day, value: -leadingDays, to: start) ?? start
+        let gridEnd = calendar.date(byAdding: .day, value: 42, to: gridStart) ?? start
+        return (gridStart, gridEnd)
+    }
+}
+
+private struct MeetingCalendarDay: Identifiable, Hashable {
+    var id: Date { date }
+    let date: Date
+    let dayNumber: Int
+    let isInDisplayedMonth: Bool
+    let isToday: Bool
+    let isSelected: Bool
+    let noteCount: Int
+    let eventCount: Int
+    let hasOpenActions: Bool
+
+    var hasAnyActivity: Bool {
+        noteCount > 0 || eventCount > 0 || hasOpenActions
+    }
+}
+
+private struct MeetingCalendarDayCell: View {
+    let day: MeetingCalendarDay
+
+    var body: some View {
+        VStack(spacing: 5) {
+            Text("\(day.dayNumber)")
+                .font(.system(size: 15, weight: day.isSelected || day.isToday ? .bold : .semibold, design: .rounded))
+                .foregroundStyle(foreground)
+                .frame(maxWidth: .infinity)
+
+            HStack(spacing: 3) {
+                if day.noteCount > 0 {
+                    Circle()
+                        .fill(AppPalette.accent)
+                        .frame(width: 5, height: 5)
+                }
+                if day.eventCount > 0 {
+                    Circle()
+                        .fill(AppPalette.gold)
+                        .frame(width: 5, height: 5)
+                }
+                if day.hasOpenActions {
+                    Circle()
+                        .fill(AppPalette.coral)
+                        .frame(width: 5, height: 5)
+                }
+            }
+            .frame(height: 6)
+        }
+        .frame(maxWidth: .infinity)
+        .aspectRatio(1, contentMode: .fit)
+        .background(background)
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous)
+                .strokeBorder(border, lineWidth: day.isToday || day.isSelected ? 1.1 : 0.7)
+        )
+        .opacity(day.isInDisplayedMonth ? 1 : 0.42)
+    }
+
+    private var foreground: Color {
+        if day.isSelected { return .white }
+        if day.isToday { return AppPalette.accent }
+        return AppPalette.ink
+    }
+
+    private var background: some ShapeStyle {
+        if day.isSelected {
+            return AnyShapeStyle(AppPalette.ink)
+        }
+        if day.isToday {
+            return AnyShapeStyle(AppPalette.accent.opacity(0.12))
+        }
+        if day.noteCount > 0 || day.eventCount > 0 {
+            return AnyShapeStyle(AppPalette.softSurface)
+        }
+        return AnyShapeStyle(Color.clear)
+    }
+
+    private var border: Color {
+        if day.isSelected { return AppPalette.ink }
+        if day.isToday { return AppPalette.accent.opacity(0.45) }
+        return AppPalette.border.opacity(day.noteCount > 0 || day.eventCount > 0 ? 0.55 : 0.22)
+    }
+}
+
+private struct MeetingCalendarMeetingRow: View {
+    let meeting: Meeting
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous)
+                .fill(AppPalette.accent.opacity(0.12))
+                .frame(width: 44, height: 44)
+                .overlay(
+                    Image(systemName: meeting.status == .live ? "waveform.badge.mic" : "doc.text.fill")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(AppPalette.accent)
+                )
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(meetingTime)
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(AppPalette.accent)
+                    Text(meeting.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(AppPalette.ink)
+                        .lineLimit(1)
+                }
+
+                Text(meeting.workspace)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(AppPalette.secondaryInk)
+
+                HStack(spacing: 6) {
+                    if meeting.isPinned {
+                        chip("Pinned", icon: "pin.fill", tint: AppPalette.gold)
+                    }
+                    let open = meeting.commitments.filter { $0.status == .open || $0.status == .atRisk }.count
+                    if open > 0 {
+                        chip("\(open) open", icon: "checklist", tint: AppPalette.coral)
+                    }
+                    if meeting.calendarEventID != nil {
+                        chip("Linked", icon: "calendar", tint: AppPalette.accent)
+                    }
+                }
+            }
+
+            Spacer(minLength: 0)
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(AppPalette.tertiaryInk)
+                .padding(.top, 3)
+        }
+        .padding(14)
+        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
+                .strokeBorder(AppPalette.border.opacity(0.55), lineWidth: 0.8)
+        )
+    }
+
+    private var meetingTime: String {
+        (meeting.calendarStartDate ?? meeting.when).formatted(.dateTime.hour().minute())
+    }
+
+    private func chip(_ text: String, icon: String, tint: Color) -> some View {
+        Label(text, systemImage: icon)
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(tint.opacity(0.10), in: Capsule())
+    }
+}
+
+private struct MeetingCalendarEventRow: View {
+    let event: CalendarEventSnapshot
+    let linkedMeeting: Meeting?
+    let onPrep: (CalendarEventSnapshot) -> Void
+    let onCapture: (CalendarEventSnapshot) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous)
+                    .fill(AppPalette.gold.opacity(0.14))
+                    .frame(width: 44, height: 44)
+                    .overlay(
+                        Image(systemName: event.isVideoCall ? "video.fill" : "calendar")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(AppPalette.gold)
+                    )
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(eventTime)
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(AppPalette.gold)
+                    Text(event.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(AppPalette.ink)
+                        .lineLimit(2)
+                    Text(eventSubtitle)
+                        .font(.caption)
+                        .foregroundStyle(AppPalette.secondaryInk)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 8) {
+                if let linkedMeeting {
+                    NavigationLink(value: linkedMeeting.id) {
+                        Label("Open note", systemImage: "doc.text.magnifyingglass")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(AppPalette.ink)
+                } else {
+                    Button {
+                        onPrep(event)
+                    } label: {
+                        Label("Prep", systemImage: "square.and.pencil")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(AppPalette.ink)
+                }
+
+                Button {
+                    onCapture(event)
+                } label: {
+                    Label("Record", systemImage: "mic.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(AppPalette.accent)
+            }
+            .font(.caption.weight(.semibold))
+        }
+        .padding(14)
+        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
+                .strokeBorder(AppPalette.gold.opacity(0.24), lineWidth: 0.8)
+        )
+    }
+
+    private var eventTime: String {
+        "\(event.startDate.formatted(.dateTime.hour().minute()))-\(event.endDate.formatted(.dateTime.hour().minute()))"
+    }
+
+    private var eventSubtitle: String {
+        let cleanedLocation = event.location?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let location: String
+        if event.isVideoCall {
+            location = "Video call"
+        } else if let cleanedLocation, !cleanedLocation.isEmpty {
+            location = cleanedLocation
+        } else {
+            location = "Calendar event"
+        }
+        if event.attendees.isEmpty { return location }
+        return "\(location) · \(event.attendees.prefix(2).joined(separator: ", "))"
+    }
+}
+
+private struct MeetingCalendarAccessCard: View {
+    let title: String
+    let subtitle: String
+    let systemImage: String
+    let actionTitle: String
+    let isLoading: Bool
+    let tint: Color
+    let action: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 13) {
+            Image(systemName: systemImage)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(tint)
+                .frame(width: 30, height: 30)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(AppPalette.ink)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(AppPalette.secondaryInk)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                HapticEngine.tap(.light)
+                action()
+            } label: {
+                HStack(spacing: 6) {
+                    if isLoading {
+                        ProgressView()
+                            .tint(.white)
+                    }
+                    Text(actionTitle)
+                        .font(.caption.weight(.bold))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(tint, in: Capsule())
+            }
+            .buttonStyle(PressScaleButtonStyle(scale: 0.95))
+            .disabled(isLoading)
+        }
+        .padding(14)
+        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
+                .strokeBorder(tint.opacity(0.22), lineWidth: 0.8)
+        )
+    }
+}

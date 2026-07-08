@@ -298,8 +298,34 @@ struct VoiceRecorderView: View {
                 } else if viewModel.completedRecording != nil {
                     EmptyStateCard(
                         title: "Audio ready",
-                        subtitle: "No transcript was produced. Save the recording now or add notes manually."
+                        subtitle: transcriptEmptySubtitle
                     )
+
+                    if viewModel.phase == .processing {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                                .tint(AppPalette.accent)
+                            Text(viewModel.transcriptionJobStatusText ?? "Retrying transcript...")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(AppPalette.secondaryInk)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(14)
+                        .background(AppPalette.softSurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    } else if viewModel.permissions.speech == .ready {
+                        Button {
+                            Task { await viewModel.retryTranscript() }
+                        } label: {
+                            Label("Retry transcript", systemImage: "arrow.clockwise")
+                                .font(.footnote.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(AppPalette.accent)
+                        .background(AppPalette.accentSoft, in: RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous))
+                        .disabled(!viewModel.canRetryTranscript)
+                    }
                 }
             }
         }
@@ -323,6 +349,12 @@ struct VoiceRecorderView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(14)
                 .background(AppPalette.softSurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+            if let status = viewModel.transcriptionJobStatusText {
+                Label(status, systemImage: "checkmark.seal.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(AppPalette.accent)
+            }
         }
     }
 
@@ -390,6 +422,16 @@ struct VoiceRecorderView: View {
             return "This device can record audio, but system transcription is unavailable."
         }
         return "Microphone and speech are ready. Recordings stay in the app’s protected storage."
+    }
+
+    private var transcriptEmptySubtitle: String {
+        if viewModel.permissions.speech == .ready {
+            return "No transcript was produced. Retry transcription, save the audio now, or add notes manually."
+        }
+        if viewModel.permissions.speech == .denied {
+            return "No transcript was produced because Speech Recognition is blocked. Save the audio now or enable Speech Recognition in Settings."
+        }
+        return "No transcript was produced. Save the recording now or add notes manually."
     }
 
     private func controlLabel(_ title: String, icon: String, tint: Color) -> some View {

@@ -24,6 +24,105 @@ struct CompletedVoiceRecording {
     var fileSizeBytes: Int
 }
 
+enum TranscriptionProviderKind: String, Codable, Equatable {
+    case localAppleSpeech
+    case backend
+
+    var title: String {
+        switch self {
+        case .localAppleSpeech:
+            "Apple Speech"
+        case .backend:
+            "Backend"
+        }
+    }
+}
+
+struct TranscriptionSegment: Codable, Hashable, Identifiable {
+    var id = UUID()
+    var speaker: String
+    var text: String
+    var startTime: TimeInterval?
+    var endTime: TimeInterval?
+}
+
+struct TranscriptionResult: Codable, Hashable {
+    var text: String
+    var segments: [TranscriptionSegment]
+    var provider: TranscriptionProviderKind
+    var diarizationAvailable: Bool
+    var usedFallback: Bool
+}
+
+@MainActor
+protocol TranscriptionProviding {
+    func transcribe(audioURL: URL) async throws -> TranscriptionResult
+}
+
+protocol MeetingSummarizing {
+    func summarize(meeting: Meeting) async throws -> MeetingIntelligenceReport
+}
+
+struct LocalMeetingSummarizer: MeetingSummarizing {
+    func summarize(meeting: Meeting) async throws -> MeetingIntelligenceReport {
+        MeetingIntelligenceEngine.report(for: meeting)
+    }
+}
+
+enum TranscriptionJobState: String, Codable, Equatable {
+    case queued
+    case running
+    case failed
+    case completed
+
+    var title: String {
+        switch self {
+        case .queued:
+            "Queued"
+        case .running:
+            "Transcribing"
+        case .failed:
+            "Failed"
+        case .completed:
+            "Completed"
+        }
+    }
+}
+
+struct TranscriptionRetryJob: Codable, Hashable, Identifiable {
+    var id = UUID()
+    var recordingID: UUID
+    var fileName: String
+    var attempts = 0
+    var state: TranscriptionJobState = .queued
+    var lastError: String?
+    var createdAt = Date()
+    var updatedAt = Date()
+
+    var canRetry: Bool {
+        attempts < 3 && state != .completed
+    }
+
+    mutating func markRunning(now: Date = .now) {
+        attempts += 1
+        state = .running
+        lastError = nil
+        updatedAt = now
+    }
+
+    mutating func markFailed(_ message: String, now: Date = .now) {
+        state = .failed
+        lastError = message
+        updatedAt = now
+    }
+
+    mutating func markCompleted(now: Date = .now) {
+        state = .completed
+        lastError = nil
+        updatedAt = now
+    }
+}
+
 enum VoiceRecordingError: LocalizedError {
     case microphoneDenied
     case speechDenied
@@ -130,7 +229,7 @@ enum VoiceRecordingPermissionService {
 }
 
 @MainActor
-final class LocalVoiceRecordingService: NSObject, AVAudioRecorderDelegate {
+final class LocalVoiceRecordingService: NSObject, AVAudioRecorderDelegate, TranscriptionProviding {
     private var recorder: AVAudioRecorder?
     private var recordingID: UUID?
     private var startedAt: Date?
@@ -231,6 +330,24 @@ final class LocalVoiceRecordingService: NSObject, AVAudioRecorderDelegate {
         if let url {
             try? FileManager.default.removeItem(at: url)
         }
+    }
+
+    func transcribe(audioURL: URL) async throws -> TranscriptionResult {
+        let text = try await transcribe(url: audioURL)
+        let lines = SpeakerTranscriptParser.lines(
+            from: text,
+            defaultSpeaker: "Voice note",
+            defaultRole: "Local transcript"
+        )
+        return TranscriptionResult(
+            text: text,
+            segments: lines.map {
+                TranscriptionSegment(speaker: $0.speaker, text: $0.text, startTime: nil, endTime: nil)
+            },
+            provider: .localAppleSpeech,
+            diarizationAvailable: false,
+            usedFallback: false
+        )
     }
 
     func transcribe(url: URL) async throws -> String {

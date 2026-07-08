@@ -20,6 +20,8 @@ struct SettingsView: View {
     @State private var showingDeleteAccountConfirm = false
     @State private var showingIntegrations = false
     @State private var showingActivityLog = false
+    @State private var showingReplaceSamplesConfirm = false
+    @State private var sampleDataMessage: String?
     @Namespace private var appearanceNS
 
     private let supportEmail = "jaskaran.chana1302@gmail.com"
@@ -162,6 +164,24 @@ struct SettingsView: View {
                     .padding(.bottom, 24)
 
                     settingsGroup(title: "Experience") {
+                        settingLinkRow(
+                            icon: "shippingbox.fill",
+                            iconColor: AppPalette.accent,
+                            title: "Add sample data",
+                            subtitle: "Calendar notes, source proof, reminders, and recall"
+                        ) {
+                            addSampleData()
+                        }
+
+                        settingLinkRow(
+                            icon: "arrow.triangle.2.circlepath",
+                            iconColor: AppPalette.gold,
+                            title: "Replace with samples",
+                            subtitle: "Reset local meetings to the demo workspace"
+                        ) {
+                            showingReplaceSamplesConfirm = true
+                        }
+
                         settingLinkRow(
                             icon: "sparkles.rectangle.stack.fill",
                             iconColor: AppPalette.accent,
@@ -314,6 +334,24 @@ struct SettingsView: View {
                 }
             } message: {
                 Text("This permanently removes your account, all meetings, voice notes, and local recordings on this device. This cannot be undone.")
+            }
+            .alert("Replace with sample data?", isPresented: $showingReplaceSamplesConfirm) {
+                Button("Cancel", role: .cancel) {}
+                Button("Replace", role: .destructive) {
+                    meetingStore.replaceWithSampleData()
+                    sampleDataMessage = "Loaded the full demo workspace."
+                    HapticEngine.notify(.success)
+                }
+            } message: {
+                Text("This removes local meetings and recordings on this device, then loads the demo workspace for testing calendar prep, reminders, source-backed summaries, transcription states, and recall.")
+            }
+            .alert("Sample data", isPresented: Binding(
+                get: { sampleDataMessage != nil },
+                set: { if !$0 { sampleDataMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) { sampleDataMessage = nil }
+            } message: {
+                Text(sampleDataMessage ?? "")
             }
         }
         .modifier(ScribeflowChrome())
@@ -526,6 +564,16 @@ struct SettingsView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 13)
+    }
+
+    private func addSampleData() {
+        let added = meetingStore.addSampleData()
+        if added == 0 {
+            sampleDataMessage = "The demo workspace is already loaded."
+        } else {
+            sampleDataMessage = "Added \(added) sample meetings for testing."
+        }
+        HapticEngine.notify(.success)
     }
 
 }

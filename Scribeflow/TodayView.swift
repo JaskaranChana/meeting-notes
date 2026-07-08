@@ -2,8 +2,19 @@ import SwiftUI
 import AVFoundation
 import UniformTypeIdentifiers
 
+struct DailyPlanItem: Identifiable, Hashable {
+    let id: Commitment.ID
+    let commitment: Commitment
+    let meetingID: Meeting.ID
+    let meetingTitle: String
+    let meetingDate: Date
+    let weight: Int
+    let dueDate: Date?
+}
+
 struct TodayView: View {
     @Environment(MeetingStore.self) private var store
+    @Environment(\.openURL) private var openURL
     @Binding var selectedMeetingID: Meeting.ID?
     /// Open the unified capture surface in either `.record` or `.type` mode.
     let onCapture: (CaptureView.Mode) -> Void
@@ -18,7 +29,8 @@ struct TodayView: View {
     @State private var showingPalette = false
     @State private var snapshotBuilder = TodaySnapshotBuilder()
     @State private var upcomingEvents: [UpcomingEvent] = []
-    @State private var calendarAccessRequested = false
+    @State private var calendarAccessState: CalendarAccessState = .notDetermined
+    @State private var isRequestingCalendarAccess = false
     @State private var imminentEvent: UpcomingEvent?
     @State private var showingHowItWorks = false
     @State private var autoRecordWatchTimer: Timer?
@@ -52,20 +64,9 @@ struct TodayView: View {
         } else if let move = snap.nextMove {
             nextTitle = move.title
             nextMeta = move.subtitle
-            if let mid = move.meetingID, let m = store.meeting(withID: mid) { attendees = m.attendees }
+            attendees = snap.nextMoveAttendees
         }
         if attendees.isEmpty { attendees = snap.recentHomeMeetings.first?.attendees ?? [] }
-
-        // This week vs last week capture totals (rolling 7-day windows).
-        let cal = Calendar.current
-        let startToday = cal.startOfDay(for: .now)
-        var week = 0, lastWeek = 0
-        for m in store.meetings {
-            let day = cal.startOfDay(for: m.when)
-            guard let diff = cal.dateComponents([.day], from: day, to: startToday).day else { continue }
-            if diff >= 0, diff < 7 { week += 1 }
-            else if diff >= 7, diff < 14 { lastWeek += 1 }
-        }
 
         return HeroModel(
             today: snap.todayCaptureCount,
@@ -74,8 +75,8 @@ struct TodayView: View {
             nextTitle: nextTitle,
             nextMeta: nextMeta,
             attendees: attendees,
-            weekTotal: week,
-            lastWeekTotal: lastWeek
+            weekTotal: snap.rollingWeekCaptureCount,
+            lastWeekTotal: snap.previousWeekCaptureCount
         )
     }
 
@@ -134,6 +135,20 @@ struct TodayView: View {
                     .id(heroStyle)
                     .motionEntrance(step: 0, active: hasAnimatedIn)
                     .animation(AppMotion.smooth, value: heroStyle)
+
+                if calendarAccessState == .notDetermined {
+                    CalendarAccessPromptCard(isLoading: isRequestingCalendarAccess) {
+                        requestCalendarAccessFromHome()
+                    }
+                    .motionEntrance(step: 1, active: hasAnimatedIn)
+                } else if calendarAccessState == .denied || calendarAccessState == .restricted {
+                    CalendarAccessRecoveryCard {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            openURL(url)
+                        }
+                    }
+                    .motionEntrance(step: 1, active: hasAnimatedIn)
+                }
 
                 if let event = upcomingEvents.first {
                     EditorialUpNext(
@@ -307,64 +322,11 @@ struct TodayView: View {
 
     // MARK: - Today's Plan
 
-    /// A single prioritized commitment surfaced in the Daily Plan, with its
-    /// computed urgency weight (0 = highest) used for ranking and styling.
-    private struct DailyPlanItem: Identifiable {
-        let id: Commitment.ID
-        let commitment: Commitment
-        let meetingID: Meeting.ID
-        let meetingTitle: String
-        let meetingDate: Date
-        let weight: Int
-        let dueDate: Date?
-    }
-
     /// Ranks open commitments across every meeting into the top three things
     /// worth doing now: overdue / at-risk first, then by real deadline, then
     /// the rest by recency. Fulfilled / superseded items are excluded.
     private var dailyPlan: [DailyPlanItem] {
-        let now = Date()
-        let cal = Calendar.current
-        let tomorrow = cal.date(byAdding: .day, value: 1, to: now) ?? now
-        let inFiveDays = cal.date(byAdding: .day, value: 5, to: now) ?? now
-
-        func classify(_ c: Commitment, capturedAt: Date) -> (weight: Int, due: Date?)? {
-            let due = DueDateParser.date(from: c.dueHint, capturedAt: capturedAt)
-            switch c.status {
-            case .fulfilled, .superseded:
-                return nil
-            case .atRisk:
-                return (0, due)
-            case .open:
-                if let due {
-                    if due < now            { return (0, due) }   // overdue
-                    if due <= tomorrow      { return (1, due) }   // today / tomorrow
-                    if due <= inFiveDays    { return (2, due) }   // this week
-                }
-                return (3, due)
-            }
-        }
-
-        return store.meetings
-            .flatMap { meeting in
-                meeting.commitments.compactMap { c -> DailyPlanItem? in
-                    guard let cls = classify(c, capturedAt: meeting.when) else { return nil }
-                    return DailyPlanItem(
-                        id: c.id,
-                        commitment: c,
-                        meetingID: meeting.id,
-                        meetingTitle: meeting.title,
-                        meetingDate: meeting.when,
-                        weight: cls.weight,
-                        dueDate: cls.due
-                    )
-                }
-            }
-            .sorted { lhs, rhs in
-                lhs.weight != rhs.weight ? lhs.weight < rhs.weight : lhs.meetingDate > rhs.meetingDate
-            }
-            .prefix(3)
-            .map { $0 }
+        snap.dailyPlan
     }
 
     private static let planRelFormatter: RelativeDateTimeFormatter = {
@@ -407,15 +369,11 @@ struct TodayView: View {
     }
 
     private var followThroughPct: Int {
-        let all = store.meetings.flatMap(\.commitments)
-        guard !all.isEmpty else { return 0 }
-        let done = all.filter { $0.status == .fulfilled || $0.status == .superseded }.count
-        return Int((Double(done) / Double(all.count) * 100).rounded())
+        snap.followThroughPct
     }
 
     private var weekMeetingCount: Int {
-        let weekAgo = Calendar.current.date(byAdding: .day, value: -7, to: .now) ?? .now
-        return store.meetings.filter { $0.when >= weekAgo }.count
+        snap.weekMeetingCount
     }
 
     private var cinematicBriefing: some View {
@@ -711,16 +669,30 @@ struct TodayView: View {
     }
 
     private func refreshUpcoming() async {
-        let service = UpcomingEventsService.shared
-        if !calendarAccessRequested {
-            calendarAccessRequested = true
-            _ = await service.requestAccessIfNeeded()
-        }
-        let events = service.fetchUpcoming()
+        let service = CalendarService.shared
+        let access = service.refreshAccessState()
+        let events = access.canReadEvents ? service.fetchUpcoming() : []
         await MainActor.run {
             upcomingEvents = events
+            calendarAccessState = access
             refreshImminent()
             rebuildHeroModel()
+        }
+    }
+
+    private func requestCalendarAccessFromHome() {
+        guard !isRequestingCalendarAccess else { return }
+        isRequestingCalendarAccess = true
+        Task {
+            let granted = await CalendarService.shared.requestAccessIfNeeded()
+            await refreshUpcoming()
+            await MainActor.run {
+                isRequestingCalendarAccess = false
+                toast = ToastItem(
+                    message: granted ? "Calendar connected" : "Calendar not connected",
+                    icon: granted ? "calendar.badge.checkmark" : "calendar.badge.exclamationmark"
+                )
+            }
         }
     }
 
@@ -732,8 +704,9 @@ struct TodayView: View {
         autoRecordWatchTimer?.invalidate()
         autoRecordWatchTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
             Task { @MainActor in
-                let service = UpcomingEventsService.shared
+                let service = CalendarService.shared
                 upcomingEvents = service.fetchUpcoming()
+                calendarAccessState = service.accessState
                 refreshImminent()
             }
         }
@@ -805,7 +778,7 @@ struct TodayView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Button {
                     HapticEngine.notify(.success)
-                    UpcomingCaptureContext.shared.preferredTitle = event.title
+                    UpcomingCaptureContext.shared.preferredEvent = event
                     dismissedEventIDs.insert(event.id)
                     AnalyticsLog.shared.log("calendar.autoRecord.armed", ["title": event.title])
                     onCapture(.record)
@@ -855,19 +828,23 @@ struct TodayView: View {
     /// which is also what Library's pin/unpin toggles — so pinning anywhere
     /// surfaces it here.
     private var pinnedMeetings: [Meeting] {
-        Array(store.meetings.filter(\.isPinned).sorted(by: Meeting.sortDescending).prefix(5))
+        snap.pinnedMeetings
     }
 
     private func prepareNote(for event: UpcomingEvent) {
-        let attendeesHint: [String] = ["You"]
         let id = store.addMeeting(
             title: event.title,
             workspace: event.isVideoCall ? "Calls" : "Meetings",
-            attendees: attendeesHint,
-            objective: event.location ?? "Prepared from calendar",
-            notes: "- Agenda:\n- Decisions:\n- Risks:\n- Next steps:",
-            durationMinutes: max(15, Int(event.endDate.timeIntervalSince(event.startDate) / 60)),
-            audioRecordings: []
+            attendees: event.attendees,
+            objective: event.objective,
+            notes: event.prepNotesTemplate,
+            when: event.startDate,
+            stage: "Prepared from calendar",
+            durationMinutes: event.durationMinutes,
+            audioRecordings: [],
+            calendarEventID: event.id,
+            calendarStartDate: event.startDate,
+            calendarEndDate: event.endDate
         )
         selectedMeetingID = id
         toast = ToastItem(message: "Your prep note's ready", icon: "checkmark.circle.fill")
@@ -875,7 +852,7 @@ struct TodayView: View {
     }
 
     private func captureForEvent(_ event: UpcomingEvent) {
-        UpcomingCaptureContext.shared.preferredTitle = event.title
+        UpcomingCaptureContext.shared.preferredEvent = event
         onCapture(.record)
     }
 
@@ -994,15 +971,22 @@ struct TodaySnapshot {
     var recentHomeMeetings: [Meeting] = []
     var dashboardCollections: [SmartCollectionCard] = []
     var openLoops: [OpenLoop] = []
+    var dailyPlan: [DailyPlanItem] = []
+    var pinnedMeetings: [Meeting] = []
     var totalOpenLoopsCount = 0
     var nextMove: NextMove? = nil
+    var nextMoveAttendees: [String] = []
     var continueMeeting: Meeting? = nil
     var trailingMeetings: [Meeting] = []
     var todayCaptureCount = 0
     var weekCaptureCount = 0
+    var weekMeetingCount = 0
+    var rollingWeekCaptureCount = 0
+    var previousWeekCaptureCount = 0
     var totalCount = 0
     var longestStreakDays = 0
     var avgDurationMinutes = 0
+    var followThroughPct = 0
 
     init() {}
 
@@ -1010,16 +994,23 @@ struct TodaySnapshot {
         let recentMeetings = meetings.sorted(by: Meeting.sortDescending)
         let recent = Array(recentMeetings.prefix(5))
         let allOpenLoops = Self.openLoops(from: recentMeetings)
+        let windows = Self.rollingCaptureWindows(in: meetings)
         recentHomeMeetings = recent
         dashboardCollections = Self.smartCollections(from: recentMeetings)
         openLoops = Array(allOpenLoops.prefix(100))
+        dailyPlan = Self.dailyPlan(from: meetings)
+        pinnedMeetings = Array(recentMeetings.filter(\.isPinned).prefix(5))
         totalOpenLoopsCount = allOpenLoops.count
         continueMeeting = recent.first
         trailingMeetings = Array(recent.dropFirst())
         let startOfDay = Calendar.current.startOfDay(for: .now)
         let startOfWeek = Calendar.current.date(byAdding: .day, value: -6, to: startOfDay) ?? startOfDay
+        let weekAgo = Calendar.current.date(byAdding: .day, value: -7, to: .now) ?? .now
         todayCaptureCount = meetings.filter { $0.when >= startOfDay }.count
         weekCaptureCount = meetings.filter { $0.when >= startOfWeek }.count
+        weekMeetingCount = meetings.filter { $0.when >= weekAgo }.count
+        rollingWeekCaptureCount = windows.current
+        previousWeekCaptureCount = windows.previous
         totalCount = meetings.count
         longestStreakDays = Self.streakDays(in: meetings)
         let nonZeroDurations = meetings.map(\.durationMinutes).filter { $0 > 0 }
@@ -1030,6 +1021,82 @@ struct TodaySnapshot {
             todayCount: todayCaptureCount,
             streak: longestStreakDays
         )
+        if let meetingID = nextMove?.meetingID,
+           let meeting = meetings.first(where: { $0.id == meetingID }) {
+            nextMoveAttendees = meeting.attendees
+        }
+        followThroughPct = Self.followThroughPercent(in: meetings)
+    }
+
+    private static func dailyPlan(from meetings: [Meeting]) -> [DailyPlanItem] {
+        let now = Date()
+        let cal = Calendar.current
+        let tomorrow = cal.date(byAdding: .day, value: 1, to: now) ?? now
+        let inFiveDays = cal.date(byAdding: .day, value: 5, to: now) ?? now
+
+        func classify(_ commitment: Commitment, capturedAt: Date) -> (weight: Int, due: Date?)? {
+            let due = DueDateParser.date(from: commitment.dueHint, capturedAt: capturedAt)
+            switch commitment.status {
+            case .fulfilled, .superseded:
+                return nil
+            case .atRisk:
+                return (0, due)
+            case .open:
+                if let due {
+                    if due < now { return (0, due) }
+                    if due <= tomorrow { return (1, due) }
+                    if due <= inFiveDays { return (2, due) }
+                }
+                return (3, due)
+            }
+        }
+
+        return meetings
+            .flatMap { meeting in
+                meeting.commitments.compactMap { commitment -> DailyPlanItem? in
+                    guard let classification = classify(commitment, capturedAt: meeting.when) else { return nil }
+                    return DailyPlanItem(
+                        id: commitment.id,
+                        commitment: commitment,
+                        meetingID: meeting.id,
+                        meetingTitle: meeting.title,
+                        meetingDate: meeting.when,
+                        weight: classification.weight,
+                        dueDate: classification.due
+                    )
+                }
+            }
+            .sorted { lhs, rhs in
+                lhs.weight != rhs.weight ? lhs.weight < rhs.weight : lhs.meetingDate > rhs.meetingDate
+            }
+            .prefix(3)
+            .map { $0 }
+    }
+
+    private static func rollingCaptureWindows(in meetings: [Meeting]) -> (current: Int, previous: Int) {
+        let cal = Calendar.current
+        let startToday = cal.startOfDay(for: .now)
+        var current = 0
+        var previous = 0
+
+        for meeting in meetings {
+            let day = cal.startOfDay(for: meeting.when)
+            guard let diff = cal.dateComponents([.day], from: day, to: startToday).day else { continue }
+            if diff >= 0, diff < 7 {
+                current += 1
+            } else if diff >= 7, diff < 14 {
+                previous += 1
+            }
+        }
+
+        return (current, previous)
+    }
+
+    private static func followThroughPercent(in meetings: [Meeting]) -> Int {
+        let allCommitments = meetings.flatMap(\.commitments)
+        guard !allCommitments.isEmpty else { return 0 }
+        let done = allCommitments.filter { $0.status == .fulfilled || $0.status == .superseded }.count
+        return Int((Double(done) / Double(allCommitments.count) * 100).rounded())
     }
 
     /// Surfaces the single most useful next action across the workspace, or
@@ -1522,7 +1589,104 @@ struct HomeEmptyHint: View {
     }
 }
 
+private struct CalendarAccessRecoveryCard: View {
+    let onOpenSettings: () -> Void
 
+    var body: some View {
+        HStack(alignment: .top, spacing: 13) {
+            Image(systemName: "calendar.badge.exclamationmark")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(AppPalette.coral)
+                .frame(width: 28, height: 28)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Calendar is disconnected")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(AppPalette.ink)
+                Text("Reconnect access to show today’s meetings and start notes from calendar events.")
+                    .font(.caption)
+                    .foregroundStyle(AppPalette.secondaryInk)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                HapticEngine.tap(.light)
+                onOpenSettings()
+            } label: {
+                Text("Settings")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(AppPalette.ink, in: Capsule())
+            }
+            .buttonStyle(PressScaleButtonStyle(scale: 0.95))
+        }
+        .padding(14)
+        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
+                .strokeBorder(AppPalette.coral.opacity(0.22), lineWidth: 0.8)
+        )
+    }
+}
+
+private struct CalendarAccessPromptCard: View {
+    let isLoading: Bool
+    let onConnect: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 13) {
+            Image(systemName: "calendar.badge.plus")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(AppPalette.accent)
+                .frame(width: 28, height: 28)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Connect today’s meetings")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(AppPalette.ink)
+                Text("Show your next calls, pre-fill notes, and link captures back to the calendar event.")
+                    .font(.caption)
+                    .foregroundStyle(AppPalette.secondaryInk)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                HapticEngine.tap(.light)
+                onConnect()
+            } label: {
+                HStack(spacing: 6) {
+                    if isLoading {
+                        ProgressView()
+                            .tint(.white)
+                    } else {
+                        Image(systemName: "link")
+                            .font(.caption.weight(.bold))
+                    }
+                    Text("Connect")
+                        .font(.caption.weight(.bold))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(AppPalette.accent, in: Capsule())
+            }
+            .buttonStyle(PressScaleButtonStyle(scale: 0.95))
+            .disabled(isLoading)
+        }
+        .padding(14)
+        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
+                .strokeBorder(AppPalette.accent.opacity(0.22), lineWidth: 0.8)
+        )
+    }
+}
 
 // MARK: - HowItWorksSheet (cinematic single-canvas demo)
 

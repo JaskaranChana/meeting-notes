@@ -7,10 +7,9 @@ import SwiftUI
     var detailDepth = 0
 }
 
-/// Root tab shell. Four tabs only: **Today** (briefing), **Library**
-/// (the actual notes), **Tasks** (action items), **Ask** (workspace-wide AI).
-/// Settings is a sheet from Today's toolbar, not a tab — it's not used often
-/// enough to justify the navigation real-estate.
+/// Root tab shell. Five daily-use tabs: **Today** (briefing), **Library**
+/// (notes), **Tasks** (action items), **Calendar** (meeting schedule), and
+/// **Ask** (workspace-wide AI). Settings is a sheet from Today's toolbar.
 struct ContentView: View {
     @Environment(MeetingStore.self) private var store
     @Environment(\.scenePhase) private var scenePhase
@@ -26,6 +25,8 @@ struct ContentView: View {
     @State private var isPrivacyScreenVisible = false
     @State private var toast: ToastItem?
     @State private var toastDismissTask: Task<Void, Never>?
+    @State private var spotlightIndexTask: Task<Void, Never>?
+    @State private var openActionItemCount = 0
     @StateObject private var pendingInbox = PendingCaptureInbox.shared
     @AppStorage(AppearancePreference.storageKey) private var appearanceRaw = AppearancePreference.system.rawValue
     @State private var navChrome = NavChrome()
@@ -67,6 +68,7 @@ struct ContentView: View {
             .tint(AppPalette.accent)
             .onAppear {
                 selectedMeetingID = selectedMeetingID ?? store.recentMeetings.first?.id
+                refreshRootChromeSnapshot()
             }
 
             if isPrivacyScreenVisible {
@@ -122,12 +124,8 @@ struct ContentView: View {
             }
         }
         .onChange(of: store.revision) { _, _ in
-            // Keep Spotlight in sync with the meeting store. Coalesce by debouncing
-            // via a single task so rapid edits don't thrash the index.
-            Task.detached(priority: .background) {
-                let snapshot = await MainActor.run { store.meetings }
-                SpotlightIndex.index(snapshot)
-            }
+            refreshRootChromeSnapshot()
+            scheduleSpotlightIndex()
         }
         .onContinueUserActivity(SpotlightIndex.activityType) { activity in
             handleSpotlightActivity(activity)
@@ -174,6 +172,8 @@ struct ContentView: View {
         .onDisappear {
             toastDismissTask?.cancel()
             toastDismissTask = nil
+            spotlightIndexTask?.cancel()
+            spotlightIndexTask = nil
         }
     }
 
@@ -200,7 +200,7 @@ struct ContentView: View {
     /// Reserves bottom space so scroll content (and pushed detail views) clear
     /// the floating dock — the dock is an overlay, so each tab must inset itself.
     private var dockClearance: some View {
-        Color.clear.frame(height: navChrome.detailDepth == 0 ? 76 : 0)
+        Color.clear.frame(height: navChrome.detailDepth == 0 ? AppDockMetrics.scrollClearance : 0)
     }
 
     private var mainTabs: some View {
@@ -241,6 +241,17 @@ struct ContentView: View {
             .tag(RootTab.tasks)
 
             NavigationStack {
+                MeetingCalendarView(
+                    selectedMeetingID: $selectedMeetingID,
+                    onCapture: { mode in captureMode = mode },
+                    toast: $toast
+                )
+                .toolbar(.hidden, for: .tabBar)
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) { dockClearance }
+            .tag(RootTab.calendar)
+
+            NavigationStack {
                 AskView()
                     .toolbar(.hidden, for: .tabBar)
             }
@@ -255,6 +266,7 @@ struct ContentView: View {
                         FloatingTabDockItem(id: RootTab.home.rawValue, label: "Today", systemImage: "sparkles"),
                         FloatingTabDockItem(id: RootTab.library.rawValue, label: "Library", systemImage: "rectangle.stack"),
                         FloatingTabDockItem(id: RootTab.tasks.rawValue, label: "Tasks", systemImage: "checklist", badge: openActionItemCount),
+                        FloatingTabDockItem(id: RootTab.calendar.rawValue, label: "Calendar", systemImage: "calendar"),
                         FloatingTabDockItem(id: RootTab.ask.rawValue, label: "Ask", systemImage: "sparkle.magnifyingglass")
                     ],
                     selection: Binding(
@@ -315,9 +327,23 @@ struct ContentView: View {
         }
     }
 
-    private var openActionItemCount: Int {
-        store.meetings.reduce(0) { partial, meeting in
-            partial + meeting.commitments.filter { $0.status == .open || $0.status == .atRisk }.count
+    private func refreshRootChromeSnapshot() {
+        openActionItemCount = store.meetings.reduce(0) { partial, meeting in
+            partial + meeting.commitments.reduce(0) { total, commitment in
+                total + (commitment.status == .open || commitment.status == .atRisk ? 1 : 0)
+            }
+        }
+    }
+
+    private func scheduleSpotlightIndex() {
+        spotlightIndexTask?.cancel()
+        spotlightIndexTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(700))
+            guard !Task.isCancelled else { return }
+            let snapshot = store.meetings
+            await Task.detached(priority: .utility) {
+                SpotlightIndex.index(snapshot)
+            }.value
         }
     }
 
@@ -325,7 +351,7 @@ struct ContentView: View {
     @ViewBuilder
     private func qaRoot(for route: AppQARoute) -> some View {
         switch route {
-        case .home, .library, .ask:
+        case .home, .library, .calendar, .ask:
             mainTabs
         case .quickNote:
             CaptureView(initialMode: .type, selectedMeetingID: $selectedMeetingID, toast: $toast)
@@ -368,6 +394,7 @@ private enum RootTab: String, Hashable {
     case home
     case library
     case tasks
+    case calendar
     case ask
 }
 
@@ -382,6 +409,7 @@ private struct CaptureModeWrapper: Identifiable {
 private enum AppQARoute: String {
     case home
     case library
+    case calendar
     case ask
     case quickNote
     case meetingDetail
@@ -397,6 +425,8 @@ private enum AppQARoute: String {
         switch self {
         case .library:
             return .library
+        case .calendar:
+            return .calendar
         case .ask:
             return .ask
         default:

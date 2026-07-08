@@ -38,7 +38,9 @@ final class MeetingStore {
         didSet {
             revision &+= 1
             save()
-            rebuildIndex()
+            if shouldRebuildIndex(afterReplacing: oldValue) {
+                rebuildIndex()
+            }
             _recentMeetings = nil
             _pinnedMeetings = nil
             _openLoopsCache = nil
@@ -73,6 +75,10 @@ final class MeetingStore {
     /// Dictionary index for O(1) `meeting(withID:)` lookup. Previously a
     /// linear `first(where:)` scan — measurable lag on libraries >100.
     @ObservationIgnored private var indexByID: [Meeting.ID: Int] = [:]
+
+    /// Most edits change fields inside an existing row, not the row identity or
+    /// position. Keep the lookup index out of those hot paths.
+    @ObservationIgnored private var forceIndexRebuildAfterMutation = false
 
     /// A single welcoming example meeting for first launch. Notes are written
     /// to show the Smart Notes extraction at its best — a decision, owned
@@ -112,6 +118,15 @@ final class MeetingStore {
         for (i, m) in meetings.enumerated() {
             indexByID[m.id] = i
         }
+    }
+
+    private func shouldRebuildIndex(afterReplacing oldMeetings: [Meeting]) -> Bool {
+        defer { forceIndexRebuildAfterMutation = false }
+        if forceIndexRebuildAfterMutation { return true }
+        guard oldMeetings.count == meetings.count else { return true }
+        if oldMeetings.first?.id != meetings.first?.id { return true }
+        if oldMeetings.last?.id != meetings.last?.id { return true }
+        return false
     }
 
     @ObservationIgnored
@@ -658,6 +673,22 @@ final class MeetingStore {
         guard let index = meetings.firstIndex(where: { $0.id == meetingID }) else { return }
         guard let commitmentIndex = meetings[index].commitments.firstIndex(where: { $0.id == commitmentID }) else { return }
         meetings[index].commitments[commitmentIndex].status = status
+        if status == .fulfilled || status == .superseded {
+            ReminderScheduler.cancel(meetingID: meetingID, commitmentID: commitmentID)
+        }
+    }
+
+    func updateCommitmentDetails(
+        commitmentID: Commitment.ID,
+        for meetingID: Meeting.ID,
+        owner: String,
+        dueDateOverride: Date?
+    ) {
+        let cleanedOwner = owner.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let index = meetings.firstIndex(where: { $0.id == meetingID }) else { return }
+        guard let commitmentIndex = meetings[index].commitments.firstIndex(where: { $0.id == commitmentID }) else { return }
+        meetings[index].commitments[commitmentIndex].owner = cleanedOwner.isEmpty ? "Owner not named" : cleanedOwner
+        meetings[index].commitments[commitmentIndex].dueDateOverride = dueDateOverride
     }
 
     func selectTemplate(_ template: NoteTemplate, for id: Meeting.ID) {
@@ -870,6 +901,7 @@ final class MeetingStore {
             RecordingFileStore.protectFile(at: url)
         }
 
+        forceIndexRebuildAfterMutation = true
         meetings = package.meetings.map(Self.normalizedMeeting)
 
         for index in meetings.indices {
@@ -887,6 +919,37 @@ final class MeetingStore {
     func deleteAllUserData() {
         RecordingFileStore.deleteAllFiles()
         meetings = []
+    }
+
+    @discardableResult
+    func addSampleData() -> Int {
+        let existingKeys = Set(meetings.map { Self.sampleIdentityKey(for: $0) })
+        var samples = Meeting.seed
+            .map(Self.normalizedMeeting)
+            .filter { !existingKeys.contains(Self.sampleIdentityKey(for: $0)) }
+
+        guard !samples.isEmpty else { return 0 }
+        isSeedLoad = true
+        for index in samples.indices {
+            refreshSummariesForSample(&samples[index])
+        }
+        isSeedLoad = false
+        meetings.insert(contentsOf: samples, at: 0)
+        applySupersededCommitments()
+        return samples.count
+    }
+
+    func replaceWithSampleData() {
+        RecordingFileStore.deleteAllFiles()
+        var samples = Meeting.seed.map(Self.normalizedMeeting)
+        isSeedLoad = true
+        for index in samples.indices {
+            refreshSummariesForSample(&samples[index])
+        }
+        isSeedLoad = false
+        forceIndexRebuildAfterMutation = true
+        meetings = samples
+        applySupersededCommitments()
     }
 
     @discardableResult
@@ -1196,19 +1259,23 @@ final class MeetingStore {
         notes: String,
         moments: [String] = [],
         transcript: [TranscriptLine] = [],
+        when: Date = .now,
         status: MeetingStatus = .ready,
         stage: String = "Captured from iPhone notes",
         durationMinutes: Int = 25,
         meetingMode: MeetingMode = .privateNotes,
         consentState: ConsentState = .privateCapture,
         retentionPolicy: RetentionPolicy = .keepUntilDeleted,
-        audioRecordings: [AudioRecordingAttachment] = []
+        audioRecordings: [AudioRecordingAttachment] = [],
+        calendarEventID: String? = nil,
+        calendarStartDate: Date? = nil,
+        calendarEndDate: Date? = nil
     ) -> Meeting.ID {
         let normalizedAttendees = attendees.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         var meeting = Meeting(
             title: title,
             workspace: workspace,
-            when: .now,
+            when: when,
             durationMinutes: durationMinutes,
             attendees: normalizedAttendees.isEmpty ? ["You"] : normalizedAttendees,
             status: status,
@@ -1226,7 +1293,10 @@ final class MeetingStore {
             meetingMode: meetingMode,
             retentionPolicy: retentionPolicy,
             transcriptVisibilityEnabled: transcript.isEmpty == false,
-            audioRecordings: audioRecordings
+            audioRecordings: audioRecordings,
+            calendarEventID: calendarEventID,
+            calendarStartDate: calendarStartDate,
+            calendarEndDate: calendarEndDate
         )
         meeting.summaries = generatedSummaries(for: meeting)
         meeting.evidenceItems = generatedEvidenceItems(for: meeting)
@@ -1328,7 +1398,10 @@ final class MeetingStore {
         transcriptParagraphs: [String],
         meetingMode: MeetingMode = .privateNotes,
         consentState: ConsentState = .privateCapture,
-        retentionPolicy: RetentionPolicy = .keepUntilDeleted
+        retentionPolicy: RetentionPolicy = .keepUntilDeleted,
+        calendarEventID: String? = nil,
+        calendarStartDate: Date? = nil,
+        calendarEndDate: Date? = nil
     ) async -> Meeting.ID {
         let enhancedNotes = enhancedLiveNotes(notes: notes, transcriptParagraphs: transcriptParagraphs)
         let transcriptLines = transcriptParagraphs.map {
@@ -1347,7 +1420,10 @@ final class MeetingStore {
             stage: "Captured live on iPhone",
             meetingMode: meetingMode,
             consentState: consentState,
-            retentionPolicy: retentionPolicy
+            retentionPolicy: retentionPolicy,
+            calendarEventID: calendarEventID,
+            calendarStartDate: calendarStartDate,
+            calendarEndDate: calendarEndDate
         )
 
         _ = await rewriteMeetingNotes(for: meetingID)
@@ -1604,16 +1680,28 @@ final class MeetingStore {
     }
 
     private func refreshSummariesIfNeeded(at index: Int, applySupersededCommitments shouldApplySupersededCommitments: Bool = true) {
-        meetings[index].summaries = generatedSummaries(for: meetings[index])
-        meetings[index].evidenceItems = generatedEvidenceItems(for: meetings[index])
+        guard meetings.indices.contains(index) else { return }
+        var meeting = meetings[index]
+        meeting.summaries = generatedSummaries(for: meeting)
+        meeting.evidenceItems = generatedEvidenceItems(for: meeting)
         // Keep explicitly authored seed commitments; otherwise derive from notes.
-        if !(isSeedLoad && !meetings[index].commitments.isEmpty) {
-            meetings[index].commitments = generatedCommitments(for: meetings[index])
+        if !(isSeedLoad && !meeting.commitments.isEmpty) {
+            meeting.commitments = generatedCommitments(for: meeting)
         }
-        meetings[index].sensitiveFlags = detectedSensitiveFlags(for: meetings[index])
+        meeting.sensitiveFlags = detectedSensitiveFlags(for: meeting)
+        meetings[index] = meeting
         if shouldApplySupersededCommitments {
             applySupersededCommitments()
         }
+    }
+
+    private func refreshSummariesForSample(_ meeting: inout Meeting) {
+        meeting.summaries = generatedSummaries(for: meeting)
+        meeting.evidenceItems = generatedEvidenceItems(for: meeting)
+        if meeting.commitments.isEmpty {
+            meeting.commitments = generatedCommitments(for: meeting)
+        }
+        meeting.sensitiveFlags = detectedSensitiveFlags(for: meeting)
     }
 
     private func generatedSummaries(for meeting: Meeting) -> [TemplateSummary] {
@@ -2039,7 +2127,7 @@ final class MeetingStore {
     private func applySupersededCommitments() {
         var latestByFingerprint: [String: (meetingID: Meeting.ID, commitmentID: Commitment.ID)] = [:]
 
-        for meeting in recentMeetings.reversed() {
+        for meeting in meetings.sorted(by: Meeting.sortDescending).reversed() {
             for commitment in meeting.commitments {
                 let fingerprint = normalizedFingerprint(commitment.statement)
                 guard !fingerprint.isEmpty else { continue }
@@ -2047,16 +2135,24 @@ final class MeetingStore {
             }
         }
 
-        for meetingIndex in meetings.indices {
-            for commitmentIndex in meetings[meetingIndex].commitments.indices {
-                let commitment = meetings[meetingIndex].commitments[commitmentIndex]
+        var updatedMeetings = meetings
+        var changed = false
+
+        for meetingIndex in updatedMeetings.indices {
+            for commitmentIndex in updatedMeetings[meetingIndex].commitments.indices {
+                let commitment = updatedMeetings[meetingIndex].commitments[commitmentIndex]
                 let fingerprint = normalizedFingerprint(commitment.statement)
                 guard let latest = latestByFingerprint[fingerprint] else { continue }
-                guard latest.meetingID != meetings[meetingIndex].id else { continue }
-                if meetings[meetingIndex].commitments[commitmentIndex].status == .open {
-                    meetings[meetingIndex].commitments[commitmentIndex].status = .superseded
+                guard latest.meetingID != updatedMeetings[meetingIndex].id else { continue }
+                if updatedMeetings[meetingIndex].commitments[commitmentIndex].status == .open {
+                    updatedMeetings[meetingIndex].commitments[commitmentIndex].status = .superseded
+                    changed = true
                 }
             }
+        }
+
+        if changed {
+            meetings = updatedMeetings
         }
     }
 
@@ -2071,10 +2167,22 @@ final class MeetingStore {
             includeInferred || $0.level != .inferred
         }
 
-        let noteLines = visibleEvidence.map(\.text).filter { !$0.isEmpty }
+        let includeEvidenceLabels = format != .clientRecap
+        let noteLines = visibleEvidence
+            .filter { !$0.text.isEmpty }
+            .map { item in
+                var line = "- \(item.text)"
+                if includeEvidenceLabels {
+                    line += " [\(item.level.title)]"
+                    if includeTranscript, let source = item.supportingSnippets.first {
+                        line += " [source: \(source)]"
+                    }
+                }
+                return line
+            }
         let notesBlock = noteLines.isEmpty
             ? "- No safe bullets available yet."
-            : noteLines.prefix(format == .execUpdate ? 4 : 6).map { "- \($0)" }.joined(separator: "\n")
+            : noteLines.prefix(format == .execUpdate ? 4 : 6).joined(separator: "\n")
 
         let commitmentsBlock = meeting.commitments
             .filter { $0.status != .superseded || format != .clientRecap }
@@ -2276,6 +2384,10 @@ final class MeetingStore {
         normalized.transcriptVisibilityEnabled = normalized.transcriptVisibilityEnabled && !normalized.transcript.isEmpty
 
         return normalized
+    }
+
+    private static func sampleIdentityKey(for meeting: Meeting) -> String {
+        "\(meeting.title.lowercased())|\(meeting.workspace.lowercased())|\(meeting.calendarEventID ?? "")"
     }
 
     private static func defaultPrompts() -> [AIResponse] {
@@ -2828,4 +2940,3 @@ private enum AppleIntelligenceWorkspaceAssistant {
     }
 }
 #endif
-

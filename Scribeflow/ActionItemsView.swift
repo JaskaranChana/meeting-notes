@@ -13,7 +13,14 @@ struct AggregatedActionItem: Identifiable, Hashable {
     let isMeetingPinned: Bool
 
     /// Absolute deadline resolved from the free-text hint relative to capture.
-    var dueDate: Date? { DueDateParser.date(from: commitment.dueHint, capturedAt: meetingDate) }
+    var dueDate: Date? { commitment.dueDateOverride ?? DueDateParser.date(from: commitment.dueHint, capturedAt: meetingDate) }
+
+    var dueLabel: String? {
+        if let override = commitment.dueDateOverride {
+            return override.formatted(.dateTime.month(.abbreviated).day())
+        }
+        return commitment.dueHint?.nilIfBlank?.capitalized
+    }
 
     private var isLive: Bool { commitment.status == .open || commitment.status == .atRisk }
 
@@ -113,6 +120,175 @@ enum ActionItemSort: String, CaseIterable, Identifiable {
     }
 }
 
+private struct ActionItemsSnapshotKey: Hashable {
+    let revision: Int
+    let query: String
+    let filter: ActionItemFilter
+    let sort: ActionItemSort
+
+    var hasSearchQuery: Bool { !query.isEmpty }
+}
+
+private struct ActionItemsMeetingGroup {
+    let meetingID: Meeting.ID
+    let meetingTitle: String
+    let items: [AggregatedActionItem]
+}
+
+private struct ActionItemsDateGroup {
+    let title: String
+    let items: [AggregatedActionItem]
+}
+
+private struct ActionItemsDisplaySnapshot {
+    var filteredItems: [AggregatedActionItem] = []
+    var dateGroups: [ActionItemsDateGroup] = []
+    var meetingGroups: [ActionItemsMeetingGroup] = []
+    var openCount = 0
+    var atRiskCount = 0
+    var doneCount = 0
+    var attentionCount = 0
+    var attentionHeadline = ""
+    var attentionDetail = ""
+    var shouldPreferAtRiskFilter = false
+
+    static func make(
+        allItems: [AggregatedActionItem],
+        query: String,
+        filter: ActionItemFilter,
+        sort: ActionItemSort
+    ) -> ActionItemsDisplaySnapshot {
+        let filtered = sortedItems(
+            allItems
+                .filter { filter.matches($0) }
+                .filter { matches(query: query, item: $0) },
+            sort: sort
+        )
+        let overdue = allItems.filter(\.isOverdue)
+        let atRisk = allItems.filter { $0.commitment.status == .atRisk }
+        let dueSoon = allItems.filter(\.isDueSoon)
+        let dueSoonNotAtRisk = dueSoon.filter { $0.commitment.status != .atRisk }
+
+        var attentionIDs = Set(overdue.map(\.id))
+        attentionIDs.formUnion(atRisk.map(\.id))
+        attentionIDs.formUnion(dueSoon.map(\.id))
+        let attentionCount = attentionIDs.count
+
+        var attentionParts: [String] = []
+        if !overdue.isEmpty { attentionParts.append("\(overdue.count) overdue") }
+        if !atRisk.isEmpty { attentionParts.append("\(atRisk.count) at risk") }
+        if !dueSoonNotAtRisk.isEmpty { attentionParts.append("\(dueSoonNotAtRisk.count) due soon") }
+
+        return ActionItemsDisplaySnapshot(
+            filteredItems: filtered,
+            dateGroups: dateGroups(from: filtered),
+            meetingGroups: meetingGroups(from: filtered),
+            openCount: allItems.filter { $0.commitment.status == .open }.count,
+            atRiskCount: atRisk.count,
+            doneCount: allItems.filter { $0.commitment.status == .fulfilled || $0.commitment.status == .superseded }.count,
+            attentionCount: attentionCount,
+            attentionHeadline: "\(attentionCount) item\(attentionCount == 1 ? "" : "s") need\(attentionCount == 1 ? "s" : "") attention",
+            attentionDetail: attentionParts.joined(separator: " · "),
+            shouldPreferAtRiskFilter: !atRisk.isEmpty
+        )
+    }
+
+    private static func sortedItems(_ items: [AggregatedActionItem], sort: ActionItemSort) -> [AggregatedActionItem] {
+        switch sort {
+        case .priority:
+            return items.sorted { lhs, rhs in
+                if lhs.priority != rhs.priority {
+                    return priorityRank(lhs.priority) < priorityRank(rhs.priority)
+                }
+                return lhs.meetingDate > rhs.meetingDate
+            }
+        case .recent:
+            return items.sorted { $0.meetingDate > $1.meetingDate }
+        case .meeting:
+            return items.sorted { lhs, rhs in
+                if lhs.isMeetingPinned != rhs.isMeetingPinned { return lhs.isMeetingPinned }
+                if lhs.meetingDate != rhs.meetingDate { return lhs.meetingDate > rhs.meetingDate }
+                return lhs.meetingTitle < rhs.meetingTitle
+            }
+        }
+    }
+
+    private static func dateGroups(from items: [AggregatedActionItem]) -> [ActionItemsDateGroup] {
+        let cal = Calendar.current
+        let startToday = cal.startOfDay(for: .now)
+        let weekAgo = cal.date(byAdding: .day, value: -7, to: startToday) ?? startToday
+        var today: [AggregatedActionItem] = []
+        var week: [AggregatedActionItem] = []
+        var earlier: [AggregatedActionItem] = []
+        for item in items {
+            if item.meetingDate >= startToday { today.append(item) }
+            else if item.meetingDate >= weekAgo { week.append(item) }
+            else { earlier.append(item) }
+        }
+        var out: [ActionItemsDateGroup] = []
+        if !today.isEmpty { out.append(ActionItemsDateGroup(title: "Today", items: today)) }
+        if !week.isEmpty { out.append(ActionItemsDateGroup(title: "This week", items: week)) }
+        if !earlier.isEmpty { out.append(ActionItemsDateGroup(title: "Earlier", items: earlier)) }
+        return out
+    }
+
+    private static func meetingGroups(from items: [AggregatedActionItem]) -> [ActionItemsMeetingGroup] {
+        var order: [Meeting.ID] = []
+        var titles: [Meeting.ID: String] = [:]
+        var buckets: [Meeting.ID: [AggregatedActionItem]] = [:]
+        for item in items {
+            if buckets[item.meetingID] == nil {
+                order.append(item.meetingID)
+                titles[item.meetingID] = item.meetingTitle
+            }
+            buckets[item.meetingID, default: []].append(item)
+        }
+        return order.map { id in
+            ActionItemsMeetingGroup(meetingID: id, meetingTitle: titles[id] ?? "", items: buckets[id] ?? [])
+        }
+    }
+
+    private static func priorityRank(_ priority: ActionPriority) -> Int {
+        switch priority {
+        case .high: return 0
+        case .medium: return 1
+        case .low: return 2
+        }
+    }
+
+    private static func matches(query: String, item: AggregatedActionItem) -> Bool {
+        guard !query.isEmpty else { return true }
+        return item.commitment.statement.localizedStandardContains(query)
+            || item.commitment.owner.localizedStandardContains(query)
+            || item.meetingTitle.localizedStandardContains(query)
+            || (item.commitment.dueHint?.localizedStandardContains(query) ?? false)
+    }
+}
+
+private actor ActionItemsSnapshotBuilder {
+    func make(meetings: [Meeting], key: ActionItemsSnapshotKey) -> (items: [AggregatedActionItem], snapshot: ActionItemsDisplaySnapshot) {
+        let items = meetings.flatMap { meeting in
+            meeting.commitments.map { commitment in
+                AggregatedActionItem(
+                    commitment: commitment,
+                    meetingID: meeting.id,
+                    meetingTitle: meeting.title,
+                    workspace: meeting.workspace,
+                    meetingDate: meeting.when,
+                    isMeetingPinned: meeting.isPinned
+                )
+            }
+        }
+        let snapshot = ActionItemsDisplaySnapshot.make(
+            allItems: items,
+            query: key.query,
+            filter: key.filter,
+            sort: key.sort
+        )
+        return (items, snapshot)
+    }
+}
+
 // MARK: - View
 
 struct ActionItemsView: View {
@@ -124,10 +300,23 @@ struct ActionItemsView: View {
     @AppStorage("scribeflow.tasks.sort") private var sort: ActionItemSort = .priority
     @State private var query: String = ""
     @State private var hasAnimatedIn = false
+    @State private var reminderDraft: ReminderReviewDraft?
+    @State private var hasLoadedSnapshot = false
     /// Built once per store change, not on every render — the counts, filters,
     /// and banner all read this instead of re-flattening every meeting's
     /// commitments ~10× per body pass.
     @State private var cachedItems: [AggregatedActionItem] = []
+    @State private var displaySnapshot = ActionItemsDisplaySnapshot()
+    @State private var snapshotBuilder = ActionItemsSnapshotBuilder()
+
+    private var snapshotKey: ActionItemsSnapshotKey {
+        ActionItemsSnapshotKey(
+            revision: store.revision,
+            query: query.trimmingCharacters(in: .whitespacesAndNewlines),
+            filter: filter,
+            sort: sort
+        )
+    }
 
     var body: some View {
         ScrollView {
@@ -141,7 +330,7 @@ struct ActionItemsView: View {
                 filterRow
                     .motionEntrance(step: 2, active: hasAnimatedIn)
 
-                if !hasAnimatedIn && filteredItems.isEmpty {
+                if !hasLoadedSnapshot && filteredItems.isEmpty {
                     tasksSkeleton
                 } else if filteredItems.isEmpty {
                     emptyState
@@ -183,8 +372,34 @@ struct ActionItemsView: View {
         .navigationDestination(for: Meeting.ID.self) { id in
             MeetingDetailView(meetingID: id)
         }
+        .sheet(item: $reminderDraft) { draft in
+            ReminderReviewSheet(
+                draft: draft,
+                onCancel: { reminderDraft = nil },
+                onSave: saveReminder
+            )
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+        }
         .onAppear { hasAnimatedIn = true }
-        .task(id: store.revision) { cachedItems = buildAggregatedItems() }
+        .task(id: snapshotKey) {
+            await refreshDisplaySnapshot(for: snapshotKey)
+        }
+    }
+
+    private func refreshDisplaySnapshot(for key: ActionItemsSnapshotKey) async {
+        if key.hasSearchQuery {
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled else { return }
+        }
+
+        let meetings = store.meetings
+        let result = await snapshotBuilder.make(meetings: meetings, key: key)
+        guard !Task.isCancelled, key == snapshotKey else { return }
+
+        cachedItems = result.items
+        displaySnapshot = result.snapshot
+        hasLoadedSnapshot = true
     }
 
     private func sortIcon(for mode: ActionItemSort) -> String {
@@ -266,7 +481,7 @@ struct ActionItemsView: View {
             Button {
                 HapticEngine.tap(.light)
                 withAnimation(AppMotion.snappy) {
-                    filter = atRiskItems.isEmpty ? .open : .atRisk
+                    filter = displaySnapshot.shouldPreferAtRiskFilter ? .atRisk : .open
                 }
             } label: {
                 HStack(spacing: 12) {
@@ -347,7 +562,7 @@ struct ActionItemsView: View {
                     }
                     VStack(spacing: 0) {
                         ForEach(group.items) { item in
-                            ActionItemRow(item: item, onStatusChange: setStatus, onOpen: openMeeting, onAddToReminders: addToReminders)
+                            ActionItemRow(item: item, onStatusChange: setStatus, onOpen: openMeeting, onAddToReminders: addToReminders, onScheduleReminder: scheduleReminder)
                             if item.id != group.items.last?.id { EditorialRule() }
                         }
                     }
@@ -361,7 +576,7 @@ struct ActionItemsView: View {
                     }
                     VStack(spacing: 0) {
                         ForEach(group.items) { item in
-                            ActionItemRow(item: item, onStatusChange: setStatus, onOpen: openMeeting, onAddToReminders: addToReminders)
+                            ActionItemRow(item: item, onStatusChange: setStatus, onOpen: openMeeting, onAddToReminders: addToReminders, onScheduleReminder: scheduleReminder)
                                 .editorialReveal()
                             if item.id != group.items.last?.id { EditorialRule() }
                         }
@@ -435,152 +650,38 @@ struct ActionItemsView: View {
 
     private var allItems: [AggregatedActionItem] { cachedItems }
 
-    private func buildAggregatedItems() -> [AggregatedActionItem] {
-        store.meetings.flatMap { meeting in
-            meeting.commitments.map { commitment in
-                AggregatedActionItem(
-                    commitment: commitment,
-                    meetingID: meeting.id,
-                    meetingTitle: meeting.title,
-                    workspace: meeting.workspace,
-                    meetingDate: meeting.when,
-                    isMeetingPinned: meeting.isPinned
-                )
-            }
-        }
-    }
-
     private var filteredItems: [AggregatedActionItem] {
-        let base = allItems
-            .filter { filter.matches($0) }
-            .filter { matches(query: query, item: $0) }
-
-        switch sort {
-        case .priority:
-            return base.sorted { lhs, rhs in
-                if lhs.priority != rhs.priority {
-                    return priorityRank(lhs.priority) < priorityRank(rhs.priority)
-                }
-                return lhs.meetingDate > rhs.meetingDate
-            }
-        case .recent:
-            return base.sorted { $0.meetingDate > $1.meetingDate }
-        case .meeting:
-            return base.sorted { lhs, rhs in
-                if lhs.isMeetingPinned != rhs.isMeetingPinned { return lhs.isMeetingPinned }
-                if lhs.meetingDate != rhs.meetingDate { return lhs.meetingDate > rhs.meetingDate }
-                return lhs.meetingTitle < rhs.meetingTitle
-            }
-        }
-    }
-
-    private struct MeetingGroup {
-        let meetingID: Meeting.ID
-        let meetingTitle: String
-        let items: [AggregatedActionItem]
-    }
-
-    private struct DateGroup {
-        let title: String
-        let items: [AggregatedActionItem]
+        displaySnapshot.filteredItems
     }
 
     /// Date-bucketed sections for non-meeting sorts: Today / This week /
     /// Earlier, by the source meeting's capture date.
-    private var dateGroups: [DateGroup] {
-        let cal = Calendar.current
-        let startToday = cal.startOfDay(for: .now)
-        let weekAgo = cal.date(byAdding: .day, value: -7, to: startToday) ?? startToday
-        var today: [AggregatedActionItem] = []
-        var week: [AggregatedActionItem] = []
-        var earlier: [AggregatedActionItem] = []
-        for item in filteredItems {
-            if item.meetingDate >= startToday      { today.append(item) }
-            else if item.meetingDate >= weekAgo    { week.append(item) }
-            else                                   { earlier.append(item) }
-        }
-        var out: [DateGroup] = []
-        if !today.isEmpty   { out.append(DateGroup(title: "Today", items: today)) }
-        if !week.isEmpty    { out.append(DateGroup(title: "This week", items: week)) }
-        if !earlier.isEmpty { out.append(DateGroup(title: "Earlier", items: earlier)) }
-        return out
+    private var dateGroups: [ActionItemsDateGroup] {
+        displaySnapshot.dateGroups
     }
 
-    private var groupedByMeeting: [MeetingGroup] {
-        var order: [Meeting.ID] = []
-        var titles: [Meeting.ID: String] = [:]
-        var buckets: [Meeting.ID: [AggregatedActionItem]] = [:]
-        for item in filteredItems {
-            if buckets[item.meetingID] == nil {
-                order.append(item.meetingID)
-                titles[item.meetingID] = item.meetingTitle
-            }
-            buckets[item.meetingID, default: []].append(item)
-        }
-        return order.map { id in
-            MeetingGroup(meetingID: id, meetingTitle: titles[id] ?? "", items: buckets[id] ?? [])
-        }
-    }
-
-    private func priorityRank(_ p: ActionPriority) -> Int {
-        switch p {
-        case .high: return 0
-        case .medium: return 1
-        case .low: return 2
-        }
-    }
-
-    private func matches(query: String, item: AggregatedActionItem) -> Bool {
-        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return true }
-        return item.commitment.statement.localizedStandardContains(q)
-            || item.commitment.owner.localizedStandardContains(q)
-            || item.meetingTitle.localizedStandardContains(q)
-            || (item.commitment.dueHint?.localizedStandardContains(q) ?? false)
+    private var groupedByMeeting: [ActionItemsMeetingGroup] {
+        displaySnapshot.meetingGroups
     }
 
     // MARK: - Stats
 
-    /// Past their real deadline and still open — time-judged, not keyword-judged.
-    private var overdueItems: [AggregatedActionItem] {
-        allItems.filter { $0.isOverdue }
-    }
-
-    /// At-risk commitments — the modeled "needs action now" signal.
-    private var atRiskItems: [AggregatedActionItem] {
-        allItems.filter { $0.commitment.status == .atRisk }
-    }
-
-    /// Due within the next two days by real date (and not already overdue).
-    private var dueSoonItems: [AggregatedActionItem] {
-        allItems.filter { $0.isDueSoon }
-    }
-
     /// Distinct items needing attention across overdue / at-risk / due-soon.
     private var attentionCount: Int {
-        var ids = Set(overdueItems.map(\.id))
-        ids.formUnion(atRiskItems.map(\.id))
-        ids.formUnion(dueSoonItems.map(\.id))
-        return ids.count
+        displaySnapshot.attentionCount
     }
 
     private var attentionHeadline: String {
-        let n = attentionCount
-        return "\(n) item\(n == 1 ? "" : "s") need\(n == 1 ? "s" : "") attention"
+        displaySnapshot.attentionHeadline
     }
 
     private var attentionDetail: String {
-        var parts: [String] = []
-        if !overdueItems.isEmpty { parts.append("\(overdueItems.count) overdue") }
-        if !atRiskItems.isEmpty { parts.append("\(atRiskItems.count) at risk") }
-        let dueSoonNotAtRisk = dueSoonItems.filter { $0.commitment.status != .atRisk }
-        if !dueSoonNotAtRisk.isEmpty { parts.append("\(dueSoonNotAtRisk.count) due soon") }
-        return parts.joined(separator: " · ")
+        displaySnapshot.attentionDetail
     }
 
-    private var openCount: Int { allItems.filter { $0.commitment.status == .open }.count }
-    private var atRiskCount: Int { allItems.filter { $0.commitment.status == .atRisk }.count }
-    private var doneCount: Int { allItems.filter { $0.commitment.status == .fulfilled || $0.commitment.status == .superseded }.count }
+    private var openCount: Int { displaySnapshot.openCount }
+    private var atRiskCount: Int { displaySnapshot.atRiskCount }
+    private var doneCount: Int { displaySnapshot.doneCount }
 
     private func count(for filter: ActionItemFilter) -> Int {
         switch filter {
@@ -601,7 +702,7 @@ struct ActionItemsView: View {
         case .fulfilled:  message = "One off the list"
         case .open:       message = "Back on the list"
         case .atRisk:     message = "Flagged at risk"
-        case .superseded: message = "Superseded"
+        case .superseded: message = "Skipped"
         }
         toast = ToastItem(message: message, icon: status == .fulfilled ? "checkmark.circle.fill" : "flag.fill")
     }
@@ -626,6 +727,50 @@ struct ActionItemsView: View {
             case .success:
                 HapticEngine.notify(.success)
                 toast = ToastItem(message: "Added to Reminders", icon: "checkmark.circle.fill")
+            case .failure(let error):
+                HapticEngine.notify(.warning)
+                toast = ToastItem(message: error.message, icon: "exclamationmark.triangle.fill")
+            }
+        }
+    }
+
+    private func scheduleReminder(_ item: AggregatedActionItem) {
+        reminderDraft = ReminderReviewDraft(item: item)
+    }
+
+    private func saveReminder(_ request: ReminderReviewRequest) {
+        reminderDraft = nil
+        var commitment = request.item.commitment
+        commitment.owner = request.owner
+        commitment.dueDateOverride = request.dueDate
+        store.updateCommitmentDetails(
+            commitmentID: commitment.id,
+            for: request.item.meetingID,
+            owner: request.owner,
+            dueDateOverride: request.dueDate
+        )
+        Task {
+            let result: Result<String, ReminderScheduler.ScheduleError>
+            switch request.timing {
+            case .dueDate:
+                result = await ReminderScheduler.schedule(
+                    commitment: commitment,
+                    meetingID: request.item.meetingID,
+                    meetingTitle: request.item.meetingTitle,
+                    dueDate: request.dueDate
+                )
+            case .after24Hours, .after48Hours:
+                result = await ReminderScheduler.schedule(
+                    commitment: commitment,
+                    meetingID: request.item.meetingID,
+                    meetingTitle: request.item.meetingTitle,
+                    fireDate: request.fireDate
+                )
+            }
+            switch result {
+            case .success:
+                HapticEngine.notify(.success)
+                toast = ToastItem(message: "Reminder scheduled", icon: "bell.badge.fill")
             case .failure(let error):
                 HapticEngine.notify(.warning)
                 toast = ToastItem(message: error.message, icon: "exclamationmark.triangle.fill")
@@ -686,6 +831,7 @@ private struct ActionItemRow: View {
     let onStatusChange: (CommitmentStatus, AggregatedActionItem) -> Void
     let onOpen: (Meeting.ID) -> Void
     let onAddToReminders: (AggregatedActionItem) -> Void
+    let onScheduleReminder: (AggregatedActionItem) -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
@@ -726,6 +872,13 @@ private struct ActionItemRow: View {
                             .fixedSize(horizontal: false, vertical: true)
                             .multilineTextAlignment(.leading)
 
+                        if let rationale = item.commitment.rationale?.nilIfBlank {
+                            Text(rationale)
+                                .font(.caption)
+                                .foregroundStyle(AppPalette.secondaryInk)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
                         HStack(spacing: 8) {
                             if item.commitment.owner != "Owner not named" {
                                 metaChip(
@@ -736,6 +889,7 @@ private struct ActionItemRow: View {
                             }
                             dueChip
                             priorityChip
+                            sourceChip
                             Spacer(minLength: 0)
                         }
 
@@ -786,10 +940,16 @@ private struct ActionItemRow: View {
             Button {
                 onStatusChange(.open, item)
             } label: { Label("Reopen", systemImage: "arrow.uturn.backward") }
+            Button {
+                onStatusChange(.superseded, item)
+            } label: { Label("Skip", systemImage: "forward.end.circle") }
             Divider()
             Button {
                 onAddToReminders(item)
             } label: { Label("Add to Reminders", systemImage: "list.bullet.rectangle") }
+            Button {
+                onScheduleReminder(item)
+            } label: { Label("Notify me", systemImage: "bell.badge") }
             Button {
                 onOpen(item.meetingID)
             } label: { Label("Open meeting", systemImage: "doc.text.magnifyingglass") }
@@ -839,8 +999,19 @@ private struct ActionItemRow: View {
     @ViewBuilder private var dueChip: some View {
         if item.isOverdue {
             metaChip(overdueLabel, icon: "clock.badge.exclamationmark.fill", tint: AppPalette.coral, strong: true)
-        } else if let due = item.commitment.dueHint, !due.isEmpty {
-            metaChip(due.capitalized, icon: "clock.fill", tint: item.isDueSoon ? AppPalette.gold : AppPalette.secondaryInk)
+        } else if let due = item.dueLabel, !due.isEmpty {
+            metaChip(due, icon: "clock.fill", tint: item.isDueSoon ? AppPalette.gold : AppPalette.secondaryInk)
+        }
+    }
+
+    @ViewBuilder private var sourceChip: some View {
+        let source = item.commitment.sourceSpeaker.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !source.isEmpty, source != "Meeting" {
+            metaChip(
+                source == "AI" ? "AI inferred" : source,
+                icon: "quote.bubble.fill",
+                tint: source == "AI" ? AppPalette.gold : AppPalette.accent
+            )
         }
     }
 
@@ -851,3 +1022,152 @@ private struct ActionItemRow: View {
     }
 }
 
+private enum ReminderTimingChoice: String, CaseIterable, Identifiable {
+    case after24Hours
+    case after48Hours
+    case dueDate
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .after24Hours: return "24h"
+        case .after48Hours: return "48h"
+        case .dueDate: return "Due"
+        }
+    }
+
+    var hours: Int? {
+        switch self {
+        case .after24Hours: return 24
+        case .after48Hours: return 48
+        case .dueDate: return nil
+        }
+    }
+}
+
+private struct ReminderReviewDraft: Identifiable, Hashable {
+    var id: Commitment.ID { item.id }
+    let item: AggregatedActionItem
+}
+
+private struct ReminderReviewRequest {
+    let item: AggregatedActionItem
+    let owner: String
+    let dueDate: Date
+    let timing: ReminderTimingChoice
+
+    var fireDate: Date {
+        switch timing {
+        case .dueDate:
+            return ReminderScheduler.reminderDate(for: dueDate) ?? dueDate
+        case .after24Hours, .after48Hours:
+            let hours = timing.hours ?? 24
+            let fromMeeting = Calendar.current.date(byAdding: .hour, value: hours, to: item.meetingDate) ?? Date()
+            let fromNow = Calendar.current.date(byAdding: .hour, value: hours, to: .now) ?? Date()
+            return max(fromMeeting, fromNow)
+        }
+    }
+}
+
+private struct ReminderReviewSheet: View {
+    let draft: ReminderReviewDraft
+    let onCancel: () -> Void
+    let onSave: (ReminderReviewRequest) -> Void
+
+    @State private var owner: String
+    @State private var dueDate: Date
+    @State private var timing: ReminderTimingChoice
+
+    init(
+        draft: ReminderReviewDraft,
+        onCancel: @escaping () -> Void,
+        onSave: @escaping (ReminderReviewRequest) -> Void
+    ) {
+        self.draft = draft
+        self.onCancel = onCancel
+        self.onSave = onSave
+        _owner = State(initialValue: draft.item.commitment.owner == "Owner not named" ? "" : draft.item.commitment.owner)
+        let fallback = Calendar.current.date(byAdding: .day, value: 1, to: .now) ?? .now
+        _dueDate = State(initialValue: draft.item.dueDate ?? fallback)
+        _timing = State(initialValue: draft.item.dueDate == nil ? .after24Hours : .dueDate)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(draft.item.commitment.statement)
+                            .font(.headline)
+                            .foregroundStyle(AppPalette.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(draft.item.meetingTitle)
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(AppPalette.secondaryInk)
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                Section("Owner") {
+                    TextField("Owner", text: $owner)
+                        .textInputAutocapitalization(.words)
+                }
+
+                Section("Timing") {
+                    Picker("Timing", selection: $timing) {
+                        ForEach(ReminderTimingChoice.allCases) { choice in
+                            Text(choice.title).tag(choice)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    if timing == .dueDate {
+                        DatePicker("Due date", selection: $dueDate, in: Date()..., displayedComponents: [.date, .hourAndMinute])
+                    } else {
+                        HStack {
+                            Text("Reminder")
+                            Spacer()
+                            Text(fireDate.formatted(date: .abbreviated, time: .shortened))
+                                .foregroundStyle(AppPalette.secondaryInk)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Save reminder")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", action: onCancel)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        onSave(ReminderReviewRequest(
+                            item: draft.item,
+                            owner: cleanedOwner,
+                            dueDate: dueDate,
+                            timing: timing
+                        ))
+                    }
+                    .fontWeight(.semibold)
+                }
+            }
+        }
+    }
+
+    private var cleanedOwner: String {
+        let trimmed = owner.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Owner not named" : trimmed
+    }
+
+    private var fireDate: Date {
+        ReminderReviewRequest(item: draft.item, owner: cleanedOwner, dueDate: dueDate, timing: timing).fireDate
+    }
+}
+
+private extension String {
+    var nilIfBlank: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}

@@ -1,4 +1,5 @@
 import Foundation
+import EventKit
 import Testing
 @testable import Scribeflow
 
@@ -146,6 +147,123 @@ struct ScribeflowCoreTests {
 
         #expect(cloudSync?.state == .needsBackend)
         #expect(manualBackup?.state == .available)
+    }
+
+    @Test
+    func calendarEventSnapshotBuildsPrepContext() {
+        let start = Date(timeIntervalSince1970: 1_780_000_000)
+        let end = start.addingTimeInterval(45 * 60)
+        let event = CalendarEventSnapshot(
+            id: "calendar-1",
+            title: "Client kickoff",
+            startDate: start,
+            endDate: end,
+            location: "Zoom",
+            notes: "Discuss launch risks.",
+            attendees: ["Maya", "Jon"],
+            isVideoCall: true
+        )
+
+        #expect(event.durationMinutes == 45)
+        #expect(event.objective.contains("Location: Zoom"))
+        #expect(event.objective.contains("Discuss launch risks."))
+        #expect(event.prepNotesTemplate.contains("Attendees: Maya, Jon"))
+    }
+
+    @Test
+    func evidenceItemsExposeTrustLabels() {
+        #expect(EvidenceItem(text: "Decision captured", level: .verified, supportingSnippets: ["Maya: yes"]).confidenceLabel == "High confidence")
+        #expect(EvidenceItem(text: "Possible risk", level: .inferred, supportingSnippets: []).confidenceLabel == "Needs review")
+        #expect(EvidenceItem(text: "Bookmark", level: .personalNote, supportingSnippets: []).confidenceLabel == "Personal note")
+    }
+
+    @Test
+    func transcriptionRetryJobTracksAttemptsAndRecovery() throws {
+        let recordingID = try #require(UUID(uuidString: "44444444-4444-4444-4444-444444444444"))
+        var job = TranscriptionRetryJob(recordingID: recordingID, fileName: "sample.m4a")
+
+        #expect(job.state == .queued)
+        #expect(job.canRetry)
+
+        job.markRunning(now: Date(timeIntervalSince1970: 1))
+        #expect(job.state == .running)
+        #expect(job.attempts == 1)
+
+        job.markFailed("Network timeout", now: Date(timeIntervalSince1970: 2))
+        #expect(job.state == .failed)
+        #expect(job.lastError == "Network timeout")
+        #expect(job.canRetry)
+
+        job.markCompleted(now: Date(timeIntervalSince1970: 3))
+        #expect(job.state == .completed)
+        #expect(job.lastError == nil)
+        #expect(!job.canRetry)
+    }
+
+    @Test
+    func localMeetingSummarizerUsesHeuristicReport() async throws {
+        let meeting = Meeting(
+            title: "Backend prep",
+            workspace: "Product",
+            when: Date(timeIntervalSince1970: 0),
+            durationMinutes: 20,
+            attendees: ["Maya"],
+            status: .ready,
+            stage: "Test",
+            objective: "Validate the summarizer protocol.",
+            rawNotes: "Decision: keep local fallback. Maya will review backend retries tomorrow.",
+            transcript: [],
+            summaries: [],
+            prompts: [],
+            destinations: [],
+            selectedTemplate: .exec,
+            selectedPromptID: nil,
+            isPinned: false
+        )
+
+        let report = try await LocalMeetingSummarizer().summarize(meeting: meeting)
+
+        #expect(report.mode == .localHeuristic)
+        #expect(report.decisions.contains { $0.localizedCaseInsensitiveContains("local fallback") })
+        #expect(report.actionItems.contains { $0.localizedCaseInsensitiveContains("backend retries") })
+    }
+
+    @Test
+    func calendarWriteOnlyAccessIsNotReadable() {
+        #expect(CalendarAccessState.from(.fullAccess).canReadEvents)
+        #expect(CalendarAccessState.from(.writeOnly) == .denied)
+        #expect(!CalendarAccessState.from(.writeOnly).canReadEvents)
+    }
+
+    @Test
+    func seedIncludesCalendarAndReminderDemoMeetings() throws {
+        let calendarSamples = Meeting.seed.filter { $0.calendarEventID?.hasPrefix("sample-calendar-") == true }
+
+        #expect(calendarSamples.count >= 2)
+        #expect(calendarSamples.allSatisfy { $0.calendarStartDate != nil && $0.calendarEndDate != nil })
+        #expect(calendarSamples.contains { $0.stage == "Prepared from calendar" })
+        #expect(calendarSamples.contains { $0.stage == "Captured from calendar event" })
+        #expect(calendarSamples.flatMap(\.commitments).contains { $0.owner == "You" && $0.dueHint == "today" })
+    }
+
+    @Test
+    func reminderSchedulerUsesDayBeforeWhenPossible() throws {
+        let now = Date(timeIntervalSince1970: 1_780_000_000)
+        let due = try #require(Calendar.current.date(byAdding: .day, value: 3, to: now))
+        let reminder = try #require(ReminderScheduler.reminderDate(for: due, now: now))
+        let days = Calendar.current.dateComponents([.day], from: reminder, to: due).day
+
+        #expect(days == 1)
+    }
+
+    @Test
+    func reminderNotificationIDPairsMeetingAndCommitment() throws {
+        let meetingID = try #require(UUID(uuidString: "22222222-2222-2222-2222-222222222222"))
+        let commitmentID = try #require(UUID(uuidString: "33333333-3333-3333-3333-333333333333"))
+
+        let id = ReminderScheduler.notificationID(meetingID: meetingID, commitmentID: commitmentID)
+
+        #expect(id == "scribeflow.action.22222222-2222-2222-2222-222222222222.33333333-3333-3333-3333-333333333333")
     }
 
     @Test
@@ -686,5 +804,22 @@ struct DueDateTests {
         let item = AggregatedActionItem(commitment: commitment, meetingID: UUID(), meetingTitle: "M", workspace: "W", meetingDate: Date(), isMeetingPinned: false)
         #expect(item.isDueSoon)
         #expect(!item.isOverdue)
+    }
+
+    @Test
+    func explicitDueDateOverrideWinsOverHint() throws {
+        let override = try #require(cal.date(byAdding: .day, value: 4, to: Date()))
+        let commitment = Commitment(
+            statement: "Send recap",
+            owner: "You",
+            sourceSpeaker: "You",
+            dueHint: "today",
+            dueDateOverride: override,
+            status: .open
+        )
+        let item = AggregatedActionItem(commitment: commitment, meetingID: UUID(), meetingTitle: "M", workspace: "W", meetingDate: Date(), isMeetingPinned: false)
+
+        #expect(item.dueDate == override)
+        #expect(!item.isDueSoon)
     }
 }

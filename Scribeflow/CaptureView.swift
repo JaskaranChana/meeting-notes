@@ -33,6 +33,7 @@ struct CaptureView: View {
     @State private var showingDiscardConfirm = false
     @State private var recordingStartedAt: Date?
     @State private var markFlash = false
+    @State private var calendarEvent: CalendarEventSnapshot?
     @AppStorage("scribeflow.capture.template") private var lastTemplateRaw = NoteTemplate.discovery.rawValue
     @State private var minutePulse = false
     @Namespace private var templateNS
@@ -976,12 +977,16 @@ struct CaptureView: View {
         }
     }
 
-    /// Pull a preset title from Home's "Capture" tap on an upcoming calendar
+    /// Pull a preset event from Home's "Capture" tap on an upcoming calendar
     /// event. The context is single-shot so subsequent captures start blank.
     private func consumeUpcomingTitleIfNeeded() {
         guard coordinator.title.isEmpty else { return }
-        if let preset = UpcomingCaptureContext.shared.consume() {
-            coordinator.title = preset
+        if let event = UpcomingCaptureContext.shared.consume() {
+            calendarEvent = event
+            coordinator.title = event.title
+            coordinator.workspace = event.isVideoCall ? "Calls" : "Meetings"
+            coordinator.objective = event.objective
+            coordinator.attendees = event.attendees.joined(separator: ", ")
         }
     }
 
@@ -1065,7 +1070,7 @@ struct CaptureView: View {
             let id: Meeting.ID
             if hasAudio && !coordinator.transcriptParagraphs.isEmpty {
                 // Recorded path — preserve transcript + audio metadata.
-                id = await coordinator.saveMeeting(into: store)
+                id = await coordinator.saveMeeting(into: store, calendarEvent: calendarEvent)
             } else {
                 // Text-only path — preserve exactly what the user typed. We do
                 // NOT auto-rewrite the note: that fabricates structure for thin
@@ -1077,10 +1082,15 @@ struct CaptureView: View {
                 let typedTitle = coordinator.title.trimmingCharacters(in: .whitespacesAndNewlines)
                 id = store.addMeeting(
                     title: typedTitle.isEmpty ? noteTitle(from: typed) : typedTitle,
-                    workspace: "Personal workspace",
-                    attendees: [],
+                    workspace: calendarEvent.map { $0.isVideoCall ? "Calls" : "Meetings" } ?? "Personal workspace",
+                    attendees: calendarEvent?.attendees ?? [],
                     objective: coordinator.objective.trimmingCharacters(in: .whitespacesAndNewlines),
-                    notes: typed
+                    notes: typed,
+                    when: calendarEvent?.startDate ?? .now,
+                    durationMinutes: calendarEvent?.durationMinutes ?? 25,
+                    calendarEventID: calendarEvent?.id,
+                    calendarStartDate: calendarEvent?.startDate,
+                    calendarEndDate: calendarEvent?.endDate
                 )
             }
 

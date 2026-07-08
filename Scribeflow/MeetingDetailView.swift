@@ -39,6 +39,7 @@ struct MeetingDetailView: View {
     @State var cachedSignals = MeetingSignals(decisions: [], actions: [], risks: [])
     @State var cachedPrepBrief = PrepBrief(headline: "", bullets: [], questions: [])
     @State var cachedSynopsis: String = ""
+    @State var cachedIntelligenceReport: MeetingIntelligenceReport?
     @State var selectedTab: HubTab = .overview
     @AppStorage("hasUsedMeetingTabs") var hasUsedTabs = false
 
@@ -122,6 +123,7 @@ struct MeetingDetailView: View {
         cachedSignals = store.signals(for: m)
         cachedPrepBrief = store.prepBrief(for: m)
         cachedSynopsis = synopsisFor(m, summary: m.summary(for: m.selectedTemplate))
+        cachedIntelligenceReport = store.intelligenceReport(for: m)
     }
 
     private var preferredRewriteStyle: NoteRewriteStyle {
@@ -1818,7 +1820,7 @@ struct MeetingDetailView: View {
     }
 
     private func intelligenceCard(_ meeting: Meeting) -> some View {
-        let report = store.intelligenceReport(for: meeting)
+        let report = cachedIntelligenceReport ?? store.intelligenceReport(for: meeting)
 
         return SurfaceCard(title: "Meeting intelligence", subtitle: report.headline) {
             VStack(alignment: .leading, spacing: 14) {
@@ -2301,7 +2303,7 @@ struct MeetingDetailView: View {
                                         .foregroundStyle(AppPalette.ink)
                                         .frame(maxWidth: .infinity, alignment: .leading)
 
-                                    Text("Prove this")
+                                    Text(item.confidenceLabel)
                                         .font(.caption.weight(.semibold))
                                         .foregroundStyle(AppPalette.accent)
                                 }
@@ -2401,7 +2403,7 @@ struct MeetingDetailView: View {
 
     @ViewBuilder
     private func commitDueChip(_ c: Commitment, capturedAt: Date) -> some View {
-        let due = DueDateParser.date(from: c.dueHint, capturedAt: capturedAt)
+        let due = c.dueDateOverride ?? DueDateParser.date(from: c.dueHint, capturedAt: capturedAt)
         let isLive = c.status == .open || c.status == .atRisk
         if isLive, let due, due < Date() {
             HStack(spacing: 4) {
@@ -2412,6 +2414,12 @@ struct MeetingDetailView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .background(AppPalette.coral, in: Capsule())
+        } else if let override = c.dueDateOverride {
+            commitMetaChip(
+                override.formatted(.dateTime.month(.abbreviated).day()),
+                icon: "clock.fill",
+                tint: AppPalette.gold
+            )
         } else if let hint = c.dueHint, !hint.isEmpty {
             commitMetaChip(hint.capitalized, icon: "clock.fill", tint: AppPalette.gold)
         }
@@ -2446,10 +2454,11 @@ struct MeetingDetailView: View {
                                         )
                                         commitDueChip(commitment, capturedAt: meeting.when)
                                         if !commitment.sourceSpeaker.isEmpty, commitment.sourceSpeaker != "Meeting" {
-                                            Text(commitment.sourceSpeaker)
-                                                .font(.caption2)
-                                                .foregroundStyle(AppPalette.secondaryInk.opacity(0.7))
-                                                .lineLimit(1)
+                                            commitMetaChip(
+                                                commitment.sourceSpeaker == "AI" ? "AI inferred" : commitment.sourceSpeaker,
+                                                icon: "quote.bubble.fill",
+                                                tint: commitment.sourceSpeaker == "AI" ? AppPalette.gold : AppPalette.accent
+                                            )
                                         }
                                     }
                                 }
@@ -2932,9 +2941,13 @@ private struct SpeakerEditorView: View {
 
     @State private var selectedSpeaker = ""
     @State private var replacementName = ""
+    @State private var speakers: [SpeakerSegment] = []
 
-    private var speakers: [SpeakerSegment] {
-        store.speakerSegments(for: meetingID)
+    private func refreshSpeakers(selectFirstIfNeeded: Bool = false) {
+        speakers = store.speakerSegments(for: meetingID)
+        guard selectFirstIfNeeded, selectedSpeaker.isEmpty, let first = speakers.first else { return }
+        selectedSpeaker = first.speaker
+        replacementName = first.speaker
     }
 
     var body: some View {
@@ -2995,10 +3008,10 @@ private struct SpeakerEditorView: View {
                 }
             }
             .onAppear {
-                if selectedSpeaker.isEmpty, let first = speakers.first {
-                    selectedSpeaker = first.speaker
-                    replacementName = first.speaker
-                }
+                refreshSpeakers(selectFirstIfNeeded: true)
+            }
+            .task(id: store.revision) {
+                refreshSpeakers(selectFirstIfNeeded: true)
             }
         }
         .modifier(ScribeflowChrome())

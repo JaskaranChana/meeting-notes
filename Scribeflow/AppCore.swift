@@ -4,6 +4,7 @@ import EventKit
 import MetricKit
 import OSLog
 import SwiftUI
+import UserNotifications
 import UniformTypeIdentifiers
 
 private let metricsLog = Logger(subsystem: "ai.scribeflow.app", category: "Metrics")
@@ -445,31 +446,86 @@ enum RetryPolicy {
     }
 }
 
-// MARK: - Upcoming calendar events
+// MARK: - Calendar events
 
-/// Lightweight EventKit reader for upcoming events in the next 24 hours.
-/// Used by Home to surface "what's next" so the user can prep notes or arm a
-/// recording before walking into a meeting. iOS gates access through
-/// `NSCalendarsFullAccessUsageDescription` (set in Info.plist).
-struct UpcomingEvent: Identifiable, Equatable {
-    let id: String
-    let title: String
-    let startDate: Date
-    let endDate: Date
-    let location: String?
-    let isVideoCall: Bool
+enum CalendarAccessState: String, Equatable {
+    case notDetermined
+    case allowed
+    case denied
+    case restricted
+
+    var canReadEvents: Bool { self == .allowed }
+
+    static func from(_ status: EKAuthorizationStatus) -> CalendarAccessState {
+        switch status {
+        case .notDetermined:
+            return .notDetermined
+        case .fullAccess:
+            return .allowed
+        case .restricted:
+            return .restricted
+        case .denied, .writeOnly:
+            return .denied
+        @unknown default:
+            return .denied
+        }
+    }
+}
+
+/// Stable calendar event shape for UI and persistence handoff. Views never need
+/// to hold EventKit objects, and saved meetings can keep a light source link.
+struct CalendarEventSnapshot: Identifiable, Equatable, Codable, Hashable {
+    var id: String
+    var title: String
+    var startDate: Date
+    var endDate: Date
+    var location: String?
+    var notes: String?
+    var attendees: [String]
+    var isVideoCall: Bool
+
+    var durationMinutes: Int {
+        max(15, Int(endDate.timeIntervalSince(startDate) / 60))
+    }
+
+    var objective: String {
+        let parts = [
+            location.map { "Location: \($0)" },
+            notes?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        ].compactMap { $0 }
+        return parts.isEmpty ? "Prepared from calendar" : parts.joined(separator: "\n")
+    }
+
+    var prepNotesTemplate: String {
+        var lines = [
+            "- Agenda:",
+            "- Decisions:",
+            "- Risks:",
+            "- Next steps:"
+        ]
+        if !attendees.isEmpty {
+            lines.insert("- Attendees: \(attendees.joined(separator: ", "))", at: 0)
+        }
+        return lines.joined(separator: "\n")
+    }
 }
 
 @MainActor
-final class UpcomingEventsService {
-    static let shared = UpcomingEventsService()
+final class CalendarService {
+    static let shared = CalendarService()
     private let store = EKEventStore()
 
-    private(set) var authorization: EKAuthorizationStatus = EKEventStore.authorizationStatus(for: .event)
+    private(set) var accessState = CalendarAccessState.from(EKEventStore.authorizationStatus(for: .event))
+
+    @discardableResult
+    func refreshAccessState() -> CalendarAccessState {
+        accessState = CalendarAccessState.from(EKEventStore.authorizationStatus(for: .event))
+        return accessState
+    }
 
     func requestAccessIfNeeded() async -> Bool {
         let status = EKEventStore.authorizationStatus(for: .event)
-        authorization = status
+        accessState = CalendarAccessState.from(status)
         switch status {
         case .fullAccess:
             return true
@@ -479,14 +535,16 @@ final class UpcomingEventsService {
             do {
                 if #available(iOS 17, *) {
                     let granted = try await store.requestFullAccessToEvents()
-                    authorization = EKEventStore.authorizationStatus(for: .event)
+                    accessState = CalendarAccessState.from(EKEventStore.authorizationStatus(for: .event))
                     return granted
                 } else {
-                    return try await withCheckedThrowingContinuation { continuation in
+                    let granted = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Error>) in
                         store.requestAccess(to: .event) { granted, error in
                             if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: granted) }
                         }
                     }
+                    accessState = CalendarAccessState.from(EKEventStore.authorizationStatus(for: .event))
+                    return granted
                 }
             } catch {
                 return false
@@ -496,26 +554,36 @@ final class UpcomingEventsService {
         }
     }
 
-    func fetchUpcoming(hours: Int = 24, limit: Int = 3) -> [UpcomingEvent] {
-        guard authorization == .fullAccess else { return [] }
+    func fetchUpcoming(hours: Int = 24, limit: Int = 3) -> [CalendarEventSnapshot] {
+        accessState = CalendarAccessState.from(EKEventStore.authorizationStatus(for: .event))
+        guard accessState.canReadEvents else { return [] }
         let now = Date.now
         guard let end = Calendar.current.date(byAdding: .hour, value: hours, to: now) else { return [] }
-        let predicate = store.predicateForEvents(withStart: now, end: end, calendars: nil)
+        return fetchEvents(from: now, to: end, limit: limit)
+    }
+
+    func fetchEvents(from start: Date, to end: Date, limit: Int = 120) -> [CalendarEventSnapshot] {
+        accessState = CalendarAccessState.from(EKEventStore.authorizationStatus(for: .event))
+        guard accessState.canReadEvents else { return [] }
+        let predicate = store.predicateForEvents(withStart: start, end: end, calendars: nil)
         let events = store.events(matching: predicate)
             .filter { !$0.isAllDay }
             .sorted { $0.startDate < $1.startDate }
             .prefix(limit)
-        return events.map { event in
-            let video = Self.detectVideoCall(event)
-            return UpcomingEvent(
-                id: event.eventIdentifier ?? UUID().uuidString,
-                title: event.title ?? "Meeting",
-                startDate: event.startDate,
-                endDate: event.endDate,
-                location: event.location,
-                isVideoCall: video
-            )
-        }
+        return events.map(Self.snapshot(from:))
+    }
+
+    private static func attendeeNames(from event: EKEvent) -> [String] {
+        let names = (event.attendees ?? [])
+            .compactMap { participant -> String? in
+                let name = participant.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if !name.isEmpty { return name }
+                return participant.url.absoluteString
+                    .replacingOccurrences(of: "mailto:", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .nilIfEmpty
+            }
+        return Array(NSOrderedSet(array: names)) as? [String] ?? names
     }
 
     private static func detectVideoCall(_ event: EKEvent) -> Bool {
@@ -527,7 +595,22 @@ final class UpcomingEventsService {
         let markers = ["zoom.us", "meet.google", "teams.microsoft", "webex", "whereby", "around.co", "facetime"]
         return markers.contains(where: haystack.contains)
     }
+
+    private static func snapshot(from event: EKEvent) -> CalendarEventSnapshot {
+        CalendarEventSnapshot(
+            id: event.eventIdentifier ?? UUID().uuidString,
+            title: event.title ?? "Meeting",
+            startDate: event.startDate,
+            endDate: event.endDate,
+            location: event.location,
+            notes: event.notes,
+            attendees: attendeeNames(from: event),
+            isVideoCall: detectVideoCall(event)
+        )
+    }
 }
+
+typealias UpcomingEvent = CalendarEventSnapshot
 
 /// Single-shot hand-off context so Home can pass an event title into the
 /// capture surface without threading parameters through every closure. The
@@ -535,12 +618,129 @@ final class UpcomingEventsService {
 @MainActor
 final class UpcomingCaptureContext {
     static let shared = UpcomingCaptureContext()
-    var preferredTitle: String?
+    var preferredEvent: CalendarEventSnapshot?
 
-    func consume() -> String? {
-        let value = preferredTitle
-        preferredTitle = nil
+    var preferredTitle: String? {
+        get { preferredEvent?.title }
+        set {
+            if let newValue {
+                preferredEvent = CalendarEventSnapshot(
+                    id: UUID().uuidString,
+                    title: newValue,
+                    startDate: .now,
+                    endDate: Calendar.current.date(byAdding: .minute, value: 30, to: .now) ?? .now,
+                    location: nil,
+                    notes: nil,
+                    attendees: [],
+                    isVideoCall: false
+                )
+            } else {
+                preferredEvent = nil
+            }
+        }
+    }
+
+    func consume() -> CalendarEventSnapshot? {
+        let value = preferredEvent
+        preferredEvent = nil
         return value
+    }
+}
+
+// MARK: - Local action reminders
+
+enum ReminderScheduler {
+    enum ScheduleError: Error, Equatable {
+        case permissionDenied
+        case invalidDate
+        case schedulingFailed
+
+        var message: String {
+            switch self {
+            case .permissionDenied:
+                return "Allow notifications in Settings to schedule reminders."
+            case .invalidDate:
+                return "Add a future due date before scheduling a reminder."
+            case .schedulingFailed:
+                return "Couldn't schedule the reminder. Try again."
+            }
+        }
+    }
+
+    static func notificationID(meetingID: Meeting.ID, commitmentID: Commitment.ID) -> String {
+        "scribeflow.action.\(meetingID.uuidString).\(commitmentID.uuidString)"
+    }
+
+    @MainActor
+    static func cancel(meetingID: Meeting.ID, commitmentID: Commitment.ID) {
+        let identifier = notificationID(meetingID: meetingID, commitmentID: commitmentID)
+        let center = UNUserNotificationCenter.current()
+        center.removePendingNotificationRequests(withIdentifiers: [identifier])
+        center.removeDeliveredNotifications(withIdentifiers: [identifier])
+    }
+
+    static func reminderDate(for dueDate: Date, now: Date = .now) -> Date? {
+        let oneDayBefore = Calendar.current.date(byAdding: .day, value: -1, to: dueDate) ?? dueDate
+        let candidate = oneDayBefore > now ? oneDayBefore : dueDate
+        return candidate > now ? candidate : nil
+    }
+
+    @MainActor
+    static func schedule(
+        commitment: Commitment,
+        meetingID: Meeting.ID,
+        meetingTitle: String,
+        dueDate: Date?
+    ) async -> Result<String, ScheduleError> {
+        guard let dueDate, let fireDate = reminderDate(for: dueDate) else {
+            return .failure(.invalidDate)
+        }
+        return await schedule(
+            commitment: commitment,
+            meetingID: meetingID,
+            meetingTitle: meetingTitle,
+            fireDate: fireDate
+        )
+    }
+
+    @MainActor
+    static func schedule(
+        commitment: Commitment,
+        meetingID: Meeting.ID,
+        meetingTitle: String,
+        fireDate: Date
+    ) async -> Result<String, ScheduleError> {
+        guard fireDate > .now else { return .failure(.invalidDate) }
+        do {
+            let center = UNUserNotificationCenter.current()
+            let granted = try await center.requestAuthorization(options: [.alert, .sound, .badge])
+            guard granted else { return .failure(.permissionDenied) }
+
+            let content = UNMutableNotificationContent()
+            content.title = "Follow up: \(commitment.owner)"
+            content.body = commitment.statement
+            content.subtitle = meetingTitle
+            content.sound = .default
+            content.userInfo = [
+                "meetingID": meetingID.uuidString,
+                "commitmentID": commitment.id.uuidString
+            ]
+
+            let components = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: fireDate)
+            let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
+            let identifier = notificationID(meetingID: meetingID, commitmentID: commitment.id)
+            center.removePendingNotificationRequests(withIdentifiers: [identifier])
+            try await center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: trigger))
+            return .success(identifier)
+        } catch {
+            return .failure(.schedulingFailed)
+        }
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
     }
 }
 

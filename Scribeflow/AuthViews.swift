@@ -628,7 +628,7 @@ struct OnboardingPagesView: View {
     }
     private func requestCalendar() {
         Task {
-            _ = await UpcomingEventsService.shared.requestAccessIfNeeded()
+            _ = await CalendarService.shared.requestAccessIfNeeded()
             await MainActor.run { advance() }
         }
     }

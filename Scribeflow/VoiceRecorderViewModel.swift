@@ -26,9 +26,20 @@ final class VoiceRecorderViewModel {
     var permissions = VoiceRecordingPermissionService.current()
     var statusMessage = "Ready to record"
     var completedRecording: CompletedVoiceRecording?
+    var transcriptionJob: TranscriptionRetryJob?
 
-    @ObservationIgnored private let recorder = LocalVoiceRecordingService()
+    @ObservationIgnored private let recorder: LocalVoiceRecordingService
+    @ObservationIgnored private let transcriptionProvider: any TranscriptionProviding
     @ObservationIgnored private var meterTask: Task<Void, Never>?
+
+    init(
+        recorder: LocalVoiceRecordingService? = nil,
+        transcriptionProvider: (any TranscriptionProviding)? = nil
+    ) {
+        let recorder = recorder ?? LocalVoiceRecordingService()
+        self.recorder = recorder
+        self.transcriptionProvider = transcriptionProvider ?? recorder
+    }
 
     var canRecord: Bool {
         permissions.microphone != .denied && permissions.microphone != .unsupported
@@ -36,6 +47,14 @@ final class VoiceRecorderViewModel {
 
     var canSave: Bool {
         completedRecording != nil
+    }
+
+    var canRetryTranscript: Bool {
+        completedRecording != nil
+            && permissions.speech == .ready
+            && phase != .processing
+            && phase != .saving
+            && (transcriptionJob?.canRetry ?? true)
     }
 
     var isRecording: Bool {
@@ -46,6 +65,20 @@ final class VoiceRecorderViewModel {
         let minutes = elapsedSeconds / 60
         let seconds = elapsedSeconds % 60
         return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    var transcriptionJobStatusText: String? {
+        guard let transcriptionJob else { return nil }
+        switch transcriptionJob.state {
+        case .queued:
+            return "Transcript queued"
+        case .running:
+            return "Transcript attempt \(transcriptionJob.attempts)"
+        case .failed:
+            return transcriptionJob.lastError.map { "Transcript failed: \($0)" } ?? "Transcript failed"
+        case .completed:
+            return "Transcript completed"
+        }
     }
 
     var permissionTitle: String {
@@ -132,6 +165,10 @@ final class VoiceRecorderViewModel {
             let completed = try recorder.stop()
             completedRecording = completed
             elapsedSeconds = completed.durationSeconds
+            transcriptionJob = TranscriptionRetryJob(
+                recordingID: completed.id,
+                fileName: RecordingFileStore.fileName(for: completed.fileURL)
+            )
 
             guard permissions.speech == .ready else {
                 transcript = ""
@@ -142,9 +179,7 @@ final class VoiceRecorderViewModel {
 
             phase = .processing
             statusMessage = "Generating transcript"
-            transcript = try await recorder.transcribe(url: completed.fileURL)
-            phase = .readyToSave
-            statusMessage = transcript.isEmpty ? "Audio ready" : "Transcript ready"
+            await generateTranscript(for: completed, retrying: false)
         } catch {
             if completedRecording != nil {
                 phase = .readyToSave
@@ -154,6 +189,30 @@ final class VoiceRecorderViewModel {
                 statusMessage = error.localizedDescription
             }
         }
+    }
+
+    func retryTranscript() async {
+        guard let completedRecording else {
+            phase = .failed(VoiceRecordingError.noRecording.localizedDescription)
+            statusMessage = VoiceRecordingError.noRecording.localizedDescription
+            return
+        }
+
+        refreshPermissions()
+        guard permissions.speech == .ready else {
+            phase = .readyToSave
+            statusMessage = "Speech permission is needed to retry transcription."
+            return
+        }
+        guard transcriptionJob?.canRetry ?? true else {
+            phase = .readyToSave
+            statusMessage = "Transcript retry limit reached. Audio is still ready to save."
+            return
+        }
+
+        phase = .processing
+        statusMessage = "Retrying transcript"
+        await generateTranscript(for: completedRecording, retrying: true)
     }
 
     func save(into store: MeetingStore, linkedMeetingID: Meeting.ID? = nil) async -> Meeting.ID? {
@@ -201,10 +260,36 @@ final class VoiceRecorderViewModel {
         meterTask?.cancel()
         recorder.discard()
         completedRecording = nil
+        transcriptionJob = nil
         elapsedSeconds = 0
         inputLevel = 0
         phase = .idle
         statusMessage = "Ready to record"
+    }
+
+    private func generateTranscript(for completed: CompletedVoiceRecording, retrying: Bool) async {
+        var job = transcriptionJob ?? TranscriptionRetryJob(
+            recordingID: completed.id,
+            fileName: RecordingFileStore.fileName(for: completed.fileURL)
+        )
+        job.markRunning()
+        transcriptionJob = job
+
+        do {
+            let result = try await transcriptionProvider.transcribe(audioURL: completed.fileURL)
+            transcript = result.text
+            job.markCompleted()
+            transcriptionJob = job
+            phase = .readyToSave
+            statusMessage = transcript.isEmpty ? "Audio ready" : "Transcript ready via \(result.provider.title)"
+        } catch {
+            job.markFailed(error.localizedDescription)
+            transcriptionJob = job
+            phase = .readyToSave
+            statusMessage = retrying
+                ? "Transcript retry failed. Audio is still ready to save."
+                : "Audio ready. Transcript could not be generated."
+        }
     }
 
     private func startMetering() {

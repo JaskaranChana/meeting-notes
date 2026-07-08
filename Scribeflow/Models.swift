@@ -592,6 +592,17 @@ struct EvidenceItem: Codable, Hashable, Identifiable {
     var text: String
     var level: EvidenceLevel
     var supportingSnippets: [String]
+
+    var confidenceLabel: String {
+        switch level {
+        case .verified:
+            "High confidence"
+        case .inferred:
+            "Needs review"
+        case .personalNote:
+            "Personal note"
+        }
+    }
 }
 
 enum CommitmentStatus: String, Codable, CaseIterable, Identifiable {
@@ -611,7 +622,7 @@ enum CommitmentStatus: String, Codable, CaseIterable, Identifiable {
         case .fulfilled:
             "Fulfilled"
         case .superseded:
-            "Superseded"
+            "Skipped"
         }
     }
 }
@@ -622,6 +633,7 @@ struct Commitment: Codable, Hashable, Identifiable {
     var owner: String
     var sourceSpeaker: String
     var dueHint: String?
+    var dueDateOverride: Date? = nil
     var status: CommitmentStatus
     /// Model-assigned priority ("high" / "medium" / "low") — drives ranking and
     /// the urgency flag. Optional so old data and the heuristic path stay valid.
@@ -736,6 +748,9 @@ struct Meeting: Codable, Hashable, Identifiable {
     var score: MeetingScore? = nil
     var audioRecordings: [AudioRecordingAttachment] = []
     var aiBrief: AIBriefData? = nil
+    var calendarEventID: String? = nil
+    var calendarStartDate: Date? = nil
+    var calendarEndDate: Date? = nil
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -766,6 +781,9 @@ struct Meeting: Codable, Hashable, Identifiable {
         case score
         case audioRecordings
         case aiBrief
+        case calendarEventID
+        case calendarStartDate
+        case calendarEndDate
     }
 
     init(
@@ -796,7 +814,10 @@ struct Meeting: Codable, Hashable, Identifiable {
         contextMode: MeetingContextMode = .general,
         score: MeetingScore? = nil,
         audioRecordings: [AudioRecordingAttachment] = [],
-        aiBrief: AIBriefData? = nil
+        aiBrief: AIBriefData? = nil,
+        calendarEventID: String? = nil,
+        calendarStartDate: Date? = nil,
+        calendarEndDate: Date? = nil
     ) {
         self.id = id
         self.title = title
@@ -826,6 +847,9 @@ struct Meeting: Codable, Hashable, Identifiable {
         self.score = score
         self.audioRecordings = audioRecordings
         self.aiBrief = aiBrief
+        self.calendarEventID = calendarEventID
+        self.calendarStartDate = calendarStartDate
+        self.calendarEndDate = calendarEndDate
     }
 
     init(from decoder: Decoder) throws {
@@ -861,6 +885,9 @@ struct Meeting: Codable, Hashable, Identifiable {
         // decode, drop it (the heuristic takes over and it regenerates) rather
         // than failing the whole meeting load.
         aiBrief = (try? container.decodeIfPresent(AIBriefData.self, forKey: .aiBrief)) ?? nil
+        calendarEventID = try container.decodeIfPresent(String.self, forKey: .calendarEventID)
+        calendarStartDate = try container.decodeIfPresent(Date.self, forKey: .calendarStartDate)
+        calendarEndDate = try container.decodeIfPresent(Date.self, forKey: .calendarEndDate)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -893,6 +920,9 @@ struct Meeting: Codable, Hashable, Identifiable {
         try container.encodeIfPresent(score, forKey: .score)
         try container.encode(audioRecordings, forKey: .audioRecordings)
         try container.encodeIfPresent(aiBrief, forKey: .aiBrief)
+        try container.encodeIfPresent(calendarEventID, forKey: .calendarEventID)
+        try container.encodeIfPresent(calendarStartDate, forKey: .calendarStartDate)
+        try container.encodeIfPresent(calendarEndDate, forKey: .calendarEndDate)
     }
 }
 
@@ -1481,6 +1511,125 @@ extension Meeting {
             selectedTemplate: .exec,
             selectedPromptID: nil,
             isPinned: true
+        ),
+        Meeting(
+            title: "Calendar prep: Helio launch review",
+            workspace: "Meetings",
+            when: .now.addingTimeInterval(45 * 60),
+            durationMinutes: 45,
+            attendees: ["You", "Avery Chen", "Mina Patel", "Jordan Lee"],
+            status: .ready,
+            stage: "Prepared from calendar",
+            objective: """
+            Location: Zoom
+            Calendar notes: Review launch readiness, assign follow-up owners, and decide whether the client-safe recap can go out today.
+            """,
+            rawNotes: """
+            - Attendees: You, Avery Chen, Mina Patel, Jordan Lee
+            - Agenda: launch readiness, open risks, client recap
+            - Decisions:
+            - Risks:
+            - Next steps:
+            """,
+            transcript: [],
+            summaries: [
+                TemplateSummary(
+                    template: .exec,
+                    summary: MeetingSummary(
+                        eyebrow: "Calendar prep",
+                        title: "Upcoming launch review is ready for capture with attendees and objective prefilled.",
+                        sections: [
+                            SummarySection(title: "Use this to test", bullets: [
+                                "Open this note from Library to see a calendar-started meeting record.",
+                                "Use Tasks to schedule a local notification for the follow-up items.",
+                                "Compare the objective and attendees with the calendar context stored on the meeting.",
+                            ]),
+                            SummarySection(title: "Prep prompts", bullets: [
+                                "Confirm launch approval criteria.",
+                                "Ask who owns client recap edits.",
+                                "Capture any risks that should be source-backed before sharing.",
+                            ]),
+                        ]
+                    )
+                ),
+            ],
+            prompts: [
+                AIResponse(prompt: "How should I prepare?", answer: "Confirm launch criteria first, then resolve recap ownership and any legal/security risks before the client-safe summary goes out."),
+                AIResponse(prompt: "What should I ask?", answer: "Ask Avery whether launch criteria are final, Mina whether the recap can be client-safe today, and Jordan whether any legal language needs review."),
+            ],
+            destinations: ["Email all participants", "Files export"],
+            selectedTemplate: .exec,
+            selectedPromptID: nil,
+            isPinned: true,
+            commitments: [
+                Commitment(statement: "Send the client-safe recap after launch review", owner: "You", sourceSpeaker: "Calendar prep", dueHint: "today", status: .open, priority: "high", rationale: "This is the fastest way to test local notification scheduling from Tasks."),
+                Commitment(statement: "Confirm legal wording before the recap is shared", owner: "Mina Patel", sourceSpeaker: "Calendar prep", dueHint: "tomorrow", status: .open, priority: "medium", rationale: "Keeps the source-backed accuracy flow visible before external sharing."),
+            ],
+            calendarEventID: "sample-calendar-helio-launch-review",
+            calendarStartDate: .now.addingTimeInterval(45 * 60),
+            calendarEndDate: .now.addingTimeInterval(90 * 60)
+        ),
+        Meeting(
+            title: "Captured from calendar: Orion renewal",
+            workspace: "Calls",
+            when: .now.addingTimeInterval(-30 * 60),
+            durationMinutes: 52,
+            attendees: ["You", "Noah Rivera", "Elena Brooks", "Samir Shah"],
+            status: .ready,
+            stage: "Captured from calendar event",
+            objective: """
+            Location: Google Meet
+            Calendar notes: Renewal call with procurement and champion. Confirm next step owner and pricing objection.
+            """,
+            rawNotes: """
+            - Decision: Orion wants a two-year renewal option if pricing protection is included
+            - Risk: procurement needs revised terms before Friday
+            - Elena asked for the security addendum and uptime summary
+            - Noah will confirm whether finance approves the two-year option
+            """,
+            transcript: [
+                TranscriptLine(speaker: "Elena Brooks", role: "Champion", text: "The team wants to renew, but procurement needs revised terms before Friday."),
+                TranscriptLine(speaker: "Samir Shah", role: "Procurement", text: "Pricing protection is the main condition for a two-year agreement."),
+                TranscriptLine(speaker: "Noah Rivera", role: "Finance", text: "I can confirm finance approval tomorrow if we have the updated option in writing."),
+                TranscriptLine(speaker: "You", role: "AE", text: "I will send the security addendum and uptime summary today with the two-year option."),
+            ],
+            summaries: [
+                TemplateSummary(
+                    template: .discovery,
+                    summary: MeetingSummary(
+                        eyebrow: "Calendar capture",
+                        title: "Orion is leaning toward renewal, with pricing protection and revised terms as the blockers.",
+                        sections: [
+                            SummarySection(title: "Confirmed", bullets: [
+                                "Renewal interest is real, but procurement needs revised terms before Friday.",
+                                "Pricing protection is the condition for a two-year agreement.",
+                                "Finance approval can happen tomorrow if the option is sent in writing.",
+                            ]),
+                            SummarySection(title: "Follow-ups", bullets: [
+                                "Send security addendum, uptime summary, and two-year option today.",
+                                "Ask Noah to confirm finance approval tomorrow.",
+                                "Track procurement terms as at risk until Friday.",
+                            ]),
+                        ]
+                    )
+                ),
+            ],
+            prompts: [
+                AIResponse(prompt: "What did Orion ask for?", answer: "Orion asked for revised renewal terms, pricing protection for a two-year agreement, the security addendum, and an uptime summary."),
+                AIResponse(prompt: "What do I need to do today?", answer: "Send the security addendum, uptime summary, and two-year renewal option today, then follow up with Noah tomorrow for finance approval."),
+            ],
+            destinations: ["CRM", "Email all participants", "#enterprise-sales"],
+            selectedTemplate: .discovery,
+            selectedPromptID: nil,
+            isPinned: false,
+            commitments: [
+                Commitment(statement: "Send the security addendum and uptime summary", owner: "You", sourceSpeaker: "You", dueHint: "today", status: .open, priority: "high", rationale: "Unblocks Orion procurement before Friday."),
+                Commitment(statement: "Confirm finance approval for the two-year option", owner: "Noah Rivera", sourceSpeaker: "Noah Rivera", dueHint: "tomorrow", status: .open, priority: "medium", rationale: "Needed before procurement signs off."),
+                Commitment(statement: "Review revised renewal terms", owner: "Samir Shah", sourceSpeaker: "Samir Shah", dueHint: "Friday", status: .atRisk, priority: "high", rationale: "Procurement is the renewal gate."),
+            ],
+            calendarEventID: "sample-calendar-orion-renewal",
+            calendarStartDate: .now.addingTimeInterval(-30 * 60),
+            calendarEndDate: .now.addingTimeInterval(22 * 60)
         ),
 
         // MARK: Scenario coverage — explicit commitments to exercise the Daily

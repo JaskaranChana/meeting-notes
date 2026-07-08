@@ -404,23 +404,28 @@ final class LiveMeetingCoordinator {
         }
     }
 
-    func saveMeeting(into store: MeetingStore) async -> Meeting.ID {
+    func saveMeeting(into store: MeetingStore, calendarEvent: CalendarEventSnapshot? = nil) async -> Meeting.ID {
         let normalizedAttendees = attendees
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+        let eventAttendees = calendarEvent?.attendees ?? []
+        let mergedAttendees = normalizedAttendees.isEmpty ? eventAttendees : normalizedAttendees
 
         let id = await store.addLiveMeeting(
             title: title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Live meeting" : title,
             workspace: workspace.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Personal workspace" : workspace,
-            attendees: normalizedAttendees,
+            attendees: mergedAttendees,
             objective: objective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Capture the key decisions and momentum clearly." : objective,
             notes: manualNotes,
             moments: bookmarks.map(\.text),
             transcriptParagraphs: transcriptParagraphs,
             meetingMode: meetingMode,
             consentState: consentState,
-            retentionPolicy: retentionPolicy
+            retentionPolicy: retentionPolicy,
+            calendarEventID: calendarEvent?.id,
+            calendarStartDate: calendarEvent?.startDate,
+            calendarEndDate: calendarEvent?.endDate
         )
         store.selectTemplate(selectedTemplate, for: id)
         return id
