@@ -955,6 +955,22 @@ extension Meeting {
             || audioRecordings.contains { $0.source == .compliantCall }
     }
 
+    var purpose: CapturePurpose {
+        MeetingPurposeClassifier.standard.classify(self)
+    }
+
+    var isPersonalCapture: Bool {
+        purpose.isPersonalCapture
+    }
+
+    var allowsMeetingSignalExtraction: Bool {
+        purpose.allowsMeetingSignals
+    }
+
+    var allowsAccountabilityExtraction: Bool {
+        purpose.allowsAccountabilityExtraction
+    }
+
     static func sortDescending(_ lhs: Meeting, _ rhs: Meeting) -> Bool {
         if lhs.isPinned != rhs.isPinned { return lhs.isPinned }
         return lhs.when > rhs.when

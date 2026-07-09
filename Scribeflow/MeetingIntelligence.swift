@@ -112,12 +112,19 @@ enum MeetingIntelligenceEngine {
     static func report(for meeting: Meeting) -> MeetingIntelligenceReport {
         let source = sourceLines(for: meeting)
         let corpus = source.map(\.text)
-        let decisions = extract(from: corpus, keywords: decisionCues, limit: 4, transform: distilledDecision)
-        let structuredActions = extractStructuredActions(from: source, attendees: meeting.attendees, limit: 5)
+        let allowsMeetingSignals = meeting.allowsMeetingSignalExtraction
+        let decisions = allowsMeetingSignals
+            ? extract(from: corpus, keywords: decisionCues, limit: 4, transform: distilledDecision)
+            : []
+        let structuredActions = meeting.allowsAccountabilityExtraction
+            ? extractStructuredActions(from: source, attendees: meeting.attendees, limit: 5)
+            : []
         // One definition of "an action": the strict, distilled structured set.
         let actions = structuredActions.map(\.text)
         let questions = extractQuestions(from: corpus, limit: 4)
-        let followUps = followUps(from: actions, structuredActions: structuredActions, questions: questions, decisions: decisions)
+        let followUps = meeting.allowsAccountabilityExtraction
+            ? followUps(from: actions, structuredActions: structuredActions, questions: questions, decisions: decisions)
+            : []
         let summary = summary(from: meeting, corpus: corpus, decisions: decisions, structuredActions: structuredActions)
         let speakers = speakerSegments(for: meeting)
 
@@ -139,12 +146,14 @@ enum MeetingIntelligenceEngine {
     /// Text-derived action items (with owner/due/source) for a meeting — the
     /// single source of truth so persisted commitments match the live read.
     static func structuredActions(for meeting: Meeting, limit: Int = 6) -> [ExtractedActionItem] {
-        extractStructuredActions(from: sourceLines(for: meeting), attendees: meeting.attendees, limit: limit)
+        guard meeting.allowsAccountabilityExtraction else { return [] }
+        return extractStructuredActions(from: sourceLines(for: meeting), attendees: meeting.attendees, limit: limit)
     }
 
     /// Decisions detected in a meeting's notes/transcript.
     static func decisions(for meeting: Meeting, limit: Int = 4) -> [String] {
-        extract(from: sourceLines(for: meeting).map(\.text), keywords: decisionCues, limit: limit, transform: distilledDecision)
+        guard meeting.allowsMeetingSignalExtraction else { return [] }
+        return extract(from: sourceLines(for: meeting).map(\.text), keywords: decisionCues, limit: limit, transform: distilledDecision)
     }
 
     /// Open/unresolved questions raised in the notes or transcript — the

@@ -226,7 +226,7 @@ struct TodayView: View {
             }
             .padding(.horizontal, 20)
             .padding(.top, 8)
-            .padding(.bottom, 12)
+            .padding(.bottom, AppDockMetrics.scrollEndPadding)
             .readingWidth()
         }
         .refreshable {
@@ -1051,11 +1051,16 @@ struct TodaySnapshot {
             }
         }
 
-        return meetings
-            .flatMap { meeting in
-                meeting.commitments.compactMap { commitment -> DailyPlanItem? in
-                    guard let classification = classify(commitment, capturedAt: meeting.when) else { return nil }
-                    return DailyPlanItem(
+        var items: [DailyPlanItem] = []
+        items.reserveCapacity(meetings.reduce(0) { partial, meeting in
+            partial + (meeting.isPersonalCapture ? 0 : meeting.commitments.count)
+        })
+
+        for meeting in meetings where !meeting.isPersonalCapture {
+            for commitment in meeting.commitments {
+                guard let classification = classify(commitment, capturedAt: meeting.when) else { continue }
+                items.append(
+                    DailyPlanItem(
                         id: commitment.id,
                         commitment: commitment,
                         meetingID: meeting.id,
@@ -1064,13 +1069,17 @@ struct TodaySnapshot {
                         weight: classification.weight,
                         dueDate: classification.due
                     )
-                }
+                )
             }
-            .sorted { lhs, rhs in
-                lhs.weight != rhs.weight ? lhs.weight < rhs.weight : lhs.meetingDate > rhs.meetingDate
+        }
+
+        items.sort { lhs, rhs in
+            if lhs.weight != rhs.weight {
+                return lhs.weight < rhs.weight
             }
-            .prefix(3)
-            .map { $0 }
+            return lhs.meetingDate > rhs.meetingDate
+        }
+        return Array(items.prefix(3))
     }
 
     private static func rollingCaptureWindows(in meetings: [Meeting]) -> (current: Int, previous: Int) {
@@ -1093,7 +1102,9 @@ struct TodaySnapshot {
     }
 
     private static func followThroughPercent(in meetings: [Meeting]) -> Int {
-        let allCommitments = meetings.flatMap(\.commitments)
+        let allCommitments = meetings
+            .filter { !$0.isPersonalCapture }
+            .flatMap(\.commitments)
         guard !allCommitments.isEmpty else { return 0 }
         let done = allCommitments.filter { $0.status == .fulfilled || $0.status == .superseded }.count
         return Int((Double(done) / Double(allCommitments.count) * 100).rounded())
@@ -1109,7 +1120,7 @@ struct TodaySnapshot {
         streak: Int
     ) -> NextMove? {
         guard !meetings.isEmpty else { return nil }
-        let active = meetings.filter { $0.status != .shared }
+        let active = meetings.filter { $0.status != .shared && !$0.isPersonalCapture }
 
         // 1. An at-risk commitment is the most urgent thing on the board.
         if let meeting = active.first(where: { $0.commitments.contains { $0.status == .atRisk } }),
@@ -1221,6 +1232,7 @@ struct TodaySnapshot {
     private static func openLoops(from meetings: [Meeting]) -> [OpenLoop] {
         meetings
             .filter { $0.status != .shared }
+            .filter { !$0.isPersonalCapture }
             .flatMap { meeting -> [OpenLoop] in
                 let actionLoops = meeting.commitments
                     .filter { $0.status == .open || $0.status == .atRisk }
@@ -1248,6 +1260,7 @@ struct TodaySnapshot {
     }
 
     private static func riskLines(from meeting: Meeting) -> [String] {
+        guard !meeting.isPersonalCapture else { return [] }
         let sources = [
             meeting.rawNotes,
             meeting.objective,

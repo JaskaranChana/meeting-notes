@@ -10,6 +10,7 @@
 		A10000000000000000000011 /* ScribeflowApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000001 /* ScribeflowApp.swift */; };
 		A10000000000000000000012 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000002 /* ContentView.swift */; };
 		A10000000000000000000013 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000003 /* Models.swift */; };
+		A10000000000000000000017 /* MeetingPurpose.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000008 /* MeetingPurpose.swift */; };
 		A10000000000000000000014 /* MeetingStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000004 /* MeetingStore.swift */; };
 		A10000000000000000000015 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000005 /* Assets.xcassets */; };
 		A10000000000000000000016 /* LiveMeetingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000007 /* LiveMeetingCoordinator.swift */; };
@@ -69,6 +70,7 @@
 		A10000000000000000000001 /* ScribeflowApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScribeflowApp.swift; sourceTree = "<group>"; };
 		A10000000000000000000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A10000000000000000000003 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		A10000000000000000000008 /* MeetingPurpose.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingPurpose.swift; sourceTree = "<group>"; };
 		A10000000000000000000004 /* MeetingStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingStore.swift; sourceTree = "<group>"; };
 		A10000000000000000000005 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A10000000000000000000006 /* Scribeflow.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Scribeflow.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -175,6 +177,7 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000003 /* Models.swift */,
+				A10000000000000000000008 /* MeetingPurpose.swift */,
 				A10000000000000000000004 /* MeetingStore.swift */,
 				A10000000000000000001002 /* AppCore.swift */,
 			);
@@ -396,6 +399,7 @@
 				A10000000000000000000011 /* ScribeflowApp.swift in Sources */,
 				A10000000000000000000012 /* ContentView.swift in Sources */,
 				A10000000000000000000013 /* Models.swift in Sources */,
+				A10000000000000000000017 /* MeetingPurpose.swift in Sources */,
 				A10000000000000000000014 /* MeetingStore.swift in Sources */,
 				A10000000000000000000016 /* LiveMeetingCoordinator.swift in Sources */,
 				A10000000000000000000200 /* SettingsView.swift in Sources */,

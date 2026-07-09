@@ -8,6 +8,7 @@ enum ActionTracker {
         let cutoff = Date().addingTimeInterval(-48 * 3600)
         return meetings
             .filter { $0.when <= cutoff }
+            .filter { $0.allowsAccountabilityExtraction }
             .flatMap { meeting -> [ActionCheck] in
                 meeting.commitments
                     .filter { $0.status == .open || $0.status == .atRisk }
@@ -36,6 +37,7 @@ enum ActionTracker {
         return meetings.filter {
             $0.when <= cutoff &&
             $0.status != .shared &&
+            $0.allowsAccountabilityExtraction &&
             $0.commitments.contains { $0.status == .open }
         }
     }
@@ -60,7 +62,10 @@ enum PeopleEngine {
             meeting.attendees.contains { $0.lowercased().hasPrefix(firstName) }
         }.sorted { $0.when > $1.when }
 
-        let open = personMeetings.flatMap(\.commitments).filter { $0.status == .open || $0.status == .atRisk }
+        let open = personMeetings
+            .filter { $0.allowsAccountabilityExtraction }
+            .flatMap(\.commitments)
+            .filter { $0.status == .open || $0.status == .atRisk }
 
         var wordFreq: [String: Int] = [:]
         for meeting in personMeetings {
@@ -120,14 +125,15 @@ enum MeetingScorer {
         if !meeting.objective.isEmpty { clarity += 10 }
         if meeting.transcript.count > 5 { clarity += 10 }
 
-        let decisions = meeting.commitments.filter { $0.status != .superseded }.count
+        let scoredCommitments = meeting.allowsAccountabilityExtraction ? meeting.commitments : []
+        let decisions = scoredCommitments.filter { $0.status != .superseded }.count
         decisiveness += min(decisions * 10, 30)
         if meeting.summaries.count > 1 { decisiveness += 10 }
 
-        let actions = meeting.commitments.filter { $0.status == .open || $0.status == .fulfilled }.count
+        let actions = scoredCommitments.filter { $0.status == .open || $0.status == .fulfilled }.count
         actionability += min(actions * 8, 32)
         if !meeting.attendees.isEmpty { actionability += 8 }
-        let ownedActions = meeting.commitments.filter { !$0.owner.isEmpty }.count
+        let ownedActions = scoredCommitments.filter { !$0.owner.isEmpty }.count
         actionability += min(ownedActions * 5, 10)
 
         clarity = min(clarity, 100)

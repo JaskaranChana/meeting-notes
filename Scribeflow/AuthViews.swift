@@ -447,6 +447,9 @@ struct LocalAuthFlow<Content: View>: View {
     @ViewBuilder let content: Content
 
     var body: some View {
+#if DEBUG
+        content
+#else
         ZStack {
             currentStage
         }
@@ -457,6 +460,7 @@ struct LocalAuthFlow<Content: View>: View {
             // Auto-unlock when biometric not enabled.
             if !currentUserEmail.isEmpty, !wantsBiometric { unlocked = true }
         }
+#endif
     }
 
     @ViewBuilder

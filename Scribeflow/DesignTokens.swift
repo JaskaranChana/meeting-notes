@@ -701,69 +701,105 @@ struct BreathingDot: View {
     }
 }
 
-// MARK: - FloatingTabDock — premium glass tab bar
+// MARK: - RootTabBar — liquid app navigation
 
 enum AppDockMetrics {
     static let height: CGFloat = 58
-    static let bottomPadding: CGFloat = 10
+    static let iconSize: CGFloat = 21
+    static let itemWidth: CGFloat = 50
+    static let centerButtonWidth: CGFloat = 68
+    static let centerButtonHeight: CGFloat = 58
+    static let centerButtonLift: CGFloat = -6
+    static let dockLowerOffset: CGFloat = 9
+    static let bottomPadding: CGFloat = 0
     static let horizontalPadding: CGFloat = 18
-    static let maxWidth: CGFloat = 452
-
-    /// Extra room reserved below every root scroll view. The dock is drawn as
-    /// an overlay, so this must be larger than the visible capsule to leave
-    /// tappable bottom controls fully exposed when scrolled to the end.
-    static var scrollClearance: CGFloat {
-        height + bottomPadding + max(UIApplication.shared.bottomSafeAreaInset, 12) + 26
-    }
+    static let maxWidth: CGFloat = 360
+    static let chromeVerticalPadding: CGFloat = 8
+    static let chromeHeight: CGFloat = height + chromeVerticalPadding * 2 + abs(centerButtonLift)
+    static let chromeCornerRadius: CGFloat = 30
+    static let scrollEndPadding: CGFloat = 14
 }
 
-/// Dock item shown in `FloatingTabDock`. The `id` is the tab's raw value;
+/// Tab item shown in `RootTabBar`. The `id` is the tab's raw value;
 /// drive selection by binding to a `String` matching one of these.
-struct FloatingTabDockItem: Identifiable, Equatable {
+struct RootTabBarItem: Identifiable, Equatable {
     let id: String
     let label: String
     let systemImage: String
     var badge: Int = 0
 }
 
-/// Frosted-glass floating tab dock. Replaces the system `UITabBar` chrome with
-/// a more premium, modern dock — accent gradient pill on the selected tab,
-/// matched-geometry transition between selections, refined badge dot, soft
-/// floating shadow. Designed to sit at the bottom of the screen overlaying
-/// the tab content.
-struct FloatingTabDock: View {
-    let items: [FloatingTabDockItem]
+/// Floating liquid navigation. It sits in the control layer above content while
+/// root screens reserve scroll clearance so bottom controls remain reachable.
+struct RootTabBar: View {
+    let items: [RootTabBarItem]
     @Binding var selection: String
-    @Namespace private var ns
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        HStack(spacing: 3) {
-            ForEach(items) { item in
+        HStack(spacing: 4) {
+            ForEach(leftItems) { item in
+                tabButton(item)
+            }
+
+            if let todayItem {
+                todayButton(todayItem)
+            }
+
+            ForEach(rightItems) { item in
                 tabButton(item)
             }
         }
-        .padding(5)
+        .padding(6)
         .frame(height: AppDockMetrics.height)
         .frame(maxWidth: AppDockMetrics.maxWidth)
-        .background(
-            Capsule(style: .continuous)
-                .fill(reduceTransparency ? AnyShapeStyle(AppPalette.ink.opacity(0.96)) : AnyShapeStyle(AppPalette.dockBackground))
-        )
-        .overlay(
-            Capsule(style: .continuous)
-                .strokeBorder(.white.opacity(0.10), lineWidth: 0.7)
-        )
-        .appShadow(AppShadow.floating)
+        .background { liquidBackground }
+        .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.18 : 0.08), radius: 10, y: 5)
         .frame(maxWidth: .infinity, alignment: .center)
         .padding(.horizontal, AppDockMetrics.horizontalPadding)
         .padding(.bottom, AppDockMetrics.bottomPadding)
+        .offset(y: AppDockMetrics.dockLowerOffset)
         .sensoryFeedback(.selection, trigger: selection)
     }
 
+    private var todayItem: RootTabBarItem? {
+        items.first { $0.id == "home" }
+    }
+
+    private var sideItems: [RootTabBarItem] {
+        items.filter { $0.id != "home" }
+    }
+
+    private var leftItems: [RootTabBarItem] {
+        Array(sideItems.prefix(2))
+    }
+
+    private var rightItems: [RootTabBarItem] {
+        Array(sideItems.dropFirst(2))
+    }
+
     @ViewBuilder
-    private func tabButton(_ item: FloatingTabDockItem) -> some View {
+    private var liquidBackground: some View {
+        Capsule(style: .continuous)
+            .fill(AppPalette.paper.opacity(reduceTransparency ? 1 : 0.94))
+            .overlay {
+                Capsule(style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: colorScheme == .dark
+                                ? [Color.white.opacity(0.07), AppPalette.softSurface.opacity(0.18), Color.black.opacity(0.07)]
+                                : [Color.white.opacity(0.48), AppPalette.accentSoft.opacity(0.24), AppPalette.softSurface.opacity(0.14)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            }
+    }
+
+    @ViewBuilder
+    private func tabButton(_ item: RootTabBarItem) -> some View {
         let isSelected = item.id == selection
 
         Button {
@@ -776,59 +812,193 @@ struct FloatingTabDock: View {
                 )
                 return
             }
-            let anim = reduceMotion ? .linear(duration: 0.01) : AppMotion.snappy
-            withAnimation(anim) {
-                selection = item.id
-            }
+            selection = item.id
         } label: {
-            HStack(spacing: 6) {
-                ZStack(alignment: .topTrailing) {
-                    Image(systemName: item.systemImage)
-                        .font(.subheadline.weight(.bold))
-                        .frame(width: 20, height: 20)
-                        .symbolEffect(.bounce, value: reduceMotion ? false : isSelected)
-                    if item.badge > 0 {
-                        Text(item.badge > 99 ? "99+" : "\(item.badge)")
-                            .font(.system(size: 9, weight: .heavy))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 4)
-                            .frame(minWidth: 14, minHeight: 14)
-                            .background(AppPalette.gold, in: Capsule())
-                            .overlay(Capsule().strokeBorder(.white, lineWidth: 1.2))
-                            .offset(x: 10, y: -8)
-                    }
-                }
-                if isSelected {
-                    Text(item.label)
-                        .font(.footnote.weight(.bold))
-                        .lineLimit(1)
-                        .fixedSize()
-                        .transition(
-                            .asymmetric(
-                                insertion: .scale(scale: 0.7).combined(with: .opacity),
-                                removal: .opacity
-                            )
-                        )
-                }
+            ZStack {
+                tabIcon(item, isSelected: isSelected)
             }
-            .foregroundStyle(isSelected ? .white : .white.opacity(0.58))
-            .padding(.horizontal, isSelected ? 12 : 10)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background {
-                if isSelected {
-                    Capsule(style: .continuous)
-                        .fill(AppPalette.accentButton)
-                        .matchedGeometryEffect(id: "tab.pill", in: ns)
-                        .appShadow(AppShadow.soft)
-                }
-            }
-            .contentShape(Capsule())
+            .foregroundStyle(tabForeground(isSelected: isSelected))
+            .frame(width: AppDockMetrics.itemWidth)
+            .frame(maxHeight: .infinity)
+            .background { selectedPill(isVisible: isSelected) }
+            .contentShape(Capsule(style: .continuous))
+            .animation(reduceMotion ? nil : .smooth(duration: 0.18), value: isSelected)
         }
         .buttonStyle(.plain)
-        .layoutPriority(isSelected ? 1 : 0)
         .accessibilityLabel(item.label)
         .accessibilityValue(item.badge > 0 ? "\(item.badge) pending" : "")
         .accessibilityIdentifier("dock.tab.\(item.id)")
         .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : [.isButton])
+    }
+
+    @ViewBuilder
+    private func todayButton(_ item: RootTabBarItem) -> some View {
+        let isSelected = item.id == selection
+
+        Button {
+            if isSelected {
+                NotificationCenter.default.post(
+                    name: .scribeflowDockScrollToTop,
+                    object: item.id
+                )
+                return
+            }
+            selection = item.id
+        } label: {
+            ZStack {
+                Image(systemName: item.systemImage)
+                    .symbolVariant(.fill)
+                    .font(.system(size: 23, weight: .semibold))
+                    .frame(width: 28, height: 28)
+            }
+            .foregroundStyle(isSelected ? .white : AppPalette.accent)
+            .frame(width: AppDockMetrics.centerButtonWidth, height: AppDockMetrics.centerButtonHeight)
+            .background { todayButtonBackground(isSelected: isSelected) }
+            .contentShape(Capsule(style: .continuous))
+            .animation(reduceMotion ? nil : .smooth(duration: 0.18), value: isSelected)
+        }
+        .buttonStyle(.plain)
+        .offset(y: AppDockMetrics.centerButtonLift)
+        .accessibilityLabel(item.label)
+        .accessibilityValue(isSelected ? "Selected" : "")
+        .accessibilityIdentifier("dock.tab.\(item.id)")
+        .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : [.isButton])
+    }
+
+    @ViewBuilder
+    private func tabIcon(_ item: RootTabBarItem, isSelected: Bool) -> some View {
+        ZStack(alignment: .topTrailing) {
+            Image(systemName: item.systemImage)
+                .symbolVariant(isSelected ? .fill : .none)
+                .font(.system(size: 19, weight: .semibold))
+                .frame(width: AppDockMetrics.iconSize, height: AppDockMetrics.iconSize)
+
+            if item.badge > 0 {
+                badge(item.badge, isSelected: isSelected)
+            }
+        }
+    }
+
+    private func tabForeground(isSelected: Bool) -> Color {
+        if isSelected {
+            return .white
+        }
+        return AppPalette.secondaryInk.opacity(colorScheme == .dark ? 0.92 : 0.72)
+    }
+
+    private func badge(_ count: Int, isSelected: Bool) -> some View {
+        Circle()
+            .fill(AppPalette.gold)
+            .frame(width: 9, height: 9)
+            .overlay(Circle().strokeBorder(isSelected ? Color.white : AppPalette.cardBackground, lineWidth: 1.1))
+            .offset(x: 9, y: -8)
+    }
+
+    @ViewBuilder
+    private func selectedPill(isVisible: Bool) -> some View {
+        if isVisible {
+            Capsule(style: .continuous)
+                .fill(AppPalette.accentButton)
+                .overlay { selectedPillSheen }
+                .overlay {
+                    Capsule(style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.22), lineWidth: 0.7)
+                }
+        }
+    }
+
+    @ViewBuilder
+    private func todayButtonBackground(isSelected: Bool) -> some View {
+        Capsule(style: .continuous)
+            .fill(isSelected ? AnyShapeStyle(AppPalette.accentButton) : AnyShapeStyle(AppPalette.paper))
+            .overlay {
+                Capsule(style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: isSelected
+                                ? [Color.white.opacity(0.24), Color.white.opacity(0.05), Color.black.opacity(0.12)]
+                                : [Color.white.opacity(0.58), AppPalette.accentSoft.opacity(0.34), AppPalette.paper.opacity(0.92)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            }
+            .overlay {
+                Capsule(style: .continuous)
+                    .strokeBorder(isSelected ? Color.white.opacity(0.22) : AppPalette.accent.opacity(0.16), lineWidth: 0.8)
+            }
+            .shadow(color: AppPalette.accent.opacity(isSelected ? 0.20 : 0.09), radius: 10, y: 5)
+    }
+
+    private var selectedPillSheen: some View {
+        Capsule(style: .continuous)
+            .fill(
+                LinearGradient(
+                    colors: [
+                        Color.white.opacity(0.28),
+                        Color.white.opacity(0.06),
+                        Color.black.opacity(0.10)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+    }
+}
+
+struct RootDockChrome<Content: View>: View {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorScheme) private var colorScheme
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        content
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, AppDockMetrics.chromeVerticalPadding)
+            .frame(height: AppDockMetrics.chromeHeight, alignment: .center)
+            .background(alignment: .bottom) {
+                chromeShape
+                    .fill(AppPalette.paper)
+                    .overlay { chromeTint }
+                    .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.16 : 0.05), radius: 12, y: -1)
+                    .ignoresSafeArea(edges: .bottom)
+            }
+    }
+
+    private var chromeShape: TopRoundedRectangle {
+        TopRoundedRectangle(radius: AppDockMetrics.chromeCornerRadius)
+    }
+
+    private var chromeTint: some View {
+        let colors: [Color] = colorScheme == .dark
+            ? [AppPalette.accentSoft.opacity(reduceTransparency ? 0.10 : 0.16), AppPalette.paper.opacity(0.96)]
+            : [AppPalette.accentSoft.opacity(reduceTransparency ? 0.12 : 0.22), AppPalette.softSurface.opacity(0.22), AppPalette.paper.opacity(0.96)]
+
+        return chromeShape.fill(
+            LinearGradient(colors: colors, startPoint: .top, endPoint: .bottom)
+        )
+    }
+}
+
+private struct TopRoundedRectangle: Shape {
+    let radius: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let clampedRadius = min(radius, rect.width / 2, rect.height)
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + clampedRadius))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.minX + clampedRadius, y: rect.minY),
+            control: CGPoint(x: rect.minX, y: rect.minY)
+        )
+        path.addLine(to: CGPoint(x: rect.maxX - clampedRadius, y: rect.minY))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.maxX, y: rect.minY + clampedRadius),
+            control: CGPoint(x: rect.maxX, y: rect.minY)
+        )
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.closeSubpath()
+        return path
     }
 }

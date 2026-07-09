@@ -7,10 +7,13 @@ struct MeetingCalendarView: View {
     let onCapture: (CaptureView.Mode) -> Void
     @Binding var toast: ToastItem?
 
+    @AppStorage("scribeflow.calendar.scope") private var calendarScope: CalendarScope = .month
+    @AppStorage("scribeflow.calendar.filter") private var calendarFilter: CalendarContentFilter = .all
     @State private var displayedMonth = Self.startOfMonth(for: .now)
     @State private var selectedDate = Calendar.current.startOfDay(for: .now)
     @State private var accessState: CalendarAccessState = .notDetermined
     @State private var calendarEvents: [CalendarEventSnapshot] = []
+    @State private var calendarEventRevision = 0
     @State private var isRequestingAccess = false
     @State private var snapshot = MeetingCalendarSnapshot()
     @State private var snapshotBuilder = MeetingCalendarSnapshotBuilder()
@@ -20,7 +23,7 @@ struct MeetingCalendarView: View {
             revision: store.revision,
             displayedMonth: displayedMonth,
             selectedDate: selectedDate,
-            events: calendarEvents
+            eventRevision: calendarEventRevision
         )
     }
 
@@ -31,7 +34,7 @@ struct MeetingCalendarView: View {
                     Color.clear.frame(height: 0).id("calendar.top")
                     calendarHeader
                     calendarTimelineStrip
-                    calendarGrid
+                    calendarModeContent
 
                     if accessState != .allowed {
                         calendarAccessCard
@@ -41,7 +44,7 @@ struct MeetingCalendarView: View {
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 16)
-                .padding(.bottom, 12)
+                .padding(.bottom, AppDockMetrics.scrollEndPadding)
                 .readingWidth()
             }
             .background(AppPalette.background.ignoresSafeArea())
@@ -113,6 +116,7 @@ struct MeetingCalendarView: View {
             .overlay(alignment: .bottom) { EditorialRule() }
 
             calendarLegend
+            calendarControls
         }
         .accessibilityIdentifier("calendar.header")
     }
@@ -125,7 +129,7 @@ struct MeetingCalendarView: View {
                         selectDay(day)
                     } label: {
                         VStack(spacing: 7) {
-                            Text(day.date.formatted(.dateTime.weekday(.abbreviated)))
+                            Text(day.weekdayLabel)
                                 .font(.caption2.weight(.bold))
                                 .foregroundStyle(day.isSelected ? .white.opacity(0.78) : AppPalette.tertiaryInk)
                             Text("\(day.dayNumber)")
@@ -176,6 +180,67 @@ struct MeetingCalendarView: View {
         }
     }
 
+    private var calendarControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("Calendar view", selection: $calendarScope) {
+                ForEach(CalendarScope.allCases) { scope in
+                    Label(scope.title, systemImage: scope.systemImage)
+                        .tag(scope)
+                }
+            }
+            .pickerStyle(.segmented)
+            .accessibilityLabel("Calendar view")
+
+            HStack(spacing: 10) {
+                Menu {
+                    Picker("Show", selection: $calendarFilter) {
+                        ForEach(CalendarContentFilter.allCases) { filter in
+                            Label(filter.title, systemImage: filter.systemImage)
+                                .tag(filter)
+                        }
+                    }
+                } label: {
+                    Label(calendarFilter.title, systemImage: calendarFilter.systemImage)
+                        .font(.caption.weight(.bold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(AppPalette.softSurface, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Calendar filter")
+
+                Spacer(minLength: 8)
+
+                Button {
+                    HapticEngine.select()
+                    jumpToNextActivity()
+                } label: {
+                    Label("Next busy day", systemImage: "forward.end.fill")
+                        .font(.caption.weight(.bold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(AppPalette.cardBackground, in: Capsule())
+                        .overlay(Capsule().strokeBorder(AppPalette.border.opacity(0.65), lineWidth: 0.8))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(AppPalette.accent)
+                .accessibilityLabel("Jump to next matching day")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var calendarModeContent: some View {
+        switch calendarScope {
+        case .month:
+            calendarGrid
+        case .week:
+            calendarWeekBoard
+        case .agenda:
+            calendarAgendaBoard
+        }
+    }
+
     private var calendarGrid: some View {
         VStack(spacing: 10) {
             LazyVGrid(columns: Self.weekColumns, spacing: 8) {
@@ -209,6 +274,69 @@ struct MeetingCalendarView: View {
         .accessibilityIdentifier("calendar.monthGrid")
     }
 
+    private var calendarWeekBoard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            agendaSectionTitle("Week at a glance", count: snapshot.selectedWeekAgendaDays.filter { calendarFilter.matches($0) }.count)
+            ForEach(snapshot.selectedWeekAgendaDays) { day in
+                Button {
+                    selectDate(day.date)
+                } label: {
+                    MeetingCalendarAgendaDayRow(
+                        day: day,
+                        filter: calendarFilter,
+                        isSelected: Calendar.current.isDate(day.date, inSameDayAs: selectedDate)
+                    )
+                }
+                .buttonStyle(PressScaleButtonStyle(scale: 0.98))
+            }
+        }
+        .padding(14)
+        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: AppRadius.xl, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.xl, style: .continuous)
+                .strokeBorder(AppPalette.border.opacity(0.6), lineWidth: 0.8)
+        )
+        .appShadow(AppShadow.hairline)
+        .accessibilityIdentifier("calendar.weekBoard")
+    }
+
+    @ViewBuilder
+    private var calendarAgendaBoard: some View {
+        let days = filteredMonthAgendaDays
+        VStack(alignment: .leading, spacing: 10) {
+            agendaSectionTitle("Month agenda", count: days.count)
+            if days.isEmpty {
+                EmptyStateCard(
+                    title: "No matching calendar items",
+                    subtitle: "Try another filter or connect Calendar to pull in scheduled meetings.",
+                    systemImage: calendarFilter.systemImage,
+                    tint: AppPalette.accent
+                )
+            } else {
+                ForEach(days) { day in
+                    Button {
+                        selectDate(day.date)
+                    } label: {
+                        MeetingCalendarAgendaDayRow(
+                            day: day,
+                            filter: calendarFilter,
+                            isSelected: Calendar.current.isDate(day.date, inSameDayAs: selectedDate)
+                        )
+                    }
+                    .buttonStyle(PressScaleButtonStyle(scale: 0.98))
+                }
+            }
+        }
+        .padding(14)
+        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: AppRadius.xl, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.xl, style: .continuous)
+                .strokeBorder(AppPalette.border.opacity(0.6), lineWidth: 0.8)
+        )
+        .appShadow(AppShadow.hairline)
+        .accessibilityIdentifier("calendar.agendaBoard")
+    }
+
     @ViewBuilder
     private var calendarAccessCard: some View {
         if accessState == .notDetermined {
@@ -237,24 +365,27 @@ struct MeetingCalendarView: View {
         }
     }
 
+    @ViewBuilder
     private var selectedDayAgenda: some View {
+        let meetings = filteredSelectedMeetings
+        let events = filteredSelectedEvents
         VStack(alignment: .leading, spacing: 12) {
             EditorialSectionHead(title: selectedDateTitle, titleSize: 22) {
-                EditorialMeta(text: snapshot.selectedSummary)
+                EditorialMeta(text: selectedSummary(meetings: meetings, events: events))
             }
 
-            if snapshot.selectedMeetings.isEmpty && snapshot.selectedEvents.isEmpty {
+            if meetings.isEmpty && events.isEmpty {
                 EmptyStateCard(
-                    title: "No meetings on this day",
-                    subtitle: "Add a note for this date, or connect Calendar to pull in scheduled meetings.",
-                    systemImage: "calendar",
+                    title: "No matching items on this day",
+                    subtitle: emptySelectedDaySubtitle,
+                    systemImage: calendarFilter.systemImage,
                     tint: AppPalette.accent
                 )
             } else {
                 VStack(alignment: .leading, spacing: 10) {
-                    if !snapshot.selectedMeetings.isEmpty {
-                        agendaSectionTitle("Scribeflow notes", count: snapshot.selectedMeetings.count)
-                        ForEach(snapshot.selectedMeetings) { meeting in
+                    if !meetings.isEmpty {
+                        agendaSectionTitle(calendarFilter == .openLoops ? "Open-loop notes" : "Scribeflow notes", count: meetings.count)
+                        ForEach(meetings) { meeting in
                             NavigationLink(value: meeting.id) {
                                 MeetingCalendarMeetingRow(meeting: meeting)
                             }
@@ -262,10 +393,10 @@ struct MeetingCalendarView: View {
                         }
                     }
 
-                    if !snapshot.selectedEvents.isEmpty {
-                        agendaSectionTitle("Calendar events", count: snapshot.selectedEvents.count)
-                            .padding(.top, snapshot.selectedMeetings.isEmpty ? 0 : 8)
-                        ForEach(snapshot.selectedEvents) { event in
+                    if !events.isEmpty {
+                        agendaSectionTitle("Calendar events", count: events.count)
+                            .padding(.top, meetings.isEmpty ? 0 : 8)
+                        ForEach(events) { event in
                             MeetingCalendarEventRow(
                                 event: event,
                                 linkedMeeting: snapshot.linkedMeeting(for: event),
@@ -290,6 +421,36 @@ struct MeetingCalendarView: View {
             .tint(AppPalette.ink)
         }
         .accessibilityIdentifier("calendar.selectedAgenda")
+    }
+
+    private var filteredSelectedMeetings: [Meeting] {
+        calendarFilter.visibleMeetings(from: snapshot.selectedMeetings)
+    }
+
+    private var filteredSelectedEvents: [CalendarEventSnapshot] {
+        calendarFilter.visibleEvents(from: snapshot.selectedEvents)
+    }
+
+    private var filteredMonthAgendaDays: [MeetingCalendarAgendaDay] {
+        snapshot.monthAgendaDays.filter { calendarFilter.matches($0) }
+    }
+
+    private var emptySelectedDaySubtitle: String {
+        switch calendarFilter {
+        case .all:
+            "Add a note for this date, or connect Calendar to pull in scheduled meetings."
+        case .notes:
+            "No Scribeflow notes match this date yet."
+        case .events:
+            "No connected calendar events match this date yet."
+        case .openLoops:
+            "No open action loops are attached to this date."
+        }
+    }
+
+    private func selectedSummary(meetings: [Meeting], events: [CalendarEventSnapshot]) -> String {
+        let total = meetings.count + events.count
+        return total == 0 ? "clear" : "\(total) item\(total == 1 ? "" : "s")"
     }
 
     private var selectedDateTitle: String {
@@ -338,10 +499,14 @@ struct MeetingCalendarView: View {
 
     private func selectDay(_ day: MeetingCalendarDay) {
         HapticEngine.select()
+        selectDate(day.date)
+    }
+
+    private func selectDate(_ date: Date) {
         withAnimation(AppMotion.snappy) {
-            selectedDate = day.date
-            if !day.isInDisplayedMonth {
-                displayedMonth = Self.startOfMonth(for: day.date)
+            selectedDate = Calendar.current.startOfDay(for: date)
+            if !Calendar.current.isDate(date, equalTo: displayedMonth, toGranularity: .month) {
+                displayedMonth = Self.startOfMonth(for: date)
             }
         }
     }
@@ -380,14 +545,18 @@ struct MeetingCalendarView: View {
 
         guard !Task.isCancelled else { return }
         accessState = access
-        calendarEvents = events
+        if calendarEvents != events {
+            calendarEvents = events
+            calendarEventRevision &+= 1
+        }
     }
 
     private func refreshSnapshot(for key: MeetingCalendarSnapshotKey) async {
         let meetings = store.meetings
+        let events = calendarEvents
         let nextSnapshot = await snapshotBuilder.make(
             meetings: meetings,
-            events: key.events,
+            events: events,
             displayedMonth: key.displayedMonth,
             selectedDate: key.selectedDate
         )
@@ -473,8 +642,21 @@ struct MeetingCalendarView: View {
         selectedDate = today
     }
 
+    private func jumpToNextActivity() {
+        let matchingDays = filteredMonthAgendaDays
+        let selectedDay = Calendar.current.startOfDay(for: selectedDate)
+        let nextDay = matchingDays.first { $0.date > selectedDay } ?? matchingDays.first
+
+        guard let nextDay else {
+            toast = ToastItem(message: "No matching calendar items", icon: calendarFilter.systemImage)
+            return
+        }
+
+        selectDate(nextDay.date)
+    }
+
     private func accessibilityLabel(for day: MeetingCalendarDay) -> String {
-        var parts = [day.date.formatted(.dateTime.weekday(.wide).month(.wide).day())]
+        var parts = [day.accessibilityDateLabel]
         if day.noteCount > 0 { parts.append("\(day.noteCount) Scribeflow note\(day.noteCount == 1 ? "" : "s")") }
         if day.eventCount > 0 { parts.append("\(day.eventCount) calendar event\(day.eventCount == 1 ? "" : "s")") }
         if day.hasOpenActions { parts.append("has open actions") }
@@ -516,11 +698,97 @@ struct MeetingCalendarView: View {
     }
 }
 
+private enum CalendarScope: String, CaseIterable, Identifiable {
+    case month
+    case week
+    case agenda
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .month: "Month"
+        case .week: "Week"
+        case .agenda: "Agenda"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .month: "calendar"
+        case .week: "calendar.day.timeline.left"
+        case .agenda: "list.bullet.rectangle"
+        }
+    }
+}
+
+private enum CalendarContentFilter: String, CaseIterable, Identifiable {
+    case all
+    case notes
+    case events
+    case openLoops
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .all: "All"
+        case .notes: "Notes"
+        case .events: "Events"
+        case .openLoops: "Open loops"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .all: "square.grid.2x2"
+        case .notes: "doc.text.fill"
+        case .events: "calendar"
+        case .openLoops: "checklist"
+        }
+    }
+
+    func visibleMeetings(from meetings: [Meeting]) -> [Meeting] {
+        switch self {
+        case .all, .notes:
+            meetings
+        case .events:
+            []
+        case .openLoops:
+            meetings.filter(meetingHasOpenLoops)
+        }
+    }
+
+    func visibleEvents(from events: [CalendarEventSnapshot]) -> [CalendarEventSnapshot] {
+        switch self {
+        case .all, .events:
+            events
+        case .notes, .openLoops:
+            []
+        }
+    }
+
+    func matches(_ day: MeetingCalendarAgendaDay) -> Bool {
+        !visibleMeetings(from: day.meetings).isEmpty || !visibleEvents(from: day.events).isEmpty
+    }
+}
+
+private func meetingOpenLoopCount(_ meeting: Meeting) -> Int {
+    guard meeting.allowsAccountabilityExtraction else { return 0 }
+    return meeting.commitments.reduce(0) { count, commitment in
+        count + (commitment.status == .open || commitment.status == .atRisk ? 1 : 0)
+    }
+}
+
+private func meetingHasOpenLoops(_ meeting: Meeting) -> Bool {
+    meetingOpenLoopCount(meeting) > 0
+}
+
 private struct MeetingCalendarSnapshotKey: Hashable {
     let revision: Int
     let displayedMonth: Date
     let selectedDate: Date
-    let events: [CalendarEventSnapshot]
+    let eventRevision: Int
 }
 
 private actor MeetingCalendarSnapshotBuilder {
@@ -542,6 +810,8 @@ private actor MeetingCalendarSnapshotBuilder {
 private struct MeetingCalendarSnapshot {
     var days: [MeetingCalendarDay] = []
     var selectedWeekDays: [MeetingCalendarDay] = []
+    var selectedWeekAgendaDays: [MeetingCalendarAgendaDay] = []
+    var monthAgendaDays: [MeetingCalendarAgendaDay] = []
     var selectedMeetings: [Meeting] = []
     var selectedEvents: [CalendarEventSnapshot] = []
     var linkedMeetingsByEventID: [String: Meeting] = [:]
@@ -577,14 +847,16 @@ private struct MeetingCalendarSnapshot {
             linkedMeetingsByEventID[eventID] = meeting
         }
         selectedOpenLoopCount = selectedMeetings.reduce(0) { total, meeting in
-            total + meeting.commitments.filter { $0.status == .open || $0.status == .atRisk }.count
+            total + meetingOpenLoopCount(meeting)
         }
 
         if let monthInterval {
-            monthMeetingCount = meetings.filter {
-                monthInterval.contains($0.calendarStartDate ?? $0.when)
-            }.count
-            monthEventCount = events.filter { monthInterval.contains($0.startDate) }.count
+            for meeting in meetings where monthInterval.contains(meeting.calendarStartDate ?? meeting.when) {
+                monthMeetingCount += 1
+            }
+            for event in events where monthInterval.contains(event.startDate) {
+                monthEventCount += 1
+            }
         }
 
         days = (0..<42).compactMap { offset -> MeetingCalendarDay? in
@@ -592,24 +864,49 @@ private struct MeetingCalendarSnapshot {
             let day = calendar.startOfDay(for: date)
             let dayMeetings = meetingsByDay[day] ?? []
             let dayEvents = eventsByDay[day] ?? []
+            let openLoopCount = dayMeetings.reduce(0) { total, meeting in
+                total + meetingOpenLoopCount(meeting)
+            }
             return MeetingCalendarDay(
                 date: day,
                 dayNumber: calendar.component(.day, from: day),
+                weekdayLabel: day.formatted(.dateTime.weekday(.abbreviated)),
+                agendaTitleLabel: day.formatted(.dateTime.weekday(.wide).month(.abbreviated).day()),
+                accessibilityDateLabel: day.formatted(.dateTime.weekday(.wide).month(.wide).day()),
                 isInDisplayedMonth: calendar.isDate(day, equalTo: monthStart, toGranularity: .month),
                 isToday: calendar.isDateInToday(day),
                 isSelected: calendar.isDate(day, inSameDayAs: selectedDay),
                 noteCount: dayMeetings.count,
                 eventCount: dayEvents.count,
-                hasOpenActions: dayMeetings.contains { meeting in
-                    meeting.commitments.contains { $0.status == .open || $0.status == .atRisk }
-                }
+                openLoopCount: openLoopCount
+            )
+        }
+
+        let agendaDays = days.map { day in
+            MeetingCalendarAgendaDay(
+                date: day.date,
+                dayNumberLabel: "\(day.dayNumber)",
+                weekdayLabel: day.weekdayLabel,
+                titleLabel: day.agendaTitleLabel,
+                isToday: day.isToday,
+                meetings: (meetingsByDay[day.date] ?? []).sorted(by: Self.sortMeetingsByTime),
+                events: (eventsByDay[day.date] ?? []).sorted { $0.startDate < $1.startDate },
+                openLoopCount: day.openLoopCount
             )
         }
 
         if let selectedWeek = calendar.dateInterval(of: .weekOfYear, for: selectedDay) {
             selectedWeekDays = days.filter { selectedWeek.contains($0.date) }
+            selectedWeekAgendaDays = agendaDays.filter { selectedWeek.contains($0.date) }
         } else {
             selectedWeekDays = Array(days.prefix(7))
+            selectedWeekAgendaDays = Array(agendaDays.prefix(7))
+        }
+
+        if let monthInterval {
+            monthAgendaDays = agendaDays.filter { day in
+                monthInterval.contains(day.date) && day.hasAnyActivity
+            }
         }
     }
 
@@ -643,16 +940,37 @@ private struct MeetingCalendarDay: Identifiable, Hashable {
     var id: Date { date }
     let date: Date
     let dayNumber: Int
+    let weekdayLabel: String
+    let agendaTitleLabel: String
+    let accessibilityDateLabel: String
     let isInDisplayedMonth: Bool
     let isToday: Bool
     let isSelected: Bool
     let noteCount: Int
     let eventCount: Int
-    let hasOpenActions: Bool
+    let openLoopCount: Int
+
+    var hasOpenActions: Bool { openLoopCount > 0 }
 
     var hasAnyActivity: Bool {
         noteCount > 0 || eventCount > 0 || hasOpenActions
     }
+}
+
+private struct MeetingCalendarAgendaDay: Identifiable, Hashable {
+    var id: Date { date }
+    let date: Date
+    let dayNumberLabel: String
+    let weekdayLabel: String
+    let titleLabel: String
+    let isToday: Bool
+    let meetings: [Meeting]
+    let events: [CalendarEventSnapshot]
+    let openLoopCount: Int
+
+    var noteCount: Int { meetings.count }
+    var eventCount: Int { events.count }
+    var hasAnyActivity: Bool { noteCount > 0 || eventCount > 0 || openLoopCount > 0 }
 }
 
 private struct MeetingCalendarDayCell: View {
@@ -720,6 +1038,100 @@ private struct MeetingCalendarDayCell: View {
     }
 }
 
+private struct MeetingCalendarAgendaDayRow: View {
+    let day: MeetingCalendarAgendaDay
+    let filter: CalendarContentFilter
+    let isSelected: Bool
+
+    private var visibleMeetings: [Meeting] {
+        filter.visibleMeetings(from: day.meetings)
+    }
+
+    private var visibleEvents: [CalendarEventSnapshot] {
+        filter.visibleEvents(from: day.events)
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(spacing: 3) {
+                Text(day.dayNumberLabel)
+                    .font(.title3.weight(.bold))
+                    .foregroundStyle(isSelected ? .white : AppPalette.ink)
+                Text(day.weekdayLabel)
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(isSelected ? .white.opacity(0.72) : AppPalette.tertiaryInk)
+            }
+            .frame(width: 48, height: 54)
+            .background(isSelected ? AppPalette.ink : AppPalette.softSurface, in: RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    Text(day.titleLabel)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(AppPalette.ink)
+                    if day.isToday {
+                        EditorialMeta(text: "Today")
+                    }
+                }
+                Text(primarySummary)
+                    .font(.caption)
+                    .foregroundStyle(AppPalette.secondaryInk)
+                    .lineLimit(1)
+
+                HStack(spacing: 6) {
+                    if !visibleMeetings.isEmpty {
+                        countChip("\(visibleMeetings.count)", "Notes", tint: AppPalette.accent)
+                    }
+                    if !visibleEvents.isEmpty {
+                        countChip("\(visibleEvents.count)", "Events", tint: AppPalette.gold)
+                    }
+                    if day.openLoopCount > 0 && filter != .events {
+                        countChip("\(day.openLoopCount)", "Open", tint: AppPalette.coral)
+                    }
+                    if visibleMeetings.isEmpty && visibleEvents.isEmpty {
+                        countChip("0", "Clear", tint: AppPalette.tertiaryInk)
+                    }
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(AppPalette.tertiaryInk)
+        }
+        .padding(12)
+        .background(AppPalette.cardBackground.opacity(isSelected ? 1 : 0.72), in: RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
+                .strokeBorder(isSelected ? AppPalette.accent.opacity(0.45) : AppPalette.border.opacity(0.45), lineWidth: 0.8)
+        )
+    }
+
+    private var primarySummary: String {
+        if let meeting = visibleMeetings.first {
+            return meeting.title
+        }
+        if let event = visibleEvents.first {
+            return event.title
+        }
+        return "No matching items"
+    }
+
+    private func countChip(_ value: String, _ label: String, tint: Color) -> some View {
+        HStack(spacing: 4) {
+            Text(value)
+                .font(.caption2.weight(.heavy))
+            Text(label)
+                .font(.caption2.weight(.bold))
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background(tint.opacity(0.10), in: Capsule())
+    }
+}
+
 private struct MeetingCalendarMeetingRow: View {
     let meeting: Meeting
 
@@ -753,7 +1165,7 @@ private struct MeetingCalendarMeetingRow: View {
                     if meeting.isPinned {
                         chip("Pinned", icon: "pin.fill", tint: AppPalette.gold)
                     }
-                    let open = meeting.commitments.filter { $0.status == .open || $0.status == .atRisk }.count
+                    let open = meetingOpenLoopCount(meeting)
                     if open > 0 {
                         chip("\(open) open", icon: "checklist", tint: AppPalette.coral)
                     }

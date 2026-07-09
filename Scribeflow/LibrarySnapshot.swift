@@ -90,7 +90,7 @@ actor LibrarySnapshotBuilder {
         case .all:
             meetings
         case .followUp:
-            meetings.filter { $0.status != .shared }
+            meetings.filter { $0.status != .shared && openLoopCount(for: $0) > 0 }
         case .calls:
             meetings.filter(\.isCallMeeting)
         case .pinned:
@@ -167,7 +167,15 @@ actor LibrarySnapshotBuilder {
     private func openLoopCount(from meetings: [Meeting]) -> Int {
         meetings
             .filter { $0.status != .shared }
+            .filter { $0.allowsAccountabilityExtraction }
             .flatMap(\.commitments)
+            .filter { $0.status == .open || $0.status == .atRisk }
+            .count
+    }
+
+    private func openLoopCount(for meeting: Meeting) -> Int {
+        guard meeting.allowsAccountabilityExtraction else { return 0 }
+        return meeting.commitments
             .filter { $0.status == .open || $0.status == .atRisk }
             .count
     }

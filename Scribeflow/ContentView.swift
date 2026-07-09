@@ -2,7 +2,7 @@ import CoreSpotlight
 import SwiftUI
 
 /// Tracks how many detail views are pushed across the tab stacks, so the
-/// floating dock can hide while you're reading a meeting and reappear at root.
+/// bottom dock can hide while you're reading a meeting and reappear at root.
 @MainActor @Observable final class NavChrome {
     var detailDepth = 0
 }
@@ -197,90 +197,92 @@ struct ContentView: View {
         }
     }
 
-    /// Reserves bottom space so scroll content (and pushed detail views) clear
-    /// the floating dock — the dock is an overlay, so each tab must inset itself.
-    private var dockClearance: some View {
-        Color.clear.frame(height: navChrome.detailDepth == 0 ? AppDockMetrics.scrollClearance : 0)
+    @ViewBuilder
+    private var rootDock: some View {
+        if navChrome.detailDepth == 0 {
+            RootTabBar(
+                items: [
+                    RootTabBarItem(id: RootTab.home.rawValue, label: "Today", systemImage: "house"),
+                    RootTabBarItem(id: RootTab.library.rawValue, label: "Library", systemImage: "rectangle.stack"),
+                    RootTabBarItem(id: RootTab.tasks.rawValue, label: "Tasks", systemImage: "checklist", badge: openActionItemCount),
+                    RootTabBarItem(id: RootTab.calendar.rawValue, label: "Calendar", systemImage: "calendar"),
+                    RootTabBarItem(id: RootTab.ask.rawValue, label: "Ask", systemImage: "magnifyingglass")
+                ],
+                selection: Binding(
+                    get: { selectedTab.rawValue },
+                    set: { newValue in
+                        if let tab = RootTab(rawValue: newValue) {
+                            selectedTab = tab
+                        }
+                    }
+                )
+            )
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
     }
 
     private var mainTabs: some View {
-        TabView(selection: $selectedTab) {
-            NavigationStack {
-                TodayView(
-                    selectedMeetingID: $selectedMeetingID,
-                    onCapture: { mode in captureMode = mode },
-                    onSettingsTap: { showingSettings = true },
-                    onAskTap: { activateRootTab(.ask) },
-                    onTasksTap: { activateRootTab(.tasks) },
-                    toast: $toast
-                )
-                .toolbar(.hidden, for: .tabBar)
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) { dockClearance }
-            .tag(RootTab.home)
-
-            NavigationStack {
-                MeetingsView(
-                    selectedMeetingID: $selectedMeetingID,
-                    onAskTap: { activateRootTab(.ask) },
-                    toast: $toast
-                )
-                .toolbar(.hidden, for: .tabBar)
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) { dockClearance }
-            .tag(RootTab.library)
-
-            NavigationStack {
-                ActionItemsView(
-                    selectedMeetingID: $selectedMeetingID,
-                    toast: $toast
-                )
-                .toolbar(.hidden, for: .tabBar)
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) { dockClearance }
-            .tag(RootTab.tasks)
-
-            NavigationStack {
-                MeetingCalendarView(
-                    selectedMeetingID: $selectedMeetingID,
-                    onCapture: { mode in captureMode = mode },
-                    toast: $toast
-                )
-                .toolbar(.hidden, for: .tabBar)
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) { dockClearance }
-            .tag(RootTab.calendar)
-
-            NavigationStack {
-                AskView()
-                    .toolbar(.hidden, for: .tabBar)
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) { dockClearance }
-            .tag(RootTab.ask)
-        }
-        .tint(AppPalette.accent)
-        .overlay(alignment: .bottom) {
-            if navChrome.detailDepth == 0 {
-                FloatingTabDock(
-                    items: [
-                        FloatingTabDockItem(id: RootTab.home.rawValue, label: "Today", systemImage: "sparkles"),
-                        FloatingTabDockItem(id: RootTab.library.rawValue, label: "Library", systemImage: "rectangle.stack"),
-                        FloatingTabDockItem(id: RootTab.tasks.rawValue, label: "Tasks", systemImage: "checklist", badge: openActionItemCount),
-                        FloatingTabDockItem(id: RootTab.calendar.rawValue, label: "Calendar", systemImage: "calendar"),
-                        FloatingTabDockItem(id: RootTab.ask.rawValue, label: "Ask", systemImage: "sparkle.magnifyingglass")
-                    ],
-                    selection: Binding(
-                        get: { selectedTab.rawValue },
-                        set: { newValue in
-                            if let tab = RootTab(rawValue: newValue) {
-                                selectedTab = tab
-                            }
-                        }
+        VStack(spacing: 0) {
+            TabView(selection: $selectedTab) {
+                NavigationStack {
+                    TodayView(
+                        selectedMeetingID: $selectedMeetingID,
+                        onCapture: { mode in captureMode = mode },
+                        onSettingsTap: { showingSettings = true },
+                        onAskTap: { activateRootTab(.ask) },
+                        onTasksTap: { activateRootTab(.tasks) },
+                        toast: $toast
                     )
-                )
+                    .toolbar(.hidden, for: .tabBar)
+                }
+                .tag(RootTab.home)
+
+                NavigationStack {
+                    MeetingsView(
+                        selectedMeetingID: $selectedMeetingID,
+                        onAskTap: { activateRootTab(.ask) },
+                        toast: $toast
+                    )
+                    .toolbar(.hidden, for: .tabBar)
+                }
+                .tag(RootTab.library)
+
+                NavigationStack {
+                    ActionItemsView(
+                        selectedMeetingID: $selectedMeetingID,
+                        toast: $toast
+                    )
+                    .toolbar(.hidden, for: .tabBar)
+                }
+                .tag(RootTab.tasks)
+
+                NavigationStack {
+                    MeetingCalendarView(
+                        selectedMeetingID: $selectedMeetingID,
+                        onCapture: { mode in captureMode = mode },
+                        toast: $toast
+                    )
+                    .toolbar(.hidden, for: .tabBar)
+                }
+                .tag(RootTab.calendar)
+
+                NavigationStack {
+                    AskView()
+                        .toolbar(.hidden, for: .tabBar)
+                }
+                .tag(RootTab.ask)
+            }
+            .toolbar(.hidden, for: .tabBar)
+            .tint(AppPalette.accent)
+
+            if navChrome.detailDepth == 0 {
+                RootDockChrome {
+                    rootDock
+                }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+        .background(AppPalette.background.ignoresSafeArea())
         .animation(AppMotion.smooth, value: navChrome.detailDepth)
         .modifier(ScribeflowChrome())
     }
@@ -329,7 +331,8 @@ struct ContentView: View {
 
     private func refreshRootChromeSnapshot() {
         openActionItemCount = store.meetings.reduce(0) { partial, meeting in
-            partial + meeting.commitments.reduce(0) { total, commitment in
+            guard !meeting.isPersonalCapture else { return partial }
+            return partial + meeting.commitments.reduce(0) { total, commitment in
                 total + (commitment.status == .open || commitment.status == .atRisk ? 1 : 0)
             }
         }

@@ -83,11 +83,10 @@ struct AskView: View {
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            // Lift the composer above the floating tab dock at rest. When the
-            // composer is focused the keyboard covers the dock, so drop the
-            // offset and let keyboard-avoidance pin the bar to the keyboard.
+            // The root dock reserves the bottom safe-area inset, so the
+            // composer only needs a little breathing room at rest.
             inputBar
-                .padding(.bottom, composerFocused ? 0 : 76)
+                .padding(.bottom, composerFocused ? 0 : AppSpacing.xs)
                 .animation(AppMotion.smooth, value: composerFocused)
         }
         .background(AppPalette.background.ignoresSafeArea())
@@ -177,7 +176,8 @@ struct AskView: View {
         if let latest = store.meetings.sorted(by: Meeting.sortDescending).first(where: { !$0.title.isEmpty }) {
             out.append(("doc.text.magnifyingglass", "Summarize \(latest.title)"))
         }
-        let mineOwned = store.meetings.flatMap { $0.commitments }.contains { c in
+        let accountabilityMeetings = store.meetings.filter { $0.allowsAccountabilityExtraction }
+        let mineOwned = accountabilityMeetings.flatMap { $0.commitments }.contains { c in
             guard c.status == .open || c.status == .atRisk else { return false }
             let o = c.owner.lowercased()
             return o.contains("you") || o == "me" || o == "i"
@@ -187,7 +187,9 @@ struct AskView: View {
             out.append(("pin.fill", "What's the latest from my pinned meetings?"))
         }
         out.append(("checkmark.seal.fill", "What decisions did we make this week?"))
-        out.append(("exclamationmark.triangle.fill", "What's at risk across every meeting?"))
+        if !accountabilityMeetings.isEmpty {
+            out.append(("exclamationmark.triangle.fill", "What's at risk across every meeting?"))
+        }
         return Array(out.prefix(5))
     }
 
@@ -902,4 +904,3 @@ struct AskCitationsCard: View {
         }
     }
 }
-

@@ -434,6 +434,10 @@ final class MeetingStore {
     }
 
     func signals(for meeting: Meeting) -> MeetingSignals {
+        if !meeting.allowsMeetingSignalExtraction {
+            return MeetingSignals(decisions: [], actions: [], risks: [], questions: [])
+        }
+
         // The on-device model's brief wins when present — it comprehends context
         // and fixes typos, where the heuristic only matches keywords.
         if let brief = meeting.aiBrief {
@@ -480,6 +484,7 @@ final class MeetingStore {
         if _openLoopsCache == nil {
             _openLoopsCache = recentMeetings
                 .filter { $0.status != .shared }
+                .filter { !$0.isPersonalCapture }
                 .flatMap { meeting -> [OpenLoop] in
                     let actionLoops = meeting.commitments
                         .filter { $0.status == .open || $0.status == .atRisk }
@@ -727,6 +732,10 @@ final class MeetingStore {
     func scoreAndSave(for id: Meeting.ID) {
         guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
         let meeting = meetings[index]
+        guard meeting.allowsAccountabilityExtraction else {
+            meetings[index].score = nil
+            return
+        }
         // Only score a meeting that has something to score. The scorer baselines
         // every dimension at 50, so a thin or empty note would otherwise show a
         // meaningless mid-range number. No substance → no score (UI shows "—").
@@ -752,6 +761,7 @@ final class MeetingStore {
     @discardableResult
     func resolveFirstOpenCommitment(in meetingID: Meeting.ID) -> Bool {
         guard let meeting = meetings.first(where: { $0.id == meetingID }) else { return false }
+        guard meeting.allowsAccountabilityExtraction else { return false }
         guard let commitment = meeting.commitments.first(where: { $0.status == .open || $0.status == .atRisk }) else {
             return false
         }
@@ -988,7 +998,9 @@ final class MeetingStore {
             lines.append("• \(section.title)")
             lines.append(contentsOf: section.bullets.map { "  · \($0)" })
         }
-        let openActions = meeting.commitments.filter { $0.status == .open }
+        let openActions = meeting.allowsAccountabilityExtraction
+            ? meeting.commitments.filter { $0.status == .open }
+            : []
         if !openActions.isEmpty {
             lines.append("")
             lines.append("Action Items:")
@@ -1624,10 +1636,16 @@ final class MeetingStore {
                     focus: meeting.contextMode.aiHint
                 )
                 guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+                var brief = result.brief
+                if !meeting.allowsMeetingSignalExtraction {
+                    brief.decisions = []
+                    brief.actions = []
+                    brief.risks = []
+                }
                 // Store real content OR an explicit "doesn't make sense" verdict;
                 // an empty-but-sensible result adds nothing over the heuristic.
-                guard !result.brief.isEmpty || !result.brief.makesSense else { return }
-                meetings[index].aiBrief = result.brief
+                guard !brief.isEmpty || !brief.makesSense else { return }
+                meetings[index].aiBrief = brief
                 // Auto-pick the lens when the user hasn't locked one (i.e. still
                 // General) — so the badge and future re-tailoring match the meeting.
                 if meetings[index].contextMode == .general,
@@ -1636,7 +1654,9 @@ final class MeetingStore {
                     meetings[index].contextMode = detected
                 }
                 refreshSummariesIfNeeded(at: index)
-                meetings[index].score = MeetingScorer.score(for: meetings[index])
+                meetings[index].score = meetings[index].allowsAccountabilityExtraction
+                    ? MeetingScorer.score(for: meetings[index])
+                    : nil
             } catch {
                 // Heuristic stays in charge.
             }
@@ -1725,17 +1745,21 @@ final class MeetingStore {
         // Prefer the model's structured brief; otherwise fall back to the
         // heuristic. Only ever label something a "decision" or "next step" if it
         // really is one — never mislabel note lines or prefill a placeholder.
+        let allowsMeetingSignals = meeting.allowsMeetingSignalExtraction
+        let allowsAccountability = meeting.allowsAccountabilityExtraction
         let decisions: [String]
         let nextSteps: [String]
         let keyPoints: [String]
         if let brief = meeting.aiBrief, !brief.isEmpty {
-            decisions = brief.decisions
-            nextSteps = brief.actions.map(aiActionSentence)
+            decisions = allowsMeetingSignals ? brief.decisions : []
+            nextSteps = allowsAccountability ? brief.actions.map(aiActionSentence) : []
             keyPoints = brief.keyPoints
         } else {
-            decisions = MeetingIntelligenceEngine.decisions(for: meeting, limit: 3)
-            nextSteps = MeetingIntelligenceEngine.structuredActions(for: meeting, limit: 4)
-                .map(MeetingIntelligenceEngine.commitmentSentence)
+            decisions = allowsMeetingSignals ? MeetingIntelligenceEngine.decisions(for: meeting, limit: 3) : []
+            nextSteps = allowsAccountability
+                ? MeetingIntelligenceEngine.structuredActions(for: meeting, limit: 4)
+                    .map(MeetingIntelligenceEngine.commitmentSentence)
+                : []
             keyPoints = MeetingIntelligenceEngine.keyPoints(for: meeting, limit: 5)
         }
 
@@ -2059,6 +2083,9 @@ final class MeetingStore {
     private func generatedCommitments(for meeting: Meeting) -> [Commitment] {
         // Nonsense verdict → no commitments invented from gibberish.
         if let brief = meeting.aiBrief, !brief.makesSense { return [] }
+        // Personal captures are notes, not accountability records. Keep them
+        // searchable and summarizable without turning casual writing into Tasks.
+        guard meeting.allowsAccountabilityExtraction else { return [] }
         // Prefer the model's action items when it has processed this meeting.
         if let brief = meeting.aiBrief, !brief.actions.isEmpty {
             return brief.actions.map { a in
@@ -2128,6 +2155,7 @@ final class MeetingStore {
         var latestByFingerprint: [String: (meetingID: Meeting.ID, commitmentID: Commitment.ID)] = [:]
 
         for meeting in meetings.sorted(by: Meeting.sortDescending).reversed() {
+            guard meeting.allowsAccountabilityExtraction else { continue }
             for commitment in meeting.commitments {
                 let fingerprint = normalizedFingerprint(commitment.statement)
                 guard !fingerprint.isEmpty else { continue }
@@ -2139,6 +2167,7 @@ final class MeetingStore {
         var changed = false
 
         for meetingIndex in updatedMeetings.indices {
+            guard updatedMeetings[meetingIndex].allowsAccountabilityExtraction else { continue }
             for commitmentIndex in updatedMeetings[meetingIndex].commitments.indices {
                 let commitment = updatedMeetings[meetingIndex].commitments[commitmentIndex]
                 let fingerprint = normalizedFingerprint(commitment.statement)
@@ -2184,11 +2213,25 @@ final class MeetingStore {
             ? "- No safe bullets available yet."
             : noteLines.prefix(format == .execUpdate ? 4 : 6).joined(separator: "\n")
 
-        let commitmentsBlock = meeting.commitments
-            .filter { $0.status != .superseded || format != .clientRecap }
-            .prefix(4)
-            .map { "- \($0.formattedLine)" }
-            .joined(separator: "\n")
+        let commitmentsBlock = meeting.allowsAccountabilityExtraction
+            ? meeting.commitments
+                .filter { $0.status != .superseded || format != .clientRecap }
+                .prefix(4)
+                .map { "- \($0.formattedLine)" }
+                .joined(separator: "\n")
+            : ""
+        let emptyCommitmentsLine = meeting.allowsAccountabilityExtraction
+            ? "- No commitments captured."
+            : "- Personal note. No meeting tasks were extracted."
+        let emptyNextStepsLine = meeting.allowsAccountabilityExtraction
+            ? "- We'll confirm the next step in writing."
+            : "- Personal note. No client next steps were extracted."
+        let emptyFollowThroughLine = meeting.allowsAccountabilityExtraction
+            ? "- No executive follow-through captured yet."
+            : "- Personal note. No meeting follow-through was extracted."
+        let emptyActionItemsLine = meeting.allowsAccountabilityExtraction
+            ? "- No action items captured."
+            : "- Personal note. No action items were extracted."
 
         let transcriptBlock = includeTranscript
             ? meeting.transcript.prefix(3).map { "- \($0.speaker): \($0.text)" }.joined(separator: "\n")
@@ -2210,7 +2253,7 @@ final class MeetingStore {
             \(notesBlock)
 
             Commitments:
-            \(commitmentsBlock.isEmpty ? "- No commitments captured." : commitmentsBlock)\(privateNoteFooter)
+            \(commitmentsBlock.isEmpty ? emptyCommitmentsLine : commitmentsBlock)\(privateNoteFooter)
             \(transcriptBlock.isEmpty ? "" : "\nTranscript context:\n\(transcriptBlock)")
             """
         case .clientRecap:
@@ -2224,7 +2267,7 @@ final class MeetingStore {
             \(notesBlock)
 
             Next steps:
-            \(commitmentsBlock.isEmpty ? "- We’ll confirm the next step in writing." : commitmentsBlock)
+            \(commitmentsBlock.isEmpty ? emptyNextStepsLine : commitmentsBlock)
 
             Best,
             """
@@ -2238,7 +2281,7 @@ final class MeetingStore {
             \(notesBlock)
 
             Follow-through:
-            \(commitmentsBlock.isEmpty ? "- No executive follow-through captured yet." : commitmentsBlock)
+            \(commitmentsBlock.isEmpty ? emptyFollowThroughLine : commitmentsBlock)
             """
         case .markdown:
             let dateLine = ISO8601DateFormatter().string(from: meeting.when)
@@ -2258,7 +2301,7 @@ final class MeetingStore {
 
             ## Action items
 
-            \(commitmentsBlock.isEmpty ? "- No action items captured." : commitmentsBlock)\(transcriptSection)
+            \(commitmentsBlock.isEmpty ? emptyActionItemsLine : commitmentsBlock)\(transcriptSection)
             """
         }
     }
@@ -2426,6 +2469,9 @@ final class MeetingStore {
         }
 
         if lowerPrompt.contains("action") {
+            if meeting.isPersonalCapture {
+                return "- This is saved as a personal note, so Scribeflow won't turn it into meeting tasks unless you move it into a meeting context."
+            }
             let actions = MeetingIntelligenceEngine.structuredActions(for: meeting, limit: 6)
             return actions.isEmpty
                 ? "- Capture at least one owner and next step in the notes to generate action items."
@@ -2440,6 +2486,9 @@ final class MeetingStore {
         }
 
         if lowerPrompt.contains("risk") || lowerPrompt.contains("blocker") {
+            if meeting.isPersonalCapture {
+                return "- This is saved as a personal note, so Scribeflow won't label personal writing as meeting risks."
+            }
             let riskLines = signals(for: meeting).risks
 
             if riskLines.isEmpty {
@@ -2450,6 +2499,9 @@ final class MeetingStore {
         }
 
         if lowerPrompt.contains("decision") {
+            if !meeting.allowsMeetingSignalExtraction {
+                return "- This is saved as a personal note, so Scribeflow won't turn it into meeting decisions."
+            }
             let decisions = MeetingIntelligenceEngine.decisions(for: meeting, limit: 4)
 
             if decisions.isEmpty {

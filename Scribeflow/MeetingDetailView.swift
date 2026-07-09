@@ -66,6 +66,7 @@ struct MeetingDetailView: View {
         case .overview:
             return nil
         case .tasks:
+            guard meeting.allowsAccountabilityExtraction else { return nil }
             // Commitments and signal actions are the same extractor now — don't
             // sum them. Open commitments when present, else the live signals.
             let open = meeting.commitments.filter { $0.status == .open || $0.status == .atRisk }.count
@@ -456,16 +457,19 @@ struct MeetingDetailView: View {
     }
 
     private func commitmentsNavRow(_ meeting: Meeting) -> some View {
+        let allowsAccountability = meeting.allowsAccountabilityExtraction
         let open = meeting.commitments.filter { $0.status == .open || $0.status == .atRisk }
-        let preview = open.first?.statement ?? meeting.commitments.first?.statement ?? "No commitments yet."
+        let preview = allowsAccountability
+            ? (open.first?.statement ?? meeting.commitments.first?.statement ?? "No commitments yet.")
+            : "Personal notes stay private and are not treated as tasks."
         return NavigationLink(value: DetailRoute.commitments) {
             detailNavRow(
-                icon: "checklist",
-                tint: AppPalette.coral,
-                title: "Commitments",
+                icon: allowsAccountability ? "checklist" : "lock.doc",
+                tint: allowsAccountability ? AppPalette.coral : AppPalette.accent,
+                title: allowsAccountability ? "Commitments" : "Personal note",
                 subtitle: preview,
-                trailingDigits: open.isEmpty ? nil : "\(open.count)",
-                trailingLabel: "open"
+                trailingDigits: allowsAccountability && !open.isEmpty ? "\(open.count)" : nil,
+                trailingLabel: allowsAccountability ? "open" : nil
             )
         }
         .buttonStyle(PressScaleButtonStyle(scale: 0.985))
@@ -598,7 +602,9 @@ struct MeetingDetailView: View {
             }
             sectionGroup(title: "INTELLIGENCE") {
                 intelligenceNavRow(meeting)
-                scoreNavRow(meeting)
+                if meeting.allowsAccountabilityExtraction {
+                    scoreNavRow(meeting)
+                }
             }
             sectionGroup(title: "PREP") {
                 prepNavRow(meeting)
@@ -706,9 +712,11 @@ struct MeetingDetailView: View {
         let decisions = meetingSignals.decisions.count
         // Commitments and signal actions are the same extractor now, so don't
         // sum them — count commitments when present, else the live signals.
-        let actions = meeting.commitments.isEmpty ? meetingSignals.actions.count : meeting.commitments.count
+        let actions = meeting.allowsAccountabilityExtraction
+            ? (meeting.commitments.isEmpty ? meetingSignals.actions.count : meeting.commitments.count)
+            : 0
         let risks = meetingSignals.risks.count
-        let score = meeting.score?.overall
+        let score = meeting.allowsAccountabilityExtraction ? meeting.score?.overall : nil
         return HStack(spacing: 0) {
             overviewMetaStat("Decisions", "\(decisions)", nil, AppPalette.success)
             overviewStatDivider
@@ -781,32 +789,59 @@ struct MeetingDetailView: View {
 
     @ViewBuilder
     func editorialActions(_ meeting: Meeting) -> some View {
-        let open = meeting.commitments.filter { $0.status == .open || $0.status == .atRisk }
-        let done = meeting.commitments.filter { $0.status == .fulfilled || $0.status == .superseded }
-        // Commitments and signal actions now come from the same extractor, so
-        // only fall back to the live signal read when there are no commitments.
-        let signalActions = (open.isEmpty && done.isEmpty) ? Array(meetingSignals.actions.prefix(4)) : []
-        if !open.isEmpty || !done.isEmpty || !signalActions.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                EditorialSectionHead(title: "Actions", titleSize: 18) {
-                    EditorialMeta(text: "\(open.count) open", tint: AppPalette.coral)
-                }
-                VStack(spacing: 0) {
-                    ForEach(open) { c in
-                        editorialActionRow(c, in: meeting).editorialReveal()
-                        EditorialRule()
+        if meeting.allowsAccountabilityExtraction {
+            let open = meeting.commitments.filter { $0.status == .open || $0.status == .atRisk }
+            let done = meeting.commitments.filter { $0.status == .fulfilled || $0.status == .superseded }
+            // Commitments and signal actions now come from the same extractor, so
+            // only fall back to the live signal read when there are no commitments.
+            let signalActions = (open.isEmpty && done.isEmpty) ? Array(meetingSignals.actions.prefix(4)) : []
+            if !open.isEmpty || !done.isEmpty || !signalActions.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    EditorialSectionHead(title: "Actions", titleSize: 18) {
+                        EditorialMeta(text: "\(open.count) open", tint: AppPalette.coral)
                     }
-                    ForEach(done) { c in
-                        editorialActionRow(c, in: meeting).editorialReveal()
-                        EditorialRule()
-                    }
-                    ForEach(Array(signalActions.enumerated()), id: \.offset) { idx, text in
-                        editorialSignalActionRow(text).editorialReveal()
-                        if idx < signalActions.count - 1 { EditorialRule() }
+                    VStack(spacing: 0) {
+                        ForEach(open) { c in
+                            editorialActionRow(c, in: meeting).editorialReveal()
+                            EditorialRule()
+                        }
+                        ForEach(done) { c in
+                            editorialActionRow(c, in: meeting).editorialReveal()
+                            EditorialRule()
+                        }
+                        ForEach(Array(signalActions.enumerated()), id: \.offset) { idx, text in
+                            editorialSignalActionRow(text).editorialReveal()
+                            if idx < signalActions.count - 1 { EditorialRule() }
+                        }
                     }
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func personalNoteAccountabilityMessage() -> some View {
+        Text("This is saved as a personal note, so Scribeflow keeps the writing as notes instead of turning it into tasks or risks.")
+            .font(.footnote)
+            .foregroundStyle(AppPalette.secondaryInk)
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(AppPalette.cardBackground.opacity(0.92), in: RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func personalNoteTasksEmptyState() -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Personal note")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(AppPalette.ink)
+            Text("No tasks or risks are extracted from personal captures. Move this into a meeting context when you want accountability tracking.")
+                .font(.footnote)
+                .foregroundStyle(AppPalette.secondaryInk)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(AppPalette.cardBackground.opacity(0.92), in: RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous))
     }
 
     private func editorialActionRow(_ c: Commitment, in meeting: Meeting) -> some View {
@@ -950,41 +985,46 @@ struct MeetingDetailView: View {
 
     @ViewBuilder
     private func tasksCanvas(_ meeting: Meeting) -> some View {
-        let open    = meeting.commitments.filter { $0.status == .open }
-        let atRisk  = meeting.commitments.filter { $0.status == .atRisk }
-        let done    = meeting.commitments.filter { $0.status == .fulfilled || $0.status == .superseded }
-        let actions = meetingSignals.actions
+        if !meeting.allowsAccountabilityExtraction {
+            tasksStatusStrip(open: 0, atRisk: 0, done: 0)
+            personalNoteTasksEmptyState()
+        } else {
+            let open    = meeting.commitments.filter { $0.status == .open }
+            let atRisk  = meeting.commitments.filter { $0.status == .atRisk }
+            let done    = meeting.commitments.filter { $0.status == .fulfilled || $0.status == .superseded }
+            let actions = meetingSignals.actions
 
-        tasksStatusStrip(open: open.count, atRisk: atRisk.count, done: done.count)
+            tasksStatusStrip(open: open.count, atRisk: atRisk.count, done: done.count)
 
-        if !atRisk.isEmpty {
-            tasksGroup(title: "AT RISK", tint: AppPalette.coral) {
-                ForEach(atRisk) { commitmentRow($0, in: meeting) }
-            }
-        }
-
-        if !open.isEmpty {
-            tasksGroup(title: "OPEN", tint: AppPalette.accent) {
-                ForEach(open) { commitmentRow($0, in: meeting) }
-            }
-        }
-
-        if !actions.isEmpty {
-            tasksGroup(title: "EXTRACTED FOLLOW-UPS", tint: AppPalette.gold) {
-                ForEach(Array(actions.enumerated()), id: \.offset) { _, action in
-                    actionLineRow(action)
+            if !atRisk.isEmpty {
+                tasksGroup(title: "AT RISK", tint: AppPalette.coral) {
+                    ForEach(atRisk) { commitmentRow($0, in: meeting) }
                 }
             }
-        }
 
-        if !done.isEmpty {
-            tasksGroup(title: "DONE", tint: AppPalette.success) {
-                ForEach(done) { commitmentRow($0, in: meeting) }
+            if !open.isEmpty {
+                tasksGroup(title: "OPEN", tint: AppPalette.accent) {
+                    ForEach(open) { commitmentRow($0, in: meeting) }
+                }
             }
-        }
 
-        if open.isEmpty && atRisk.isEmpty && done.isEmpty && actions.isEmpty {
-            tasksEmptyState
+            if !actions.isEmpty {
+                tasksGroup(title: "EXTRACTED FOLLOW-UPS", tint: AppPalette.gold) {
+                    ForEach(Array(actions.enumerated()), id: \.offset) { _, action in
+                        actionLineRow(action)
+                    }
+                }
+            }
+
+            if !done.isEmpty {
+                tasksGroup(title: "DONE", tint: AppPalette.success) {
+                    ForEach(done) { commitmentRow($0, in: meeting) }
+                }
+            }
+
+            if open.isEmpty && atRisk.isEmpty && done.isEmpty && actions.isEmpty {
+                tasksEmptyState
+            }
         }
     }
 
@@ -1398,7 +1438,7 @@ struct MeetingDetailView: View {
         let subtitle: String
         let trailingDigits: String?
         let trailingLabel: String?
-        if let score = meeting.score {
+        if meeting.allowsAccountabilityExtraction, let score = meeting.score {
             subtitle = score.insight.isEmpty
                 ? "Decisiveness \(score.decisiveness) · Action \(score.actionability)"
                 : score.insight
@@ -1771,7 +1811,9 @@ struct MeetingDetailView: View {
             .padding(.bottom, 16)
 
             if !hasSignals {
-                Text("Add more detail to your notes — Scribeflow will pull out decisions, actions, and risks here.")
+                Text(meeting.allowsAccountabilityExtraction
+                     ? "Add more detail to your notes — Scribeflow will pull out decisions, actions, and risks here."
+                     : "This is saved as a personal note, so Scribeflow keeps it as searchable notes instead of turning it into tasks or risks.")
                     .font(.subheadline)
                     .foregroundStyle(AppPalette.secondaryInk)
                     .padding(.horizontal, 20)
@@ -1821,24 +1863,36 @@ struct MeetingDetailView: View {
 
     private func intelligenceCard(_ meeting: Meeting) -> some View {
         let report = cachedIntelligenceReport ?? store.intelligenceReport(for: meeting)
+        let allowsAccountability = meeting.allowsAccountabilityExtraction
 
-        return SurfaceCard(title: "Meeting intelligence", subtitle: report.headline) {
+        return SurfaceCard(
+            title: allowsAccountability ? "Meeting intelligence" : "Personal note intelligence",
+            subtitle: report.headline
+        ) {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 8) {
                     IntelligencePill(title: "Read", value: report.confidenceLabel, tint: AppPalette.accent)
                     IntelligencePill(title: "Speakers", value: "\(report.speakerSegments.count)", tint: AppPalette.gold)
-                    IntelligencePill(title: "Actions", value: "\(report.actionItems.count)", tint: AppPalette.coral)
+                    if allowsAccountability {
+                        IntelligencePill(title: "Actions", value: "\(report.actionItems.count)", tint: AppPalette.coral)
+                    }
                 }
 
                 intelligenceSection("Smart summary", icon: "sparkles", items: report.suggestedSummary, tint: AppPalette.accent)
-                if report.structuredActionItems.isEmpty {
-                    intelligenceSection("Action items", icon: "arrow.forward.circle.fill", items: report.actionItems, tint: AppPalette.gold)
-                } else {
-                    structuredActionSection(report.structuredActionItems)
+                if allowsAccountability {
+                    if report.structuredActionItems.isEmpty {
+                        intelligenceSection("Action items", icon: "arrow.forward.circle.fill", items: report.actionItems, tint: AppPalette.gold)
+                    } else {
+                        structuredActionSection(report.structuredActionItems)
+                    }
                 }
-                intelligenceSection("Decisions", icon: "checkmark.circle.fill", items: report.decisions, tint: AppPalette.accent)
+                if allowsAccountability {
+                    intelligenceSection("Decisions", icon: "checkmark.circle.fill", items: report.decisions, tint: AppPalette.accent)
+                }
                 intelligenceSection("Open questions", icon: "questionmark.circle.fill", items: report.openQuestions, tint: AppPalette.coral)
-                intelligenceSection("Suggested follow-up", icon: "paperplane.fill", items: report.followUps, tint: AppPalette.ink)
+                if allowsAccountability {
+                    intelligenceSection("Suggested follow-up", icon: "paperplane.fill", items: report.followUps, tint: AppPalette.ink)
+                }
 
                 if !report.speakerSegments.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
@@ -2426,9 +2480,16 @@ struct MeetingDetailView: View {
     }
 
     private func commitmentsCard(_ meeting: Meeting) -> some View {
-        SurfaceCard(title: "Commitments", subtitle: "Track promises, owners, timing, and whether follow-through is still at risk.") {
+        SurfaceCard(
+            title: meeting.allowsAccountabilityExtraction ? "Commitments" : "Personal note",
+            subtitle: meeting.allowsAccountabilityExtraction
+                ? "Track promises, owners, timing, and whether follow-through is still at risk."
+                : "Personal captures stay as notes unless you move them into a meeting context."
+        ) {
             VStack(alignment: .leading, spacing: 12) {
-                if meeting.commitments.isEmpty {
+                if !meeting.allowsAccountabilityExtraction {
+                    personalNoteAccountabilityMessage()
+                } else if meeting.commitments.isEmpty {
                     Text("No commitments were extracted yet. Once the note contains clear promises or next steps, Scribeflow will track them here.")
                         .font(.footnote)
                         .foregroundStyle(AppPalette.secondaryInk)
@@ -3173,9 +3234,10 @@ struct MeetingPresentationSheet: View {
     private var slides: [Slide] {
         var out: [Slide] = [.title, .synopsis]
         if !signals.decisions.isEmpty { out.append(.decisions) }
-        if !meeting.commitments.isEmpty || !signals.actions.isEmpty { out.append(.actions) }
-        if !signals.risks.isEmpty { out.append(.risks) }
-        if meeting.score != nil { out.append(.score) }
+        if meeting.allowsAccountabilityExtraction,
+           (!meeting.commitments.isEmpty || !signals.actions.isEmpty) { out.append(.actions) }
+        if meeting.allowsAccountabilityExtraction, !signals.risks.isEmpty { out.append(.risks) }
+        if meeting.allowsAccountabilityExtraction, meeting.score != nil { out.append(.score) }
         out.append(.end)
         return out
     }
@@ -3525,11 +3587,12 @@ struct MeetingPresentationSheet: View {
     }
 
     private var actionsSlide: some View {
-        let open = meeting.commitments.filter { $0.status == .open || $0.status == .atRisk }
-        let done = meeting.commitments.filter { $0.status == .fulfilled || $0.status == .superseded }
+        let visibleCommitments = meeting.allowsAccountabilityExtraction ? meeting.commitments : []
+        let open = visibleCommitments.filter { $0.status == .open || $0.status == .atRisk }
+        let done = visibleCommitments.filter { $0.status == .fulfilled || $0.status == .superseded }
         let openList = Array(open.prefix(5))
         let doneList = Array(done.prefix(2))
-        let signalList = Array(signals.actions.prefix(3))
+        let signalList = meeting.allowsAccountabilityExtraction ? Array(signals.actions.prefix(3)) : []
         return VStack(alignment: .leading, spacing: 18) {
             HStack(alignment: .firstTextBaseline) {
                 Text("Actions")

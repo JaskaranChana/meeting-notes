@@ -261,7 +261,8 @@ struct EditorialLibraryRow: View {
             .replacingOccurrences(of: "\n", with: " ")
     }
     private var openActions: Int {
-        meeting.commitments.filter { $0.status == .open || $0.status == .atRisk }.count
+        guard meeting.allowsAccountabilityExtraction else { return 0 }
+        return meeting.commitments.filter { $0.status == .open || $0.status == .atRisk }.count
     }
     private var durationLabel: String { meeting.durationMinutes > 0 ? "\(meeting.durationMinutes)m" : "" }
 

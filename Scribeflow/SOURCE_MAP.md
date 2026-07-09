@@ -11,6 +11,7 @@ groups; physical file moves should be done in smaller follow-up refactors.
 ## Core
 
 - `Models.swift` - meeting, transcript, action, auth, and product domain models.
+- `MeetingPurpose.swift` - purpose classification and conservative extraction policy.
 - `MeetingStore.swift` - local persistence, sample data, meeting mutations, export.
 - `AppCore.swift` - shared app services, calendar/reminder helpers, Spotlight, utilities.
 

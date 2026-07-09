@@ -115,7 +115,7 @@ struct MeetingsView: View {
             }
             .padding(.horizontal, 20)
             .padding(.top, 16)
-            .padding(.bottom, 12)
+            .padding(.bottom, AppDockMetrics.scrollEndPadding)
             .readingWidth()
         }
         .refreshable {
@@ -739,7 +739,9 @@ private struct LibraryRowPreview: View {
     private var metaStrip: [String] {
         var out: [String] = []
         if meeting.isPinned { out.append("PINNED") }
-        let openCount = meeting.commitments.filter { $0.status == .open || $0.status == .atRisk }.count
+        let openCount = meeting.allowsAccountabilityExtraction
+            ? meeting.commitments.filter { $0.status == .open || $0.status == .atRisk }.count
+            : 0
         if openCount > 0 { out.append("\(openCount) OPEN") }
         if !meeting.audioRecordings.isEmpty { out.append("AUDIO") }
         if !meeting.attendees.isEmpty { out.append("\(meeting.attendees.count) ATTENDEES") }
@@ -778,8 +780,9 @@ enum LibrarySegment: String, CaseIterable, Identifiable {
         case .all:     return true
         case .pinned:  return m.isPinned
         case .audio:   return !m.audioRecordings.isEmpty
-        case .actions: return !m.commitments.isEmpty
+        case .actions: return m.allowsAccountabilityExtraction && !m.commitments.isEmpty
         case .mine:
+            guard m.allowsAccountabilityExtraction else { return false }
             return m.commitments.contains { c in
                 guard c.status == .open || c.status == .atRisk else { return false }
                 let o = c.owner.lowercased()

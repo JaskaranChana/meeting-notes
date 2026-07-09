@@ -607,11 +607,13 @@ func meetingDigestMarkdown(_ m: Meeting, signals: MeetingSignals) -> String {
         for d in signals.decisions { lines.append("- \(d)") }
     }
 
-    let openCs = m.commitments.filter { $0.status == .open || $0.status == .atRisk }
-    let doneCs = m.commitments.filter { $0.status == .fulfilled || $0.status == .superseded }
+    let visibleCommitments = m.allowsAccountabilityExtraction ? m.commitments : []
+    let visibleSignalActions = m.allowsAccountabilityExtraction ? signals.actions : []
+    let openCs = visibleCommitments.filter { $0.status == .open || $0.status == .atRisk }
+    let doneCs = visibleCommitments.filter { $0.status == .fulfilled || $0.status == .superseded }
     // Commitments and signal actions are the same extractor — only fall back to
     // signal actions when there are no commitments, so nothing is listed twice.
-    let signalActions = (openCs.isEmpty && doneCs.isEmpty) ? signals.actions : []
+    let signalActions = (openCs.isEmpty && doneCs.isEmpty) ? visibleSignalActions : []
     if !openCs.isEmpty || !doneCs.isEmpty || !signalActions.isEmpty {
         lines.append("")
         lines.append("## Actions")
@@ -633,14 +635,14 @@ func meetingDigestMarkdown(_ m: Meeting, signals: MeetingSignals) -> String {
         for q in signals.questions { lines.append("- \(q)") }
     }
 
-    if !signals.risks.isEmpty {
+    if m.allowsAccountabilityExtraction && !signals.risks.isEmpty {
         lines.append("")
         lines.append("## Risks")
         for r in signals.risks { lines.append("- \(r)") }
     }
 
     // Meeting-type-specific sections the model chose (standup Done/Blocked, …).
-    for section in m.aiBrief?.sections ?? [] where !section.items.isEmpty {
+    for section in m.aiBrief?.sections ?? [] where m.allowsAccountabilityExtraction && !section.items.isEmpty {
         lines.append("")
         lines.append("## \(section.heading)")
         for item in section.items { lines.append("- \(item)") }

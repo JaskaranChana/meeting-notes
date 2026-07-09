@@ -1512,6 +1512,7 @@ enum MeetingCopilot {
         guard !related.isEmpty else { return [] }
         var out: [CopilotSignal] = []
         for meeting in related {
+            guard meeting.allowsAccountabilityExtraction else { continue }
             for c in meeting.commitments where c.status == .open || c.status == .atRisk {
                 let detail = [ownerLabel(c.owner), meeting.title]
                     .filter { !$0.isEmpty }
@@ -1529,6 +1530,7 @@ enum MeetingCopilot {
         guard !related.isEmpty else { return [] }
         var out: [CopilotSignal] = []
         for meeting in related {
+            guard meeting.allowsAccountabilityExtraction else { continue }
             for c in meeting.commitments
             where (c.status == .open || c.status == .atRisk) && !isSelf(c.owner) {
                 out.append(CopilotSignal(kind: .ask, text: question(from: c.statement), detail: ownerLabel(c.owner)))

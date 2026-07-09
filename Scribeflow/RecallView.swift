@@ -244,16 +244,25 @@ struct SourceCitedChatView: View {
     private func fallbackAnswer(for question: String) -> String {
         let q = question.lowercased()
         if q.contains("decided") || q.contains("decision") {
+            guard meeting.allowsAccountabilityExtraction else {
+                return "This is saved as a personal note, so Scribeflow is keeping it as notes instead of meeting decisions."
+            }
             let decisions = meeting.commitments.filter { $0.status != .superseded }.prefix(3)
             if decisions.isEmpty { return "No clear decisions were recorded in this meeting." }
             return "Decisions made:\n" + decisions.map { "• \($0.statement)" }.joined(separator: "\n")
         }
         if q.contains("action") || q.contains("next") {
+            guard meeting.allowsAccountabilityExtraction else {
+                return "This is saved as a personal note, so Scribeflow won't turn it into meeting action items."
+            }
             let actions = meeting.commitments.filter { $0.status == .open }.prefix(4)
             if actions.isEmpty { return "No open action items found in this meeting." }
             return "Open actions:\n" + actions.map { "• \($0.statement) — \($0.owner)" }.joined(separator: "\n")
         }
         if q.contains("risk") || q.contains("concern") {
+            guard meeting.allowsAccountabilityExtraction else {
+                return "This is saved as a personal note, so Scribeflow won't label personal writing as meeting risks."
+            }
             return "Review the transcript above for risks and concerns raised in this meeting."
         }
         return "Based on the notes for \(meeting.title): \(meeting.objective)"
@@ -362,44 +371,64 @@ private struct ChatBubble: View {
 struct MeetingScoreCard: View {
     let meeting: Meeting
 
-    private var score: MeetingScore {
-        meeting.score ?? MeetingScorer.score(for: meeting)
+    private var score: MeetingScore? {
+        guard meeting.allowsAccountabilityExtraction else { return nil }
+        return meeting.score ?? MeetingScorer.score(for: meeting)
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 6) {
-                Image(systemName: "chart.bar.fill")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(scoreColor(score.overall))
-                Text("MEETING QUALITY")
+        if let score {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 6) {
+                    Image(systemName: "chart.bar.fill")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(scoreColor(score.overall))
+                    Text("MEETING QUALITY")
+                        .font(.caption.weight(.bold))
+                        .kerning(1.3)
+                        .foregroundStyle(AppPalette.secondaryInk)
+                    Spacer()
+                    scoreRing(score)
+                }
+
+                HStack(spacing: 12) {
+                    scorePill(label: "Clarity", value: score.clarity)
+                    scorePill(label: "Decisions", value: score.decisiveness)
+                    scorePill(label: "Actions", value: score.actionability)
+                }
+
+                Text(score.insight)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(AppPalette.secondaryInk)
+                    .padding(.top, 2)
+            }
+            .padding(16)
+            .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(AppPalette.border.opacity(0.5), lineWidth: 0.8)
+            )
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("PERSONAL NOTE")
                     .font(.caption.weight(.bold))
                     .kerning(1.3)
                     .foregroundStyle(AppPalette.secondaryInk)
-                Spacer()
-                scoreRing
+                Text("Scribeflow keeps personal captures as notes instead of scoring them like meetings.")
+                    .font(.subheadline)
+                    .foregroundStyle(AppPalette.secondaryInk)
             }
-
-            HStack(spacing: 12) {
-                scorePill(label: "Clarity", value: score.clarity)
-                scorePill(label: "Decisions", value: score.decisiveness)
-                scorePill(label: "Actions", value: score.actionability)
-            }
-
-            Text(score.insight)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(AppPalette.secondaryInk)
-                .padding(.top, 2)
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(AppPalette.border.opacity(0.5), lineWidth: 0.8)
+            )
         }
-        .padding(16)
-        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(AppPalette.border.opacity(0.5), lineWidth: 0.8)
-        )
     }
 
-    private var scoreRing: some View {
+    private func scoreRing(_ score: MeetingScore) -> some View {
         ZStack {
             Circle()
                 .stroke(AppPalette.border.opacity(0.4), lineWidth: 3)
@@ -736,4 +765,3 @@ struct PersonContextBanner: View {
         .buttonStyle(.plain)
     }
 }
-

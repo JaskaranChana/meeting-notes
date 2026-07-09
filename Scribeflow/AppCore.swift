@@ -888,7 +888,7 @@ extension Notification.Name {
     /// Broadcast from Ask citation taps so the host scene can route to a
     /// specific meeting without threading bindings through every subview.
     static let scribeflowOpenMeeting = Notification.Name("scribeflowOpenMeeting")
-    /// Broadcast from FloatingTabDock when the user re-taps the already-
+    /// Broadcast from RootTabBar when the user re-taps the already-
     /// selected tab. Tab roots listen and scroll their primary list to top.
     /// `object` carries the raw tab id (`String`).
     static let scribeflowDockScrollToTop = Notification.Name("scribeflowDockScrollToTop")

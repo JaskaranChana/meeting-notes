@@ -268,7 +268,8 @@ private struct ActionItemsDisplaySnapshot {
 private actor ActionItemsSnapshotBuilder {
     func make(meetings: [Meeting], key: ActionItemsSnapshotKey) -> (items: [AggregatedActionItem], snapshot: ActionItemsDisplaySnapshot) {
         let items = meetings.flatMap { meeting in
-            meeting.commitments.map { commitment in
+            guard !meeting.isPersonalCapture else { return [AggregatedActionItem]() }
+            return meeting.commitments.map { commitment in
                 AggregatedActionItem(
                     commitment: commitment,
                     meetingID: meeting.id,
@@ -342,7 +343,7 @@ struct ActionItemsView: View {
             }
             .padding(.horizontal, 20)
             .padding(.top, 16)
-            .padding(.bottom, 12)
+            .padding(.bottom, AppDockMetrics.scrollEndPadding)
             .readingWidth()
         }
         .background(AppPalette.background.ignoresSafeArea())
@@ -419,7 +420,7 @@ struct ActionItemsView: View {
                 Text("Everything you owe")
                     .font(.system(size: 28, weight: .medium, design: .serif))
                     .foregroundStyle(AppPalette.ink)
-                Text("Aggregated from every meeting, voice note, and call.")
+                Text("Aggregated from meetings and calls with clear commitments.")
                     .font(.system(size: 13))
                     .foregroundStyle(AppPalette.secondaryInk)
             }
