@@ -4,9 +4,9 @@
 
 <br/>
 
-### Hit record — or just type. Scribeflow turns rough notes into a clean, owned recap, on your iPhone — and never makes anything up.
+### Hit record, start from calendar, or just type. Scribeflow turns rough notes into a clean, owned recap, on your iPhone — and never makes anything up.
 
-What was **decided**, who **owns** what, by **when**, what's still **open** — pulled from your words by the on-device model. Ask your whole history a question and get a cited answer. Nothing ever leaves the device.
+What was **decided**, who **owns** what, by **when**, what's still **open** — pulled from your words when Scribeflow can prove it was a meeting or call. Personal notes stay personal, without fake tasks or risks. Ask your whole history a question and get a cited answer. Nothing ever leaves the device.
 
 <br/>
 
@@ -14,14 +14,14 @@ What was **decided**, who **owns** what, by **when**, what's still **open** — 
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-Observation-FA7343?logo=swift&logoColor=white)
 ![Apple Intelligence](https://img.shields.io/badge/Apple%20Intelligence-on--device-1F8A70?logo=apple&logoColor=white)
 ![Privacy](https://img.shields.io/badge/data-stays%20local-2E7D71)
-![Tests](https://img.shields.io/badge/tests-green-3FB950)
+![Build](https://img.shields.io/badge/build-green-3FB950)
 ![License](https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey)
 
 <br/>
 
 <img src="docs/flow.gif" width="300" alt="Record → Recap → Today → Ask"/>
 
-<sub><b>Record → recap → today's plan → ask anything.</b> The whole loop, on device.</sub>
+<sub><b>Record → recap → calendar + today → ask anything.</b> The whole loop, on device.</sub>
 
 </div>
 
@@ -39,7 +39,7 @@ What was **decided**, who **owns** what, by **when**, what's still **open** — 
 <tr>
 <td align="center"><b>1 · Capture</b><br/><sub>Hit record or type. Live transcription — no bot joins your call.</sub></td>
 <td align="center"><b>2 · Understand</b><br/><sub>The model reads your notes and lays out the brief — by meeting type.</sub></td>
-<td align="center"><b>3 · Today</b><br/><sub>Open to exactly what needs you, ranked by priority, worst-first.</sub></td>
+<td align="center"><b>3 · Plan</b><br/><sub>Calendar, Today, and Tasks show what needs you, without covering bottom actions.</sub></td>
 <td align="center"><b>4 · Ask</b><br/><sub>"What did we decide with Meridian?" — answered, with sources.</sub></td>
 </tr>
 </table>
@@ -54,7 +54,7 @@ What was **decided**, who **owns** what, by **when**, what's still **open** — 
 
 ## 🧠 The AI that won't make things up
 
-Scribeflow runs **Apple Intelligence on-device** (`FoundationModels`, guided generation) to turn rough, misspelled notes into a polished brief — held to strict rules:
+Scribeflow runs **Apple Intelligence on-device** (`FoundationModels`, guided generation) to turn rough, misspelled notes into a polished brief — after a conservative purpose check. It only extracts meeting signals when the capture has meeting proof:
 
 > **Real notes in → a powerful, structured brief.**
 > **Nonsense in →** *"This does not make sense. Please clarify."* — never invented meaning.
@@ -62,6 +62,7 @@ Scribeflow runs **Apple Intelligence on-device** (`FoundationModels`, guided gen
 | Principle | What it means |
 |---|---|
 | 🚫 **Never invents** | Only what your notes actually support — no fabricated owners, dates, or decisions. |
+| 🧭 **Purpose-aware** | Personal notes, journals, and solo voice notes do not get forced into decisions, action items, or risks. |
 | 🪪 **Your words stay yours** | Granola-style: your bullets are the anchor (your text), the model adds context beneath in quieter ink. You always see what *you* wrote vs. what AI added. |
 | ❓ **Flags, doesn't guess** | Anything ambiguous goes to a **Needs clarification** list instead of a confident guess. |
 | 🧹 **Cleans, never loses** | Fixes spelling, removes repetition, keeps every important detail. |
@@ -69,7 +70,7 @@ Scribeflow runs **Apple Intelligence on-device** (`FoundationModels`, guided gen
 
 ### The brief, anatomized
 
-From one note, the model produces a presentation-ready layout:
+From a meeting or call, the model produces a presentation-ready layout:
 
 ```
 Summary        ─ one sharp sentence
@@ -81,9 +82,11 @@ Key points     ─ the substance, distilled
 Your notes     ─ your words, verbatim, expanded with AI context
 ```
 
-### It adapts to the meeting
+For personal notes, Scribeflow keeps the shape lighter: cleaned notes, source text, and searchable context, without pretending there are owners, deadlines, decisions, or risks.
 
-The model **auto-detects the meeting type** and tailors the layout — no setup:
+### It adapts to the purpose
+
+The app first decides whether the capture is a personal note, meeting, or call. Then the model **auto-detects the meeting type** and tailors the layout — no setup:
 
 | Lens | Adds sections like |
 |---|---|
@@ -101,9 +104,11 @@ Pick a lens to lock it, or let it choose.
 
 Most meeting tools record to the cloud and hand you a transcript. Scribeflow is built around **comprehension and follow-through**, locally:
 
+- 🧭 **It knows when not to extract** — a personal thought, journal note, or solo voice memo stays a note; meeting sections only appear when there is evidence.
 - 🧠 **It understands, not keyword-matches** — typos and shorthand become clean, owned items (`i'll snd the deck fryday` → **Send the deck · You · Friday**).
 - ⏱️ **Action items that actually move** — every task carries an owner, a real deadline, a **priority**, and a one-line *why it matters*; Today and Tasks rank by it.
 - 🗓️ **Real dates** — "Friday" or "eod" resolve to actual dates, so *overdue* and *due-soon* are judged by time, not guesses.
+- 📅 **A real calendar surface** — month, week, and agenda modes combine saved notes, calendar events, and open loops in one place.
 - 🔁 **It remembers across meetings** — ask your whole history, get a cited answer.
 - 🔒 **Private by design** — recordings, transcripts, and notes never leave the device.
 
@@ -132,12 +137,15 @@ Every surface is built on adaptive tokens — beautiful in light and dark, switc
 |---|---|
 | 🎙️ **Live capture + transcription** | Record on-device (`SFSpeechRecognizer`) or just type — no bot on the call. |
 | 🧠 **On-device AI brief** | The model turns rough notes into summary · decisions · actions · questions · risks, typo-corrected. |
+| 🧭 **Purpose-aware extraction** | Meeting intelligence runs for meetings and calls; personal captures stay lightweight and private. |
 | 🪪 **Enhanced notes** | Your bullets, expanded with AI context — your words kept distinct from the model's. |
 | 🎯 **Auto meeting lenses** | Detects sales / legal / coaching / product / standup and tailors the sections. |
 | ✅ **Action items that move** | Owner · deadline · **priority** · *why* — surfaced until done. |
+| 📅 **Interactive calendar** | Month, week, and agenda views with filters for notes, events, and open loops. |
 | 🤖 **Live Copilot** | Mid-call, recalls open promises with the same people and flags decisions as they're spoken. |
 | 🔎 **Ask your library** | Retrieval-augmented Q&A across every meeting, with citations and follow-ups. |
 | 📤 **One-tap recap** | Share a clean Markdown digest — AI summary kept separate from your verbatim notes. |
+| 🫧 **Liquid navigation** | Compact icon-only root dock, centered Today action, stable taps, and bottom-safe scrolling. |
 | 🛡️ **Honest by default** | No invention; nonsense is called out; unclear points are flagged, not guessed. |
 
 ---
@@ -146,11 +154,13 @@ Every surface is built on adaptive tokens — beautiful in light and dark, switc
 
 <table border="0">
 <tr>
-<td width="33%" align="center"><img src="docs/framed/home.png" width="210" alt="Today"/><br/><sub><b>Today</b> — ranked by priority</sub></td>
+<td width="33%" align="center"><img src="docs/framed/home.png" width="210" alt="Today"/><br/><sub><b>Today</b> — ranked by priority, personal-safe</sub></td>
 <td width="33%" align="center"><img src="docs/framed/library.png" width="210" alt="Library"/><br/><sub><b>Library</b> — searchable, filtered</sub></td>
 <td width="33%" align="center"><img src="docs/framed/ask.png" width="210" alt="Ask"/><br/><sub><b>Ask</b> — grounded, cited answers</sub></td>
 </tr>
 </table>
+
+Also included in-app: an interactive Calendar tab with month, week, and agenda modes; a Tasks inbox for open loops; Settings controls for demo data, diagnostics, integrations, and privacy.
 
 ---
 
@@ -159,10 +169,13 @@ Every surface is built on adaptive tokens — beautiful in light and dark, switc
 - **SwiftUI** · iOS 26 / Xcode 26 · the Observation framework (`@Observable`)
 - **Apple Intelligence** (`FoundationModels`) — `@Generable` guided generation for a structured, typo-tolerant brief; deterministic on-device engine as the fallback
 - **Speech** (`SFSpeechRecognizer`) + `AVAudioEngine` for live capture
-- **EventKit** — optional Reminders export and calendar context
+- **EventKit** — optional calendar context, calendar browsing, and Reminders export
+- **UserNotifications** — local reminder scheduling for action follow-through
+- Purpose classifier — conservative personal/meeting/call policy before extracting decisions, tasks, risks, or open loops
+- SwiftUI liquid-style dock — icon-only tabs, centered Today action, and bottom clearance for scrollable screens
 - Heavy extraction is **debounced off the keystroke path**, so typing stays smooth
 - Local JSON persistence — debounced, off-main writes with a backup/recovery path
-- **Swift Testing** — extraction, distillation, due-date, Copilot, and schema-migration logic (green)
+- Build is currently green for the app target; tests exist for extraction, distillation, due-date, Copilot, and schema-migration logic
 
 ## Build & run
 
@@ -171,9 +184,19 @@ open Scribeflow.xcodeproj
 # Select an iOS 26 simulator (e.g. iPhone 16 Pro) and ⌘R
 ```
 
+Command-line build check:
+
+```bash
+xcodebuild -project Scribeflow.xcodeproj \
+  -scheme Scribeflow \
+  -configuration Debug \
+  -destination 'generic/platform=iOS Simulator' \
+  build
+```
+
 > **Note:** the AI brief runs on Apple-Intelligence-capable devices (iPhone 15 Pro / 16, iOS 26+). On the Simulator and older devices it uses the deterministic on-device engine.
 
-Explore with sample data (dev only — loads into a fresh install):
+Explore with demo data from the app through onboarding, Home, Library, or Settings. For dev-only launch seeding:
 
 ```
 -SCRIBEFLOW_USE_SEED_DATA
