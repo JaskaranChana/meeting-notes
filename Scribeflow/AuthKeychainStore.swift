@@ -100,6 +100,10 @@ struct KeychainAuthSessionStore: AuthSessionStoring {
         UserDefaults.standard.string(forKey: appleEmailDefaultsKey(for: user))
     }
 
+    static func clearCachedAppleEmail(for user: String) {
+        UserDefaults.standard.removeObject(forKey: appleEmailDefaultsKey(for: user))
+    }
+
     private static func appleEmailDefaultsKey(for user: String) -> String {
         "ai.scribeflow.app.apple.email.\(user)"
     }

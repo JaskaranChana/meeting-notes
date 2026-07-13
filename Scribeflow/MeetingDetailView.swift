@@ -34,6 +34,7 @@ struct MeetingDetailView: View {
     @State var recordingPendingRename: AudioRecordingAttachment?
     @State var recordingPendingDelete: AudioRecordingAttachment?
     @State var showingSpeakerEditor = false
+    @State private var selectedSourceProof: SourceProofSelection?
     @State var rewriteTask: Task<Void, Never>?
     @State var promptTask: Task<Void, Never>?
     @State var cachedSignals = MeetingSignals(decisions: [], actions: [], risks: [])
@@ -304,6 +305,11 @@ struct MeetingDetailView: View {
                 }
                 .sheet(isPresented: $showingSpeakerEditor) {
                     SpeakerEditorView(meetingID: meeting.id)
+                        .presentationDetents([.medium, .large])
+                        .presentationCornerRadius(30)
+                }
+                .sheet(item: $selectedSourceProof) { selection in
+                    SourceProofInspectorView(selection: selection)
                         .presentationDetents([.medium, .large])
                         .presentationCornerRadius(30)
                 }
@@ -617,9 +623,12 @@ struct MeetingDetailView: View {
     @ViewBuilder
     func overviewCanvas(_ meeting: Meeting) -> some View {
         overviewSnapshot(meeting)
+        trustSummaryCard(meeting)
         overviewStatsRow(meeting)
+        editorialWhatMatters(meeting)
         editorialDecisions(meeting)
         editorialAISections(meeting)
+        editorialSpeakerContributions(meeting)
         editorialActions(meeting)
         editorialQuestions(meeting)
         editorialRisks(meeting)
@@ -633,7 +642,7 @@ struct MeetingDetailView: View {
     @ViewBuilder
     func editorialClarifications(_ meeting: Meeting) -> some View {
         if let items = meeting.aiBrief?.needsClarification, !items.isEmpty {
-            editorialPointList(title: "Needs clarification", items: items, tint: AppPalette.gold, limit: 5)
+            editorialPointList(title: "Needs clarification", items: items, tint: AppPalette.gold, limit: 5, meeting: meeting, showsSourceProof: true)
         }
     }
 
@@ -644,9 +653,128 @@ struct MeetingDetailView: View {
     func editorialAISections(_ meeting: Meeting) -> some View {
         if let sections = meeting.aiBrief?.sections {
             ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
-                editorialPointList(title: section.heading, items: section.items, tint: AppPalette.accent, limit: 6)
+                editorialPointList(title: section.heading, items: section.items, tint: AppPalette.accent, limit: 6, meeting: meeting, showsSourceProof: true)
             }
         }
+    }
+
+    @ViewBuilder
+    func editorialWhatMatters(_ meeting: Meeting) -> some View {
+        let generatedItems = meeting.aiBrief?.whatMatters ?? []
+        let items = generatedItems.isEmpty
+            ? MeetingIntelligenceEngine.keyPoints(for: meeting, limit: 4)
+            : generatedItems
+        if !items.isEmpty {
+            editorialPointList(
+                title: "What matters",
+                items: items,
+                tint: AppPalette.accent,
+                limit: 4,
+                meeting: meeting,
+                showsSourceProof: true
+            )
+        }
+    }
+
+    @ViewBuilder
+    func editorialSpeakerContributions(_ meeting: Meeting) -> some View {
+        let report = cachedIntelligenceReport ?? store.intelligenceReport(for: meeting)
+        let contributions = meeting.aiBrief?.speakerContributions ?? []
+
+        if report.speakerDetection.detectedCount > 0 {
+            VStack(alignment: .leading, spacing: 8) {
+                EditorialSectionHead(title: "Who said what", titleSize: 18) {
+                    EditorialMeta(
+                        text: report.speakerDetection.title,
+                        tint: report.speakerDetection.method == .diarized ? AppPalette.accent : AppPalette.gold
+                    )
+                }
+
+                if !contributions.isEmpty {
+                    ForEach(contributions.prefix(6)) { contribution in
+                        speakerContributionRow(contribution, meeting: meeting)
+                    }
+                } else {
+                    ForEach(report.speakerSegments.prefix(6)) { segment in
+                        speakerSegmentRow(segment, meeting: meeting)
+                    }
+                }
+
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: report.speakerDetection.method == .diarized
+                        ? "waveform.badge.magnifyingglass"
+                        : "person.wave.2")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(AppPalette.secondaryInk)
+                    Text(report.speakerDetection.detail)
+                        .font(.caption)
+                        .foregroundStyle(AppPalette.secondaryInk)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 8)
+                    Button {
+                        showingSpeakerEditor = true
+                    } label: {
+                        Image(systemName: "person.crop.circle.badge.checkmark")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(AppPalette.accent)
+                    .accessibilityLabel("Review speaker labels")
+                }
+                .padding(.top, 4)
+            }
+        }
+    }
+
+    private func speakerContributionRow(
+        _ contribution: AISpeakerContribution,
+        meeting: Meeting
+    ) -> some View {
+        let proof = store.sourceProof(for: contribution, in: meeting)
+        return HStack(alignment: .top, spacing: 11) {
+            EditorialAvatar(name: contribution.speaker, size: 28)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(contribution.speaker)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(editorialSpeakerColor(for: contribution.speaker))
+                Text(contribution.contribution)
+                    .font(.system(size: 15, design: .serif))
+                    .foregroundStyle(AppPalette.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                SourceProofButton(proof: proof) {
+                    inspectSource(for: contribution.contribution, proof: proof)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 10)
+        .overlay(alignment: .bottom) { EditorialRule() }
+    }
+
+    private func speakerSegmentRow(_ segment: SpeakerSegment, meeting: Meeting) -> some View {
+        HStack(alignment: .top, spacing: 11) {
+            EditorialAvatar(name: segment.speaker, size: 28)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 7) {
+                    Text(segment.speaker)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(editorialSpeakerColor(for: segment.speaker))
+                    Text("\(segment.lineCount) turn\(segment.lineCount == 1 ? "" : "s") · \(Int((segment.talkShare * 100).rounded()))% of transcript")
+                        .font(.caption2)
+                        .foregroundStyle(AppPalette.tertiaryInk)
+                }
+                Text(segment.sample)
+                    .font(.system(size: 15, design: .serif))
+                    .foregroundStyle(AppPalette.ink)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                SourceProofButton(proof: store.sourceProof(for: segment.sample, in: meeting)) {
+                    inspectSource(for: segment.sample, in: meeting)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 10)
+        .overlay(alignment: .bottom) { EditorialRule() }
     }
 
     /// Synopsis rendered as an editorial pull-quote: italic serif with an
@@ -669,10 +797,48 @@ struct MeetingDetailView: View {
                     Rectangle().fill(AppPalette.accent).frame(width: 2)
                 }
             aiStatusRow(meeting)
+            briefFocusRow(meeting)
+            SourceProofButton(proof: store.sourceProof(for: synopsis, in: meeting)) {
+                inspectSource(for: synopsis, in: meeting)
+            }
+            .padding(.leading, 14)
         }
         .padding(.top, 4)
         .animation(AppMotion.smooth, value: store.isProcessingAI(meeting.id))
         .animation(AppMotion.smooth, value: meeting.aiBrief != nil)
+    }
+
+    private func briefFocusRow(_ meeting: Meeting) -> some View {
+        let report = cachedIntelligenceReport ?? store.intelligenceReport(for: meeting)
+        return HStack(spacing: 10) {
+            Menu {
+                ForEach(NoteTemplate.allCases) { template in
+                    Button {
+                        HapticEngine.select()
+                        store.selectTemplate(template, for: meeting.id)
+                    } label: {
+                        Label(template.title, systemImage: template == meeting.selectedTemplate ? "checkmark" : template.systemImage)
+                    }
+                }
+            } label: {
+                Label("Focus: \(meeting.selectedTemplate.title)", systemImage: "scope")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(AppPalette.accent)
+            }
+
+            Label(
+                report.speakerDetection.detectedCount == 0
+                    ? "No voice labels"
+                    : "\(report.speakerDetection.detectedCount) voice label\(report.speakerDetection.detectedCount == 1 ? "" : "s")",
+                systemImage: "person.wave.2"
+            )
+                .font(.caption.weight(.medium))
+                .foregroundStyle(AppPalette.secondaryInk)
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, 14)
     }
 
     /// Tells the user which engine produced the brief: a live "Processing…"
@@ -704,6 +870,100 @@ struct MeetingDetailView: View {
     /// brief and the shared/exported digest always read the same.
     func synopsisFor(_ meeting: Meeting, summary: MeetingSummary) -> String {
         meetingSynopsis(for: meeting, summary: summary)
+    }
+
+    private func trustSummaryCard(_ meeting: Meeting) -> some View {
+        let report = cachedIntelligenceReport ?? store.intelligenceReport(for: meeting)
+        let sourceCounts = sourceProofCounts(for: meeting)
+        let purpose = meeting.purpose
+        let purposeTitle = purpose.isPersonalCapture ? "Personal-safe" : (purpose.kind == .call ? "Call-backed" : "Meeting-backed")
+        let purposeDetail = purpose.isPersonalCapture
+            ? "Tasks, decisions, and risks stay suppressed unless meeting evidence exists."
+            : "Decisions and actions are allowed because this capture has meeting proof."
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "checkmark.seal.fill")
+                    .font(.headline.weight(.bold))
+                    .foregroundStyle(AppPalette.accent)
+                    .frame(width: 34, height: 34)
+                    .background(AppPalette.accent.opacity(0.12), in: Circle())
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Trust check")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(AppPalette.ink)
+                    Text(purposeDetail)
+                        .font(.caption)
+                        .foregroundStyle(AppPalette.secondaryInk)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 8)
+            }
+
+            HStack(spacing: 8) {
+                trustPill(title: "Purpose", value: purposeTitle, tint: AppPalette.accent)
+                trustPill(title: "Read", value: report.confidenceLabel, tint: AppPalette.gold)
+            }
+
+            HStack(spacing: 8) {
+                trustPill(title: "Notes", value: "\(sourceCounts.notes)", tint: AppPalette.secondaryInk)
+                trustPill(title: "Transcript", value: "\(sourceCounts.transcript)", tint: AppPalette.secondaryInk)
+                trustPill(title: "Audio", value: "\(sourceCounts.audio)", tint: AppPalette.secondaryInk)
+            }
+
+            HStack(spacing: 8) {
+                trustPill(
+                    title: "Voice labels",
+                    value: "\(report.speakerDetection.detectedCount)",
+                    tint: report.speakerDetection.method == .diarized ? AppPalette.accent : AppPalette.gold
+                )
+                trustPill(
+                    title: "People listed",
+                    value: "\(report.speakerDetection.expectedCount)",
+                    tint: AppPalette.secondaryInk
+                )
+                trustPill(
+                    title: "Method",
+                    value: report.speakerDetection.badge,
+                    tint: AppPalette.secondaryInk
+                )
+            }
+        }
+        .padding(14)
+        .background(AppPalette.cardBackground.opacity(0.92), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(AppPalette.border.opacity(0.45), lineWidth: 0.6))
+    }
+
+    private func sourceProofCounts(for meeting: Meeting) -> (notes: Int, transcript: Int, audio: Int) {
+        let notes = meeting.rawNotes
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .count
+        let audio = meeting.audioRecordings.filter {
+            !$0.transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !$0.linkedNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }.count
+        return (notes, meeting.transcript.count, audio)
+    }
+
+    private func trustPill(title: String, value: String, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(AppPalette.tertiaryInk)
+            Text(value)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(tint)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     /// Flat decisions / actions / risks / score row, divided by hairlines and
@@ -758,7 +1018,15 @@ struct MeetingDetailView: View {
     /// colored dot + serif line. Keeps the brief from becoming a wall of
     /// competing icons, bars, and tinted cards.
     @ViewBuilder
-    func editorialPointList(title: String, items: [String], tint: Color, limit: Int, quiet: Bool = false) -> some View {
+    func editorialPointList(
+        title: String,
+        items: [String],
+        tint: Color,
+        limit: Int,
+        quiet: Bool = false,
+        meeting: Meeting? = nil,
+        showsSourceProof: Bool = false
+    ) -> some View {
         if !items.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 EditorialSectionHead(title: title, titleSize: 18) {
@@ -768,10 +1036,17 @@ struct MeetingDetailView: View {
                     ForEach(Array(items.prefix(limit).enumerated()), id: \.offset) { _, text in
                         HStack(alignment: .top, spacing: 10) {
                             Circle().fill(tint).frame(width: 7, height: 7).padding(.top, 8)
-                            Text(text)
-                                .font(.system(size: 16, design: .serif))
-                                .foregroundStyle(quiet ? AppPalette.secondaryInk : AppPalette.ink)
-                                .fixedSize(horizontal: false, vertical: true)
+                            VStack(alignment: .leading, spacing: 7) {
+                                Text(text)
+                                    .font(.system(size: 16, design: .serif))
+                                    .foregroundStyle(quiet ? AppPalette.secondaryInk : AppPalette.ink)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                if showsSourceProof, let meeting {
+                                    SourceProofButton(proof: store.sourceProof(for: text, in: meeting)) {
+                                        inspectSource(for: text, in: meeting)
+                                    }
+                                }
+                            }
                             Spacer(minLength: 0)
                         }
                         .padding(.vertical, 8)
@@ -784,7 +1059,7 @@ struct MeetingDetailView: View {
 
     @ViewBuilder
     func editorialDecisions(_ meeting: Meeting) -> some View {
-        editorialPointList(title: "Decisions", items: meetingSignals.decisions, tint: AppPalette.success, limit: 6)
+        editorialPointList(title: "Decisions", items: meetingSignals.decisions, tint: AppPalette.success, limit: 6, meeting: meeting, showsSourceProof: true)
     }
 
     @ViewBuilder
@@ -810,7 +1085,7 @@ struct MeetingDetailView: View {
                             EditorialRule()
                         }
                         ForEach(Array(signalActions.enumerated()), id: \.offset) { idx, text in
-                            editorialSignalActionRow(text).editorialReveal()
+                            editorialSignalActionRow(text, in: meeting).editorialReveal()
                             if idx < signalActions.count - 1 { EditorialRule() }
                         }
                     }
@@ -880,6 +1155,9 @@ struct MeetingDetailView: View {
                 }
                 let meta = actionMetaLine(c)
                 if !meta.isEmpty { EditorialMeta(text: meta) }
+                SourceProofButton(proof: store.sourceProof(for: c, in: meeting)) {
+                    inspectSource(for: c.statement, proof: store.sourceProof(for: c, in: meeting))
+                }
             }
             Spacer(minLength: 8)
             if c.owner != "Owner not named" {
@@ -897,14 +1175,19 @@ struct MeetingDetailView: View {
         return parts.joined(separator: " · ")
     }
 
-    private func editorialSignalActionRow(_ text: String) -> some View {
+    private func editorialSignalActionRow(_ text: String, in meeting: Meeting) -> some View {
         HStack(alignment: .center, spacing: 12) {
             Circle().strokeBorder(AppPalette.border, lineWidth: 1.5).frame(width: 18, height: 18)
-            Text(text)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(AppPalette.ink)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 7) {
+                Text(text)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(AppPalette.ink)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                SourceProofButton(proof: store.sourceProof(for: text, in: meeting)) {
+                    inspectSource(for: text, in: meeting)
+                }
+            }
             Spacer(minLength: 0)
         }
         .padding(.vertical, 12)
@@ -959,12 +1242,12 @@ struct MeetingDetailView: View {
 
     @ViewBuilder
     func editorialQuestions(_ meeting: Meeting) -> some View {
-        editorialPointList(title: "Open questions", items: meetingSignals.questions, tint: AppPalette.gold, limit: 4)
+        editorialPointList(title: "Open questions", items: meetingSignals.questions, tint: AppPalette.gold, limit: 4, meeting: meeting, showsSourceProof: true)
     }
 
     @ViewBuilder
     func editorialRisks(_ meeting: Meeting) -> some View {
-        editorialPointList(title: "Risks", items: meetingSignals.risks, tint: AppPalette.coral, limit: 3)
+        editorialPointList(title: "Risks", items: meetingSignals.risks, tint: AppPalette.coral, limit: 3, meeting: meeting, showsSourceProof: true)
     }
 
 
@@ -1011,7 +1294,7 @@ struct MeetingDetailView: View {
             if !actions.isEmpty {
                 tasksGroup(title: "EXTRACTED FOLLOW-UPS", tint: AppPalette.gold) {
                     ForEach(Array(actions.enumerated()), id: \.offset) { _, action in
-                        actionLineRow(action)
+                        actionLineRow(action, in: meeting)
                     }
                 }
             }
@@ -1085,58 +1368,67 @@ struct MeetingDetailView: View {
         case .fulfilled:  icon = "checkmark.circle.fill";        tint = AppPalette.success
         case .superseded: icon = "arrow.uturn.left.circle";      tint = AppPalette.tertiaryInk
         }
-        return Button {
-            HapticEngine.tap(.light)
-            cycleStatus(c, in: meeting)
-        } label: {
-            HStack(alignment: .top, spacing: 12) {
+        return HStack(alignment: .top, spacing: 12) {
+            Button {
+                HapticEngine.tap(.light)
+                cycleStatus(c, in: meeting)
+            } label: {
                 Image(systemName: icon)
                     .font(.title3.weight(.heavy))
                     .foregroundStyle(tint)
                     .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(PressScaleButtonStyle(scale: 0.86))
+            .accessibilityLabel(c.status == .fulfilled ? "Mark open" : "Mark done")
 
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(c.statement)
-                        .font(.subheadline)
-                        .foregroundStyle(AppPalette.ink.opacity(0.88))
-                        .lineLimit(3)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: 6) {
-                        if !c.owner.isEmpty {
-                            metaPill(systemImage: "person.fill", text: c.owner, tint: AppPalette.accent)
-                        }
-                        if let due = c.dueHint, !due.isEmpty {
-                            metaPill(systemImage: "calendar", text: due, tint: AppPalette.coral)
-                        }
+            VStack(alignment: .leading, spacing: 5) {
+                Text(c.statement)
+                    .font(.subheadline)
+                    .foregroundStyle(AppPalette.ink.opacity(0.88))
+                    .lineLimit(3)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 6) {
+                    if !c.owner.isEmpty {
+                        metaPill(systemImage: "person.fill", text: c.owner, tint: AppPalette.accent)
+                    }
+                    if let due = c.dueHint, !due.isEmpty {
+                        metaPill(systemImage: "calendar", text: due, tint: AppPalette.coral)
                     }
                 }
+                SourceProofButton(proof: store.sourceProof(for: c, in: meeting)) {
+                    inspectSource(for: c.statement, proof: store.sourceProof(for: c, in: meeting))
+                }
+            }
 
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .contentShape(Rectangle())
-            .overlay(alignment: .bottom) {
-                Divider()
-                    .background(AppPalette.divider.opacity(0.4))
-                    .padding(.leading, 52)
-            }
+            Spacer(minLength: 0)
         }
-        .buttonStyle(PressScaleButtonStyle(scale: 0.985))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .overlay(alignment: .bottom) {
+            Divider()
+                .background(AppPalette.divider.opacity(0.4))
+                .padding(.leading, 52)
+        }
     }
 
-    private func actionLineRow(_ text: String) -> some View {
+    private func actionLineRow(_ text: String, in meeting: Meeting) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "arrow.right.circle.fill")
                 .font(.subheadline.weight(.heavy))
                 .foregroundStyle(AppPalette.gold)
                 .frame(width: 26, height: 26)
-            Text(text)
-                .font(.subheadline)
-                .foregroundStyle(AppPalette.ink.opacity(0.88))
-                .lineLimit(3)
-                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 7) {
+                Text(text)
+                    .font(.subheadline)
+                    .foregroundStyle(AppPalette.ink.opacity(0.88))
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                SourceProofButton(proof: store.sourceProof(for: text, in: meeting)) {
+                    inspectSource(for: text, in: meeting)
+                }
+            }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 14)
@@ -1211,7 +1503,8 @@ struct MeetingDetailView: View {
 
     private func transcriptStatStrip(_ meeting: Meeting) -> some View {
         let lineCount = meeting.transcript.count
-        let speakers = Set(meeting.transcript.map(\.speaker)).count
+        let speakers = (cachedIntelligenceReport ?? store.intelligenceReport(for: meeting))
+            .speakerDetection.detectedCount
         let words = meeting.transcript.reduce(0) { $0 + $1.text.split(separator: " ").count }
         return HStack(spacing: 0) {
             tasksStatusTile(value: lineCount, label: "Lines", tint: AppPalette.accent)
@@ -1408,12 +1701,13 @@ struct MeetingDetailView: View {
     }
 
     private func intelligenceNavRow(_ meeting: Meeting) -> some View {
-        let speakers = Set(meeting.transcript.map(\.speaker)).count
+        let speakerRead = (cachedIntelligenceReport ?? store.intelligenceReport(for: meeting)).speakerDetection
+        let speakers = speakerRead.detectedCount
         let actions = meetingSignals.actions.count
         let subtitle: String = {
             if speakers > 0 || actions > 0 {
                 let parts: [String] = [
-                    speakers > 0 ? "\(speakers) speaker\(speakers == 1 ? "" : "s")" : nil,
+                    speakers > 0 ? "\(speakers) voice label\(speakers == 1 ? "" : "s")" : nil,
                     actions > 0 ? "\(actions) action\(actions == 1 ? "" : "s")" : nil
                 ].compactMap { $0 }
                 return parts.joined(separator: " · ")
@@ -1641,8 +1935,14 @@ struct MeetingDetailView: View {
 
     private func meetingMetaLine(_ meeting: Meeting, words: Int) -> String {
         var parts: [String] = []
+        let detectedVoices = (cachedIntelligenceReport ?? store.intelligenceReport(for: meeting))
+            .speakerDetection.detectedCount
         if meeting.durationMinutes > 0 { parts.append("\(meeting.durationMinutes)m") }
-        if !meeting.attendees.isEmpty { parts.append("\(meeting.attendees.count) people") }
+        if detectedVoices > 0 {
+            parts.append("\(detectedVoices) voice\(detectedVoices == 1 ? "" : "s")")
+        } else if !meeting.attendees.isEmpty {
+            parts.append("\(meeting.attendees.count) people listed")
+        }
         if words > 0 { parts.append("\(words) words") }
         return parts.joined(separator: " · ")
     }
@@ -1825,7 +2125,8 @@ struct MeetingDetailView: View {
                             title: "Decisions",
                             systemImage: "checkmark.circle.fill",
                             items: meetingSignals.decisions,
-                            tint: AppPalette.accent
+                            tint: AppPalette.accent,
+                            meeting: meeting
                         )
                     }
                     if !meetingSignals.actions.isEmpty {
@@ -1834,7 +2135,8 @@ struct MeetingDetailView: View {
                             title: "Actions",
                             systemImage: "arrow.forward.circle.fill",
                             items: meetingSignals.actions,
-                            tint: AppPalette.gold
+                            tint: AppPalette.gold,
+                            meeting: meeting
                         )
                     }
                     if !meetingSignals.risks.isEmpty {
@@ -1845,7 +2147,8 @@ struct MeetingDetailView: View {
                             title: "Risks",
                             systemImage: "exclamationmark.triangle.fill",
                             items: meetingSignals.risks,
-                            tint: AppPalette.coral
+                            tint: AppPalette.coral,
+                            meeting: meeting
                         )
                     }
                 }
@@ -1872,31 +2175,37 @@ struct MeetingDetailView: View {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 8) {
                     IntelligencePill(title: "Read", value: report.confidenceLabel, tint: AppPalette.accent)
-                    IntelligencePill(title: "Speakers", value: "\(report.speakerSegments.count)", tint: AppPalette.gold)
+                    IntelligencePill(title: "Voices", value: "\(report.speakerDetection.detectedCount)", tint: AppPalette.gold)
                     if allowsAccountability {
                         IntelligencePill(title: "Actions", value: "\(report.actionItems.count)", tint: AppPalette.coral)
                     }
                 }
 
-                intelligenceSection("Smart summary", icon: "sparkles", items: report.suggestedSummary, tint: AppPalette.accent)
+                intelligenceSection("Smart summary", icon: "sparkles", items: report.suggestedSummary, tint: AppPalette.accent, meeting: meeting)
                 if allowsAccountability {
                     if report.structuredActionItems.isEmpty {
-                        intelligenceSection("Action items", icon: "arrow.forward.circle.fill", items: report.actionItems, tint: AppPalette.gold)
+                        intelligenceSection("Action items", icon: "arrow.forward.circle.fill", items: report.actionItems, tint: AppPalette.gold, meeting: meeting)
                     } else {
-                        structuredActionSection(report.structuredActionItems)
+                        structuredActionSection(report.structuredActionItems, meeting: meeting)
                     }
                 }
                 if allowsAccountability {
-                    intelligenceSection("Decisions", icon: "checkmark.circle.fill", items: report.decisions, tint: AppPalette.accent)
+                    intelligenceSection("Decisions", icon: "checkmark.circle.fill", items: report.decisions, tint: AppPalette.accent, meeting: meeting)
                 }
-                intelligenceSection("Open questions", icon: "questionmark.circle.fill", items: report.openQuestions, tint: AppPalette.coral)
+                intelligenceSection("Open questions", icon: "questionmark.circle.fill", items: report.openQuestions, tint: AppPalette.coral, meeting: meeting)
                 if allowsAccountability {
-                    intelligenceSection("Suggested follow-up", icon: "paperplane.fill", items: report.followUps, tint: AppPalette.ink)
+                    intelligenceSection("Suggested follow-up", icon: "paperplane.fill", items: report.followUps, tint: AppPalette.ink, meeting: meeting)
                 }
 
                 if !report.speakerSegments.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
-                        Label("Speaker read", systemImage: "person.wave.2.fill")
+                        HStack {
+                            Label("Speaker read", systemImage: "person.wave.2.fill")
+                            Spacer(minLength: 8)
+                            Text(report.speakerDetection.title)
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(AppPalette.secondaryInk)
+                        }
                             .font(.caption.weight(.bold))
                             .foregroundStyle(AppPalette.accent)
 
@@ -1915,7 +2224,7 @@ struct MeetingDetailView: View {
                                     Text(segment.speaker)
                                         .font(.subheadline.weight(.semibold))
                                         .foregroundStyle(AppPalette.ink)
-                                    Text("\(segment.lineCount) transcript line\(segment.lineCount == 1 ? "" : "s")")
+                                    Text("\(segment.lineCount) turn\(segment.lineCount == 1 ? "" : "s") · \(Int((segment.talkShare * 100).rounded()))% of transcript")
                                         .font(.caption.weight(.medium))
                                         .foregroundStyle(AppPalette.secondaryInk)
                                     if !segment.sample.isEmpty {
@@ -1952,7 +2261,7 @@ struct MeetingDetailView: View {
 
 
     @ViewBuilder
-    private func intelligenceSection(_ title: String, icon: String, items: [String], tint: Color) -> some View {
+    private func intelligenceSection(_ title: String, icon: String, items: [String], tint: Color, meeting: Meeting) -> some View {
         if !items.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 Label(title, systemImage: icon)
@@ -1960,11 +2269,16 @@ struct MeetingDetailView: View {
                     .foregroundStyle(tint)
 
                 ForEach(items.prefix(4), id: \.self) { item in
-                    Label(item, systemImage: "circle.fill")
-                        .font(.subheadline)
-                        .foregroundStyle(AppPalette.secondaryInk)
-                        .labelStyle(BulletLabelStyle())
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label(item, systemImage: "circle.fill")
+                            .font(.subheadline)
+                            .foregroundStyle(AppPalette.secondaryInk)
+                            .labelStyle(BulletLabelStyle())
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        SourceProofButton(proof: store.sourceProof(for: item, in: meeting)) {
+                            inspectSource(for: item, in: meeting)
+                        }
+                    }
                 }
             }
             .padding(14)
@@ -1972,7 +2286,7 @@ struct MeetingDetailView: View {
         }
     }
 
-    private func structuredActionSection(_ items: [ExtractedActionItem]) -> some View {
+    private func structuredActionSection(_ items: [ExtractedActionItem], meeting: Meeting) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Label("Action items", systemImage: "arrow.forward.circle.fill")
                 .font(.caption.weight(.bold))
@@ -1992,6 +2306,9 @@ struct MeetingDetailView: View {
                     }
                     .font(.caption2.weight(.bold))
                     .foregroundStyle(AppPalette.gold)
+                    SourceProofButton(proof: store.sourceProof(for: item.text, in: meeting)) {
+                        inspectSource(for: item.text, in: meeting)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(12)
@@ -2002,7 +2319,7 @@ struct MeetingDetailView: View {
         .background(AppPalette.cardBackground.opacity(0.92), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
-    private func signalSection(title: String, systemImage: String, items: [String], tint: Color) -> some View {
+    private func signalSection(title: String, systemImage: String, items: [String], tint: Color, meeting: Meeting) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 7) {
                 Image(systemName: systemImage)
@@ -2025,10 +2342,15 @@ struct MeetingDetailView: View {
                             .frame(width: 2)
                             .frame(minHeight: 20)
                             .padding(.top, 2)
-                        Text(item)
-                            .font(.subheadline)
-                            .foregroundStyle(AppPalette.ink)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(item)
+                                .font(.subheadline)
+                                .foregroundStyle(AppPalette.ink)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            SourceProofButton(proof: store.sourceProof(for: item, in: meeting)) {
+                                inspectSource(for: item, in: meeting)
+                            }
+                        }
                     }
                     .padding(.horizontal, 20)
                     .padding(.vertical, 8)
@@ -2238,6 +2560,17 @@ struct MeetingDetailView: View {
                     Text("\(recording.source.title) · \(recording.durationLabel) · \(recording.createdAt.formatted(date: .abbreviated, time: .shortened))")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(AppPalette.secondaryInk)
+                    if let provider = recording.transcriptionProvider {
+                        let voices = recording.detectedSpeakerCount
+                        Label(
+                            recording.diarizationAvailable
+                                ? "\(provider.title) · \(voices) voice\(voices == 1 ? "" : "s") separated"
+                                : "\(provider.title) · single speaker track",
+                            systemImage: recording.diarizationAvailable ? "person.wave.2.fill" : "waveform"
+                        )
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(recording.diarizationAvailable ? AppPalette.accent : AppPalette.tertiaryInk)
+                    }
                 }
 
                 Spacer()
@@ -2339,6 +2672,10 @@ struct MeetingDetailView: View {
                                                 .padding(12)
                                                 .background(AppPalette.softSurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                                         }
+                                    }
+
+                                    SourceProofButton(proof: store.sourceProof(for: item, in: meeting)) {
+                                        inspectSource(for: item.text, proof: store.sourceProof(for: item, in: meeting))
                                     }
 
                                     Button("Remove point", role: .destructive) {
@@ -2812,6 +3149,15 @@ struct MeetingDetailView: View {
         }
     }
 
+    private func inspectSource(for text: String, in meeting: Meeting) {
+        inspectSource(for: text, proof: store.sourceProof(for: text, in: meeting))
+    }
+
+    private func inspectSource(for text: String, proof: SourceProof) {
+        HapticEngine.tap(.light)
+        selectedSourceProof = SourceProofSelection(claim: text, proof: proof)
+    }
+
 
     private func evidenceBadge(for level: EvidenceLevel) -> some View {
         Text(level.title)
@@ -3004,6 +3350,11 @@ private struct SpeakerEditorView: View {
     @State private var replacementName = ""
     @State private var speakers: [SpeakerSegment] = []
 
+    private var detection: SpeakerDetectionSummary? {
+        guard let meeting = store.meeting(withID: meetingID) else { return nil }
+        return store.intelligenceReport(for: meeting).speakerDetection
+    }
+
     private func refreshSpeakers(selectFirstIfNeeded: Bool = false) {
         speakers = store.speakerSegments(for: meetingID)
         guard selectFirstIfNeeded, selectedSpeaker.isEmpty, let first = speakers.first else { return }
@@ -3049,7 +3400,7 @@ private struct SpeakerEditorView: View {
                             .tint(AppPalette.accent)
                             .disabled(selectedSpeaker.isEmpty || replacementName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
-                            Text("This is manual speaker cleanup. Real acoustic speaker diarization still requires a production transcription provider.")
+                            Text(detection?.detail ?? "Speaker names stay editable so you can correct labels before sharing.")
                                 .font(.footnote)
                                 .foregroundStyle(AppPalette.secondaryInk)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -3098,7 +3449,7 @@ private struct SpeakerEditorView: View {
                     Text(speaker.speaker)
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(AppPalette.ink)
-                    Text("\(speaker.lineCount) line\(speaker.lineCount == 1 ? "" : "s")")
+                    Text("\(speaker.lineCount) turn\(speaker.lineCount == 1 ? "" : "s") · \(Int((speaker.talkShare * 100).rounded()))% of transcript")
                         .font(.caption.weight(.bold))
                         .foregroundStyle(AppPalette.secondaryInk)
                     if !speaker.sample.isEmpty {

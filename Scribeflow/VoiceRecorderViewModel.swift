@@ -27,6 +27,7 @@ final class VoiceRecorderViewModel {
     var statusMessage = "Ready to record"
     var completedRecording: CompletedVoiceRecording?
     var transcriptionJob: TranscriptionRetryJob?
+    var transcriptionResult: TranscriptionResult?
 
     @ObservationIgnored private let recorder: LocalVoiceRecordingService
     @ObservationIgnored private let transcriptionProvider: any TranscriptionProviding
@@ -38,7 +39,8 @@ final class VoiceRecorderViewModel {
     ) {
         let recorder = recorder ?? LocalVoiceRecordingService()
         self.recorder = recorder
-        self.transcriptionProvider = transcriptionProvider ?? recorder
+        self.transcriptionProvider = transcriptionProvider
+            ?? TranscriptionProviderFactory.make(localFallback: recorder)
     }
 
     var canRecord: Bool {
@@ -51,7 +53,7 @@ final class VoiceRecorderViewModel {
 
     var canRetryTranscript: Bool {
         completedRecording != nil
-            && permissions.speech == .ready
+            && (!transcriptionProvider.requiresSpeechAuthorization || permissions.speech == .ready)
             && phase != .processing
             && phase != .saving
             && (transcriptionJob?.canRetry ?? true)
@@ -79,6 +81,17 @@ final class VoiceRecorderViewModel {
         case .completed:
             return "Transcript completed"
         }
+    }
+
+    var speakerReadText: String? {
+        guard let transcriptionResult, !transcriptionResult.segments.isEmpty else { return nil }
+        let count = Set(transcriptionResult.segments.map {
+            SpeakerIdentityResolver.canonicalKey(for: $0.speaker)
+        }).filter { !$0.isEmpty }.count
+        guard count > 0 else { return nil }
+        return transcriptionResult.diarizationAvailable
+            ? "\(count) voice\(count == 1 ? "" : "s") separated"
+            : "Single speaker track"
     }
 
     var permissionTitle: String {
@@ -114,6 +127,7 @@ final class VoiceRecorderViewModel {
             elapsedSeconds = 0
             inputLevel = 0
             transcript = ""
+            transcriptionResult = nil
             completedRecording = nil
             phase = .recording
             statusMessage = "Recording"
@@ -170,7 +184,11 @@ final class VoiceRecorderViewModel {
                 fileName: RecordingFileStore.fileName(for: completed.fileURL)
             )
 
-            guard permissions.speech == .ready else {
+            if let transcriptionJob, TranscriptionProviderFactory.isRemoteTranscriptionEnabled {
+                await TranscriptionRetryQueue.shared.upsert(transcriptionJob)
+            }
+
+            guard !transcriptionProvider.requiresSpeechAuthorization || permissions.speech == .ready else {
                 transcript = ""
                 phase = .readyToSave
                 statusMessage = "Audio saved. Speech permission is needed for a transcript."
@@ -199,7 +217,7 @@ final class VoiceRecorderViewModel {
         }
 
         refreshPermissions()
-        guard permissions.speech == .ready else {
+        guard !transcriptionProvider.requiresSpeechAuthorization || permissions.speech == .ready else {
             phase = .readyToSave
             statusMessage = "Speech permission is needed to retry transcription."
             return
@@ -235,7 +253,10 @@ final class VoiceRecorderViewModel {
             transcript: transcript.trimmingCharacters(in: .whitespacesAndNewlines),
             linkedNote: noteText.trimmingCharacters(in: .whitespacesAndNewlines),
             source: linkedMeetingID == nil ? .voiceNote : .noteAttachment,
-            fileSizeBytes: completedRecording.fileSizeBytes
+            fileSizeBytes: completedRecording.fileSizeBytes,
+            transcriptionSegments: transcriptionResult?.segments ?? [],
+            transcriptionProvider: transcriptionResult?.provider,
+            diarizationAvailable: transcriptionResult?.diarizationAvailable ?? false
         )
 
         let savedID: Meeting.ID
@@ -251,20 +272,33 @@ final class VoiceRecorderViewModel {
             )
         }
 
+        if var job = transcriptionJob,
+           job.state != .completed,
+           TranscriptionProviderFactory.isRemoteTranscriptionEnabled {
+            job.meetingID = savedID
+            transcriptionJob = job
+            await TranscriptionRetryQueue.shared.upsert(job)
+        }
+
         phase = .saved(savedID)
         statusMessage = "Saved"
         return savedID
     }
 
     func discard() {
+        let queuedJobID = transcriptionJob?.id
         meterTask?.cancel()
         recorder.discard()
         completedRecording = nil
         transcriptionJob = nil
+        transcriptionResult = nil
         elapsedSeconds = 0
         inputLevel = 0
         phase = .idle
         statusMessage = "Ready to record"
+        if let queuedJobID {
+            Task { await TranscriptionRetryQueue.shared.remove(id: queuedJobID) }
+        }
     }
 
     private func generateTranscript(for completed: CompletedVoiceRecording, retrying: Bool) async {
@@ -274,17 +308,37 @@ final class VoiceRecorderViewModel {
         )
         job.markRunning()
         transcriptionJob = job
+        if TranscriptionProviderFactory.isRemoteTranscriptionEnabled {
+            await TranscriptionRetryQueue.shared.upsert(job)
+        }
 
         do {
-            let result = try await transcriptionProvider.transcribe(audioURL: completed.fileURL)
+            var result = try await transcriptionProvider.transcribe(audioURL: completed.fileURL)
+            result.segments = SpeakerIdentityResolver.normalizedSegments(result.segments)
+            transcriptionResult = result
             transcript = result.text
             job.markCompleted()
             transcriptionJob = job
+            if TranscriptionProviderFactory.isRemoteTranscriptionEnabled {
+                await TranscriptionRetryQueue.shared.remove(id: job.id)
+            }
             phase = .readyToSave
-            statusMessage = transcript.isEmpty ? "Audio ready" : "Transcript ready via \(result.provider.title)"
+            let speakerCount = Set(result.segments.map {
+                SpeakerIdentityResolver.canonicalKey(for: $0.speaker)
+            }).filter { !$0.isEmpty }.count
+            if transcript.isEmpty {
+                statusMessage = "Audio ready"
+            } else if result.diarizationAvailable, speakerCount > 0 {
+                statusMessage = "Transcript ready · \(speakerCount) voice\(speakerCount == 1 ? "" : "s") separated"
+            } else {
+                statusMessage = "Transcript ready via \(result.provider.title) · single speaker track"
+            }
         } catch {
             job.markFailed(error.localizedDescription)
             transcriptionJob = job
+            if TranscriptionProviderFactory.isRemoteTranscriptionEnabled {
+                await TranscriptionRetryQueue.shared.upsert(job)
+            }
             phase = .readyToSave
             statusMessage = retrying
                 ? "Transcript retry failed. Audio is still ready to save."

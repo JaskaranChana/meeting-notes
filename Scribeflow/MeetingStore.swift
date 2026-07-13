@@ -145,6 +145,12 @@ final class MeetingStore {
     @ObservationIgnored
     private var regenTask: Task<Void, Never>?
 
+    @ObservationIgnored
+    private var aiProcessingTasks: [Meeting.ID: Task<Void, Never>] = [:]
+
+    @ObservationIgnored
+    private var aiProcessingRunIDs: [Meeting.ID: UUID] = [:]
+
     /// True only while loading seed data, so authored seed commitments are kept
     /// instead of being overwritten by note-derived generation.
     @ObservationIgnored
@@ -212,6 +218,21 @@ final class MeetingStore {
             let backup = backupURL
             let writer = persistenceWriter
             Task(priority: .utility) { await writer.snapshotKnownGood(from: source, to: backup) }
+        }
+
+        let defaults = UserDefaults.standard
+        let automaticBackupKey = "scribeflow.automaticBackupsEnabled"
+        let automaticBackupsEnabled = defaults.object(forKey: automaticBackupKey) == nil
+            ? true
+            : defaults.bool(forKey: automaticBackupKey)
+        if automaticBackupsEnabled, !meetings.isEmpty {
+            let snapshot = meetings
+            Task(priority: .utility) {
+                _ = try? await BackupArchiveService.shared.saveAutomaticBackup(
+                    meetings: snapshot,
+                    schemaVersion: Self.currentSchemaVersion
+                )
+            }
         }
     }
 
@@ -433,6 +454,111 @@ final class MeetingStore {
         }
     }
 
+    func sourceProof(for text: String, in meeting: Meeting) -> SourceProof {
+        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else {
+            return SourceProof(
+                confidence: .needsReview,
+                sourceMeetingTitle: meeting.title,
+                references: [],
+                fallbackDetail: "No claim text was available to verify."
+            )
+        }
+
+        if let evidence = bestEvidenceMatch(for: cleaned, in: meeting),
+           !evidence.sourceReferences.isEmpty
+        {
+            return sourceProof(
+                references: evidence.sourceReferences,
+                meeting: meeting,
+                fallbackDetail: "Matched saved evidence in this meeting."
+            )
+        }
+
+        let transcriptReferences = matchingTranscriptReferences(for: cleaned, in: meeting)
+        if !transcriptReferences.isEmpty {
+            return sourceProof(
+                references: transcriptReferences,
+                meeting: meeting,
+                fallbackDetail: "Matched transcript proof in this meeting."
+            )
+        }
+
+        let audioReferences = matchingAudioReferences(for: cleaned, in: meeting)
+        if !audioReferences.isEmpty {
+            return sourceProof(
+                references: audioReferences,
+                meeting: meeting,
+                fallbackDetail: "Matched an attached audio transcript in this meeting."
+            )
+        }
+
+        let noteReferences = matchingNoteReferences(for: cleaned, in: meeting)
+        if !noteReferences.isEmpty {
+            return sourceProof(
+                references: noteReferences,
+                meeting: meeting,
+                fallbackDetail: "Matched saved notes in this meeting."
+            )
+        }
+
+        if let calendarReference = calendarReference(for: cleaned, in: meeting) {
+            return sourceProof(
+                references: [calendarReference],
+                meeting: meeting,
+                fallbackDetail: "Matched calendar context in this meeting."
+            )
+        }
+
+        let hasSourceContext = !meeting.rawNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !meeting.transcript.isEmpty
+            || meeting.audioRecordings.contains { !$0.transcript.isEmpty || !$0.linkedNote.isEmpty }
+
+        return SourceProof(
+            confidence: hasSourceContext ? .inferred : .needsReview,
+            sourceMeetingTitle: meeting.title,
+            references: [],
+            fallbackDetail: hasSourceContext
+                ? "Generated from saved meeting context without a direct source line."
+                : "Add notes or transcript lines before treating this as fact."
+        )
+    }
+
+    func sourceProof(for evidence: EvidenceItem, in meeting: Meeting) -> SourceProof {
+        if !evidence.sourceReferences.isEmpty {
+            return sourceProof(
+                references: evidence.sourceReferences,
+                meeting: meeting,
+                fallbackDetail: "Matched the saved source for this point."
+            )
+        }
+
+        return sourceProof(for: evidence.text, in: meeting)
+    }
+
+    func sourceProof(for commitment: Commitment, in meeting: Meeting) -> SourceProof {
+        if !commitment.sourceReferences.isEmpty {
+            return sourceProof(
+                references: commitment.sourceReferences,
+                meeting: meeting,
+                fallbackDetail: "Matched the saved source for this action."
+            )
+        }
+
+        return sourceProof(for: commitment.statement, in: meeting)
+    }
+
+    func sourceProof(for contribution: AISpeakerContribution, in meeting: Meeting) -> SourceProof {
+        if !contribution.sourceReferences.isEmpty {
+            return sourceProof(
+                references: contribution.sourceReferences,
+                meeting: meeting,
+                fallbackDetail: "Matched the numbered transcript line used for this speaker point."
+            )
+        }
+        return sourceProof(for: contribution.contribution, in: meeting)
+    }
+
     func signals(for meeting: Meeting) -> MeetingSignals {
         if !meeting.allowsMeetingSignalExtraction {
             return MeetingSignals(decisions: [], actions: [], risks: [], questions: [])
@@ -625,6 +751,9 @@ final class MeetingStore {
             guard !Task.isCancelled, let self else { return }
             guard let index = self.meetings.firstIndex(where: { $0.id == id }) else { return }
             self.refreshSummariesIfNeeded(at: index)
+            try? await Task.sleep(for: .milliseconds(550))
+            guard !Task.isCancelled else { return }
+            self.scheduleAIProcessing(for: id)
         }
     }
 
@@ -633,16 +762,21 @@ final class MeetingStore {
         guard !cleaned.isEmpty, let index = meetings.firstIndex(where: { $0.id == id }) else { return }
         meetings[index].title = cleaned
         refreshSummariesIfNeeded(at: index)
+        scheduleAIProcessing(for: id)
     }
 
     func updateMeetingMode(_ mode: MeetingMode, for id: Meeting.ID) {
         guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
         meetings[index].meetingMode = mode
+        refreshSummariesIfNeeded(at: index)
+        scheduleAIProcessing(for: id)
     }
 
     func updateConsentState(_ state: ConsentState, for id: Meeting.ID) {
         guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
         meetings[index].consentState = state
+        refreshSummariesIfNeeded(at: index)
+        scheduleAIProcessing(for: id)
     }
 
     func updateRetentionPolicy(_ policy: RetentionPolicy, for id: Meeting.ID) {
@@ -658,6 +792,13 @@ final class MeetingStore {
     func purgeTranscript(for id: Meeting.ID) {
         guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
         meetings[index].transcript = []
+        for recordingIndex in meetings[index].audioRecordings.indices {
+            meetings[index].audioRecordings[recordingIndex].transcript = ""
+            meetings[index].audioRecordings[recordingIndex].transcriptionSegments = []
+            meetings[index].audioRecordings[recordingIndex].transcriptionProvider = nil
+            meetings[index].audioRecordings[recordingIndex].diarizationAvailable = false
+        }
+        meetings[index].aiBrief?.speakerContributions = []
         meetings[index].retentionPolicy = .notesOnly
         meetings[index].transcriptVisibilityEnabled = false
         meetings[index].stage = "Transcript purged after review"
@@ -680,6 +821,9 @@ final class MeetingStore {
         meetings[index].commitments[commitmentIndex].status = status
         if status == .fulfilled || status == .superseded {
             ReminderScheduler.cancel(meetingID: meetingID, commitmentID: commitmentID)
+            meetings[index].commitments[commitmentIndex].reminderID = nil
+            meetings[index].commitments[commitmentIndex].reminderFireDate = nil
+            meetings[index].commitments[commitmentIndex].reminderScheduledAt = nil
         }
     }
 
@@ -696,9 +840,34 @@ final class MeetingStore {
         meetings[index].commitments[commitmentIndex].dueDateOverride = dueDateOverride
     }
 
+    func updateCommitmentReminder(
+        commitmentID: Commitment.ID,
+        for meetingID: Meeting.ID,
+        identifier: String,
+        fireDate: Date
+    ) {
+        guard let index = meetings.firstIndex(where: { $0.id == meetingID }) else { return }
+        guard let commitmentIndex = meetings[index].commitments.firstIndex(where: { $0.id == commitmentID }) else { return }
+        meetings[index].commitments[commitmentIndex].reminderID = identifier
+        meetings[index].commitments[commitmentIndex].reminderFireDate = fireDate
+        meetings[index].commitments[commitmentIndex].reminderScheduledAt = .now
+    }
+
+    func clearCommitmentReminder(commitmentID: Commitment.ID, for meetingID: Meeting.ID) {
+        guard let index = meetings.firstIndex(where: { $0.id == meetingID }) else { return }
+        guard let commitmentIndex = meetings[index].commitments.firstIndex(where: { $0.id == commitmentID }) else { return }
+        ReminderScheduler.cancel(meetingID: meetingID, commitmentID: commitmentID)
+        meetings[index].commitments[commitmentIndex].reminderID = nil
+        meetings[index].commitments[commitmentIndex].reminderFireDate = nil
+        meetings[index].commitments[commitmentIndex].reminderScheduledAt = nil
+    }
+
     func selectTemplate(_ template: NoteTemplate, for id: Meeting.ID) {
         guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        guard meetings[index].selectedTemplate != template else { return }
         meetings[index].selectedTemplate = template
+        refreshSummariesIfNeeded(at: index)
+        scheduleAIProcessing(for: id)
     }
 
     func selectPrompt(_ promptID: AIResponse.ID, for id: Meeting.ID) {
@@ -724,7 +893,7 @@ final class MeetingStore {
         guard meetings[index].contextMode != mode else { return }
         meetings[index].contextMode = mode
         // Re-tailor the model brief to the chosen lens (no-op without the model).
-        Task { await processWithAI(for: id) }
+        scheduleAIProcessing(for: id)
     }
 
     // MARK: - Meeting Score (Tier 2)
@@ -807,8 +976,25 @@ final class MeetingStore {
             meetings[index].attendees.append(cleanedNew)
         }
         meetings[index].attendees = Array(Set(meetings[index].attendees)).sorted()
+        if var brief = meetings[index].aiBrief {
+            brief.speakerContributions = brief.speakerContributions.map { contribution in
+                guard contribution.speaker.caseInsensitiveCompare(cleanedCurrent) == .orderedSame else {
+                    return contribution
+                }
+                var updated = contribution
+                updated.speaker = cleanedNew
+                updated.sourceReferences = updated.sourceReferences.map { reference in
+                    var revised = reference
+                    revised.speaker = cleanedNew
+                    return revised
+                }
+                return updated
+            }
+            meetings[index].aiBrief = brief
+        }
         meetings[index].stage = "Speaker labels reviewed"
         refreshSummariesIfNeeded(at: index)
+        scheduleAIProcessing(for: meetingID)
     }
 
     // MARK: - Storage, Backup, and Privacy Controls
@@ -844,6 +1030,8 @@ final class MeetingStore {
     enum BackupError: LocalizedError {
         case unreadable
         case newerVersion(Int)
+        case tooLarge
+        case invalidContents(String)
 
         var errorDescription: String? {
             switch self {
@@ -851,37 +1039,91 @@ final class MeetingStore {
                 return "That file isn't a Scribeflow backup, or it's damaged."
             case .newerVersion(let version):
                 return "This backup (v\(version)) was made by a newer version of Scribeflow. Update the app, then restore."
+            case .tooLarge:
+                return "This backup is too large to restore safely on this device."
+            case .invalidContents(let message):
+                return "This backup cannot be restored safely: \(message)"
             }
         }
     }
 
-    func makeBackupData(includeAudio: Bool) throws -> Data {
-        let audioFiles: [ScribeflowBackupAudioFile]
-        if includeAudio {
-            let fileNames = Set(meetings.flatMap { $0.audioRecordings.map(\.fileName) })
-            audioFiles = fileNames.compactMap { fileName in
-                let url = RecordingFileStore.url(for: fileName)
-                guard let data = try? Data(contentsOf: url) else { return nil }
-                return ScribeflowBackupAudioFile(fileName: fileName, data: data)
-            }
-        } else {
-            audioFiles = []
-        }
-
-        let package = ScribeflowBackupPackage(
-            schemaVersion: Self.currentSchemaVersion,
-            exportedAt: .now,
-            meetings: meetings,
-            audioFiles: audioFiles
+    func backupPreview(from data: Data) throws -> ScribeflowBackupPreview {
+        let package = try decodedBackupPackage(from: data)
+        return ScribeflowBackupPreview(
+            schemaVersion: package.schemaVersion,
+            exportedAt: package.exportedAt,
+            meetingsCount: package.meetings.count,
+            audioFilesCount: package.audioFiles.count
         )
+    }
 
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        return try encoder.encode(package)
+    func makeBackupData(includeAudio: Bool) async throws -> Data {
+        let snapshot = meetings
+        return try await BackupArchiveService.shared.makeBackupData(
+            meetings: snapshot,
+            schemaVersion: Self.currentSchemaVersion,
+            includeAudio: includeAudio
+        )
+    }
+
+    func automaticBackups() async throws -> [AutomaticBackupSnapshot] {
+        try await BackupArchiveService.shared.automaticBackups()
+    }
+
+    func makeAutomaticBackupNow() async throws -> AutomaticBackupSnapshot {
+        let snapshot = meetings
+        guard let backup = try await BackupArchiveService.shared.saveAutomaticBackup(
+            meetings: snapshot,
+            schemaVersion: Self.currentSchemaVersion,
+            force: true
+        ) else {
+            throw BackupArchiveError.noData
+        }
+        return backup
+    }
+
+    func automaticBackupData(for snapshot: AutomaticBackupSnapshot) async throws -> Data {
+        try await BackupArchiveService.shared.data(for: snapshot)
     }
 
     func restoreBackupData(_ data: Data) throws {
+        let package = try decodedBackupPackage(from: data)
+
+        // Best-effort safety snapshot of the CURRENT library before the
+        // destructive restore, so the user can recover their pre-restore state
+        // if anything below fails.
+        if let currentData = try? encodedMeetings() {
+            try? currentData.write(to: backupURL, options: .atomic)
+        }
+
+        try replaceRecordingFiles(with: package.audioFiles)
+
+        for meeting in meetings {
+            cancelReminders(for: meeting)
+        }
+
+        forceIndexRebuildAfterMutation = true
+        let restoredAudioFileNames = Set(package.audioFiles.map(\.fileName))
+        meetings = package.meetings.map { restored in
+            var normalized = Self.normalizedMeeting(restored)
+            normalized.audioRecordings.removeAll { !restoredAudioFileNames.contains($0.fileName) }
+            normalized.commitments = normalized.commitments.map { commitment in
+                var restoredCommitment = commitment
+                restoredCommitment.reminderID = nil
+                restoredCommitment.reminderFireDate = nil
+                restoredCommitment.reminderScheduledAt = nil
+                return restoredCommitment
+            }
+            return normalized
+        }
+
+        for index in meetings.indices {
+            refreshSummariesIfNeeded(at: index)
+        }
+    }
+
+    private func decodedBackupPackage(from data: Data) throws -> ScribeflowBackupPackage {
+        guard data.count <= 750_000_000 else { throw BackupError.tooLarge }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let package: ScribeflowBackupPackage
@@ -895,27 +1137,64 @@ final class MeetingStore {
         guard package.schemaVersion <= Self.currentSchemaVersion else {
             throw BackupError.newerVersion(package.schemaVersion)
         }
-
-        // Best-effort safety snapshot of the CURRENT library before the
-        // destructive restore, so the user can recover their pre-restore state
-        // if anything below fails.
-        if let currentData = try? encodedMeetings() {
-            try? currentData.write(to: backupURL, options: .atomic)
+        guard package.schemaVersion > 0 else {
+            throw BackupError.invalidContents("invalid schema version")
         }
-
-        try RecordingFileStore.ensureDirectory()
-        RecordingFileStore.deleteAllFiles()
-        for audioFile in package.audioFiles {
-            let url = RecordingFileStore.url(for: audioFile.fileName)
-            try audioFile.data.write(to: url, options: [.atomic])
-            RecordingFileStore.protectFile(at: url)
+        guard Set(package.meetings.map(\.id)).count == package.meetings.count else {
+            throw BackupError.invalidContents("duplicate note identifiers")
         }
+        let audioFileNames = package.audioFiles.map(\.fileName)
+        guard Set(audioFileNames).count == audioFileNames.count else {
+            throw BackupError.invalidContents("duplicate audio files")
+        }
+        guard audioFileNames.allSatisfy(Self.isSafeBackupAudioFileName) else {
+            throw BackupError.invalidContents("unsafe audio file name")
+        }
+        return package
+    }
 
-        forceIndexRebuildAfterMutation = true
-        meetings = package.meetings.map(Self.normalizedMeeting)
+    private static func isSafeBackupAudioFileName(_ fileName: String) -> Bool {
+        !fileName.isEmpty
+            && URL(fileURLWithPath: fileName).lastPathComponent == fileName
+            && !fileName.contains("..")
+    }
 
-        for index in meetings.indices {
-            refreshSummariesIfNeeded(at: index)
+    private func replaceRecordingFiles(with audioFiles: [ScribeflowBackupAudioFile]) throws {
+        let fileManager = FileManager.default
+        let destination = RecordingFileStore.directoryURL
+        let parent = destination.deletingLastPathComponent()
+        try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+
+        let staging = parent.appendingPathComponent("Recordings.restore-\(UUID().uuidString)", isDirectory: true)
+        let rollback = parent.appendingPathComponent("Recordings.rollback-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
+
+        do {
+            for audioFile in audioFiles {
+                let url = staging.appendingPathComponent(audioFile.fileName, isDirectory: false)
+                try audioFile.data.write(to: url, options: [.atomic])
+                RecordingFileStore.protectFile(at: url)
+            }
+
+            let hadExistingDirectory = fileManager.fileExists(atPath: destination.path)
+            if hadExistingDirectory {
+                try fileManager.moveItem(at: destination, to: rollback)
+            }
+
+            do {
+                try fileManager.moveItem(at: staging, to: destination)
+                try? fileManager.removeItem(at: rollback)
+                try RecordingFileStore.ensureDirectory()
+            } catch {
+                try? fileManager.removeItem(at: destination)
+                if hadExistingDirectory {
+                    try? fileManager.moveItem(at: rollback, to: destination)
+                }
+                throw error
+            }
+        } catch {
+            try? fileManager.removeItem(at: staging)
+            throw error
         }
     }
 
@@ -926,9 +1205,52 @@ final class MeetingStore {
         return try encoder.encode(meetings)
     }
 
-    func deleteAllUserData() {
+    func deleteAllUserData() async {
+        aiProcessingTasks.values.forEach { $0.cancel() }
+        aiProcessingTasks.removeAll()
+        aiProcessingRunIDs.removeAll()
+        aiProcessingIDs.removeAll()
+        for meeting in meetings {
+            cancelReminders(for: meeting)
+        }
+        saveTask?.cancel()
+        regenTask?.cancel()
         RecordingFileStore.deleteAllFiles()
+        forceIndexRebuildAfterMutation = true
         meetings = []
+        saveTask?.cancel()
+        try? FileManager.default.removeItem(at: saveURL)
+        try? FileManager.default.removeItem(at: backupURL)
+
+        let folder = saveURL.deletingLastPathComponent()
+        if let files = try? FileManager.default.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) {
+            for file in files where file.lastPathComponent.hasPrefix("meetings.corrupt-") {
+                try? FileManager.default.removeItem(at: file)
+            }
+        }
+
+        SpotlightIndex.removeAll()
+        WidgetSharedStore.clear()
+        WebhookStore.shared.clear()
+        AnalyticsLog.shared.clear()
+        await TranscriptionRetryQueue.shared.clear()
+        await BackupArchiveService.shared.deleteAllAutomaticBackups()
+        await DiagnosticsArchive.shared.clear()
+
+        let defaults = UserDefaults.standard
+        [
+            "scribeflow.currentUserEmail",
+            "scribeflow.investorDemoMode",
+            "scribeflow.demoModePreparedAt",
+            "scribeflow.localAccounts.v1",
+            "scribeflow.wantsBiometric",
+            "scribeflow.bioAsked",
+            TranscriptionProviderFactory.remoteTranscriptionConsentKey
+        ].forEach(defaults.removeObject(forKey:))
     }
 
     @discardableResult
@@ -1013,7 +1335,12 @@ final class MeetingStore {
     }
 
     func deleteMeeting(_ id: Meeting.ID) {
+        aiProcessingTasks[id]?.cancel()
+        aiProcessingTasks[id] = nil
+        aiProcessingRunIDs[id] = nil
+        aiProcessingIDs.remove(id)
         if let meeting = meeting(withID: id) {
+            cancelReminders(for: meeting)
             for recording in meeting.audioRecordings {
                 RecordingFileStore.deleteFile(named: recording.fileName)
             }
@@ -1026,6 +1353,10 @@ final class MeetingStore {
     /// the caller can offer Undo and put it back in place.
     func softDeleteMeeting(_ id: Meeting.ID) -> (Meeting, Int)? {
         guard let idx = meetings.firstIndex(where: { $0.id == id }) else { return nil }
+        aiProcessingTasks[id]?.cancel()
+        aiProcessingTasks[id] = nil
+        aiProcessingRunIDs[id] = nil
+        aiProcessingIDs.remove(id)
         let snapshot = meetings[idx]
         meetings.remove(at: idx)
         return (snapshot, idx)
@@ -1041,6 +1372,7 @@ final class MeetingStore {
     /// Permanently removes the on-disk audio files for a soft-deleted meeting.
     /// Called after the Undo window elapses.
     func finalizeDelete(_ meeting: Meeting) {
+        cancelReminders(for: meeting)
         for recording in meeting.audioRecordings {
             RecordingFileStore.deleteFile(named: recording.fileName)
         }
@@ -1055,10 +1387,31 @@ final class MeetingStore {
         duplicate.stage = "Duplicated for follow-up"
         duplicate.isPinned = false
         duplicate.audioRecordings = []
+        duplicate.calendarEventID = nil
+        duplicate.calendarStartDate = nil
+        duplicate.calendarEndDate = nil
         duplicate.summaries = generatedSummaries(for: duplicate)
+        duplicate.evidenceItems = generatedEvidenceItems(for: duplicate)
+        let duplicateSource = duplicate
+        duplicate.commitments = duplicateSource.commitments.map { commitment in
+            var copied = commitment
+            copied.id = UUID()
+            copied.status = .open
+            copied.reminderID = nil
+            copied.reminderFireDate = nil
+            copied.reminderScheduledAt = nil
+            copied.sourceReferences = sourceReferences(for: copied.statement, in: duplicateSource)
+            return copied
+        }
         duplicate.selectedPromptID = duplicate.prompts.first?.id
         meetings.insert(duplicate, at: 0)
         return duplicate.id
+    }
+
+    private func cancelReminders(for meeting: Meeting) {
+        for commitment in meeting.commitments where commitment.hasReminder {
+            ReminderScheduler.cancel(meetingID: meeting.id, commitmentID: commitment.id)
+        }
     }
 
     func exportText(for id: Meeting.ID, format: MeetingExportFormat) -> String? {
@@ -1260,7 +1613,11 @@ final class MeetingStore {
         guard meetings[index].transcript.count != oldCount else { return }
 
         meetings[index].stage = "Transcript edited for privacy"
+        meetings[index].aiBrief?.speakerContributions.removeAll { contribution in
+            contribution.sourceReferences.contains { $0.transcriptLineID == lineID }
+        }
         refreshSummariesIfNeeded(at: index)
+        scheduleAIProcessing(for: meetingID)
     }
 
     func addMeeting(
@@ -1320,7 +1677,7 @@ final class MeetingStore {
         // Upgrade to a model-processed brief in the background when available;
         // the heuristic above is shown instantly in the meantime.
         let newID = meeting.id
-        Task { await processWithAI(for: newID) }
+        scheduleAIProcessing(for: newID)
         return meeting.id
     }
 
@@ -1449,7 +1806,11 @@ final class MeetingStore {
         notes: String,
         recording: AudioRecordingAttachment
     ) async -> Meeting.ID {
-        let transcriptLines = transcriptLines(from: recording.transcript, speaker: "Voice note", role: recording.source.title)
+        let transcriptLines = transcriptLines(
+            from: recording,
+            fallbackSpeaker: "Voice note",
+            fallbackRole: recording.source.title
+        )
         let cleanedNotes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
         let fallbackNotes = recording.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         let rawNotes = cleanedNotes.isEmpty
@@ -1487,9 +1848,9 @@ final class MeetingStore {
         }
 
         let newTranscript = transcriptLines(
-            from: recording.transcript,
-            speaker: "Voice note",
-            role: recording.source.title
+            from: recording,
+            fallbackSpeaker: "Voice note",
+            fallbackRole: recording.source.title
         )
         if !newTranscript.isEmpty {
             let existingFingerprints = Set(meetings[index].transcript.map { normalizedFingerprint($0.text) })
@@ -1518,6 +1879,7 @@ final class MeetingStore {
         meetings[index].stage = "Voice recording attached"
         meetings[index].sensitiveFlags = detectedSensitiveFlags(for: meetings[index])
         refreshSummariesIfNeeded(at: index)
+        scheduleAIProcessing(for: meetingID)
     }
 
     func updateRecordingTitle(_ title: String, recordingID: AudioRecordingAttachment.ID, in meetingID: Meeting.ID) {
@@ -1541,6 +1903,7 @@ final class MeetingStore {
             ? "Audio removed after review"
             : "Voice recording removed"
         refreshSummariesIfNeeded(at: meetingIndex)
+        scheduleAIProcessing(for: meetingID)
     }
 
     private func deleteRecordings(where shouldDelete: (AudioRecordingAttachment) -> Bool) -> Int {
@@ -1576,6 +1939,58 @@ final class MeetingStore {
         RecordingFileStore.url(for: recording.fileName)
     }
 
+    @discardableResult
+    func applyRecoveredTranscript(
+        _ result: TranscriptionResult,
+        recordingID: AudioRecordingAttachment.ID,
+        meetingID: Meeting.ID
+    ) -> Bool {
+        guard let meetingIndex = meetings.firstIndex(where: { $0.id == meetingID }),
+              let recordingIndex = meetings[meetingIndex].audioRecordings.firstIndex(where: { $0.id == recordingID })
+        else { return false }
+
+        let cleaned = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return false }
+        meetings[meetingIndex].audioRecordings[recordingIndex].transcript = cleaned
+        meetings[meetingIndex].audioRecordings[recordingIndex].transcriptionSegments =
+            SpeakerIdentityResolver.normalizedSegments(result.segments)
+        meetings[meetingIndex].audioRecordings[recordingIndex].transcriptionProvider = result.provider
+        meetings[meetingIndex].audioRecordings[recordingIndex].diarizationAvailable = result.diarizationAvailable
+
+        let recoveredLines: [TranscriptLine]
+        if result.segments.isEmpty {
+            recoveredLines = transcriptLines(
+                from: cleaned,
+                speaker: "Voice note",
+                role: result.provider.title
+            )
+        } else {
+            recoveredLines = SpeakerIdentityResolver.normalizedSegments(result.segments).compactMap { segment in
+                let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { return nil }
+                return TranscriptLine(
+                    speaker: segment.speaker,
+                    role: result.provider.title,
+                    text: text
+                )
+            }
+        }
+
+        let existing = Set(meetings[meetingIndex].transcript.map { normalizedFingerprint($0.text) })
+        meetings[meetingIndex].transcript.append(contentsOf: recoveredLines.filter {
+            !existing.contains(normalizedFingerprint($0.text))
+        })
+        meetings[meetingIndex].transcriptVisibilityEnabled = true
+        meetings[meetingIndex].retentionPolicy = .transcript7Days
+        meetings[meetingIndex].stage = result.usedFallback
+            ? "Transcript recovered locally"
+            : "Transcript recovered"
+        meetings[meetingIndex].sensitiveFlags = detectedSensitiveFlags(for: meetings[meetingIndex])
+        refreshSummariesIfNeeded(at: meetingIndex)
+        scheduleAIProcessing(for: meetingID)
+        return true
+    }
+
     func rewriteMeetingNotes(for id: Meeting.ID, style: NoteRewriteStyle = .concise) async -> String {
         guard let index = meetings.firstIndex(where: { $0.id == id }) else {
             return "Meeting not found."
@@ -1587,8 +2002,9 @@ final class MeetingStore {
             title: meeting.title,
             objective: meeting.objective,
             notes: meeting.rawNotes,
-            transcriptParagraphs: meeting.transcript.map(\.text),
-            style: style
+            transcriptParagraphs: meeting.transcript.map { "\($0.speaker): \($0.text)" },
+            style: style,
+            isPersonalCapture: meeting.isPersonalCapture
         )
 
         switch outcome {
@@ -1621,20 +2037,34 @@ final class MeetingStore {
 
     func isProcessingAI(_ id: Meeting.ID) -> Bool { aiProcessingIDs.contains(id) }
 
+    private func scheduleAIProcessing(for id: Meeting.ID) {
+        aiProcessingTasks[id]?.cancel()
+        aiProcessingTasks[id] = Task { [weak self] in
+            guard let self else { return }
+            await self.processWithAI(for: id)
+            guard !Task.isCancelled else { return }
+            self.aiProcessingTasks[id] = nil
+        }
+    }
+
     func processWithAI(for id: Meeting.ID) async {
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *) {
             guard case .available = AppleIntelligenceBriefExtractor.availability() else { return }
             guard let meeting = meeting(withID: id) else { return }
+            let runID = UUID()
+            aiProcessingRunIDs[id] = runID
             aiProcessingIDs.insert(id)
-            defer { aiProcessingIDs.remove(id) }
+            defer {
+                if aiProcessingRunIDs[id] == runID {
+                    aiProcessingRunIDs[id] = nil
+                    aiProcessingIDs.remove(id)
+                }
+            }
             do {
-                let result = try await AppleIntelligenceBriefExtractor.extract(
-                    title: meeting.title,
-                    notes: meeting.rawNotes,
-                    transcriptParagraphs: meeting.transcript.map(\.text),
-                    focus: meeting.contextMode.aiHint
-                )
+                let result = try await AppleIntelligenceBriefExtractor.extract(meeting: meeting)
+                try Task.checkCancellation()
+                guard aiProcessingRunIDs[id] == runID else { return }
                 guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
                 var brief = result.brief
                 if !meeting.allowsMeetingSignalExtraction {
@@ -1685,6 +2115,17 @@ final class MeetingStore {
             guard !Task.isCancelled else { return }
             do {
                 try await writer.saveMeetings(snapshot, to: url)
+                let defaults = UserDefaults.standard
+                let preferenceKey = "scribeflow.automaticBackupsEnabled"
+                let automaticBackupsEnabled = defaults.object(forKey: preferenceKey) == nil
+                    ? true
+                    : defaults.bool(forKey: preferenceKey)
+                if automaticBackupsEnabled {
+                    _ = try? await BackupArchiveService.shared.saveAutomaticBackup(
+                        meetings: snapshot,
+                        schemaVersion: Self.currentSchemaVersion
+                    )
+                }
                 await MainActor.run { [weak self] in
                     guard let self else { return }
                     self.lastSaveFailed = false
@@ -1704,9 +2145,12 @@ final class MeetingStore {
         var meeting = meetings[index]
         meeting.summaries = generatedSummaries(for: meeting)
         meeting.evidenceItems = generatedEvidenceItems(for: meeting)
-        // Keep explicitly authored seed commitments; otherwise derive from notes.
-        if !(isSeedLoad && !meeting.commitments.isEmpty) {
-            meeting.commitments = generatedCommitments(for: meeting)
+        // Regeneration must never erase a user's done/skipped state, owner, or
+        // edited due date. Seed data keeps its authored copy and gains proof.
+        if isSeedLoad && !meeting.commitments.isEmpty {
+            meeting.commitments = commitmentsAddingSourceProof(in: meeting)
+        } else {
+            meeting.commitments = generatedCommitmentsPreservingUserState(for: meeting)
         }
         meeting.sensitiveFlags = detectedSensitiveFlags(for: meeting)
         meetings[index] = meeting
@@ -1720,6 +2164,8 @@ final class MeetingStore {
         meeting.evidenceItems = generatedEvidenceItems(for: meeting)
         if meeting.commitments.isEmpty {
             meeting.commitments = generatedCommitments(for: meeting)
+        } else {
+            meeting.commitments = commitmentsAddingSourceProof(in: meeting)
         }
         meeting.sensitiveFlags = detectedSensitiveFlags(for: meeting)
     }
@@ -1753,7 +2199,7 @@ final class MeetingStore {
         if let brief = meeting.aiBrief, !brief.isEmpty {
             decisions = allowsMeetingSignals ? brief.decisions : []
             nextSteps = allowsAccountability ? brief.actions.map(aiActionSentence) : []
-            keyPoints = brief.keyPoints
+            keyPoints = brief.whatMatters.isEmpty ? brief.keyPoints : brief.whatMatters
         } else {
             decisions = allowsMeetingSignals ? MeetingIntelligenceEngine.decisions(for: meeting, limit: 3) : []
             nextSteps = allowsAccountability
@@ -1844,6 +2290,29 @@ final class MeetingStore {
         }
 
         return merged.prefix(6).joined(separator: "\n")
+    }
+
+    private func enhancedPersonalNotes(notes: String, transcriptParagraphs: [String]) -> String {
+        let noteLines = notes
+            .split(whereSeparator: \.isNewline)
+            .map { polishedFragment(from: String($0)) }
+            .filter { !$0.isEmpty }
+        let transcriptLines = transcriptParagraphs
+            .map(polishedFragment)
+            .filter { $0.count > 12 }
+
+        var seen: Set<String> = []
+        let ranked = noteLines + rankTranscriptHighlights(transcriptLines)
+        let unique = ranked.compactMap { line -> String? in
+            let body = sentenceBody(line)
+            let fingerprint = normalizedFingerprint(body)
+            guard !body.isEmpty, seen.insert(fingerprint).inserted else { return nil }
+            return capitalizedSentence(body).hasSuffix(".")
+                ? capitalizedSentence(body)
+                : "\(capitalizedSentence(body))."
+        }
+
+        return unique.prefix(6).map { "- \($0)" }.joined(separator: "\n")
     }
 
     private func rankTranscriptHighlights(_ paragraphs: [String]) -> [String] {
@@ -2060,6 +2529,7 @@ final class MeetingStore {
 
         return noteLines.map { line in
             let snippets = supportingSnippets(for: line, in: meeting.transcript.map(\.text))
+            let references = sourceReferences(for: line, in: meeting)
             let lower = line.lowercased()
             let level: EvidenceLevel
 
@@ -2074,7 +2544,8 @@ final class MeetingStore {
             return EvidenceItem(
                 text: polishedSignalLine(line),
                 level: level,
-                supportingSnippets: snippets
+                supportingSnippets: snippets,
+                sourceReferences: references
             )
         }
         .filter { !$0.text.isEmpty }
@@ -2099,7 +2570,8 @@ final class MeetingStore {
                     dueHint: a.due.isEmpty ? nil : a.due,
                     status: status,
                     priority: a.priority.isEmpty ? nil : a.priority,
-                    rationale: a.why.isEmpty ? nil : a.why
+                    rationale: a.why.isEmpty ? nil : a.why,
+                    sourceReferences: sourceReferences(for: a.task, in: meeting)
                 )
             }
         }
@@ -2119,13 +2591,78 @@ final class MeetingStore {
                 owner: action.owner,
                 sourceSpeaker: action.sourceSpeaker,
                 dueHint: action.dueHint,
-                status: status
+                status: status,
+                sourceReferences: sourceReferences(for: action.text, in: meeting)
             )
+        }
+    }
+
+    private func generatedCommitmentsPreservingUserState(for meeting: Meeting) -> [Commitment] {
+        let previousByFingerprint = Dictionary(
+            meeting.commitments.compactMap { commitment -> (String, Commitment)? in
+                let fingerprint = normalizedFingerprint(commitment.statement)
+                guard !fingerprint.isEmpty else { return nil }
+                return (fingerprint, commitment)
+            },
+            uniquingKeysWith: { existing, _ in existing }
+        )
+
+        return generatedCommitments(for: meeting).map { generated in
+            let fingerprint = normalizedFingerprint(generated.statement)
+            guard let previous = previousByFingerprint[fingerprint] else { return generated }
+
+            var preserved = generated
+            preserved.id = previous.id
+            preserved.status = previous.status
+            preserved.owner = previous.owner.isEmpty || previous.owner == "Owner not named"
+                ? generated.owner
+                : previous.owner
+            preserved.dueDateOverride = previous.dueDateOverride
+            preserved.dueHint = previous.dueDateOverride == nil
+                ? (previous.dueHint ?? generated.dueHint)
+                : previous.dueHint
+            preserved.priority = previous.priority ?? generated.priority
+            preserved.rationale = previous.rationale ?? generated.rationale
+            preserved.reminderID = previous.reminderID
+            preserved.reminderFireDate = previous.reminderFireDate
+            preserved.reminderScheduledAt = previous.reminderScheduledAt
+            preserved.sourceReferences = generated.sourceReferences.isEmpty
+                ? previous.sourceReferences
+                : generated.sourceReferences
+            return preserved
+        }
+    }
+
+    private func commitmentsAddingSourceProof(in meeting: Meeting) -> [Commitment] {
+        meeting.commitments.map { commitment in
+            guard commitment.sourceReferences.isEmpty else { return commitment }
+            var enriched = commitment
+            enriched.sourceReferences = sourceReferences(for: commitment.statement, in: meeting)
+            return enriched
         }
     }
 
     private func transcriptLines(from transcript: String, speaker: String, role: String) -> [TranscriptLine] {
         SpeakerTranscriptParser.lines(from: transcript, defaultSpeaker: speaker, defaultRole: role)
+    }
+
+    private func transcriptLines(
+        from recording: AudioRecordingAttachment,
+        fallbackSpeaker: String,
+        fallbackRole: String
+    ) -> [TranscriptLine] {
+        let segments = SpeakerIdentityResolver.normalizedSegments(recording.transcriptionSegments)
+        if !segments.isEmpty {
+            let role = recording.transcriptionProvider?.title ?? fallbackRole
+            return segments.map {
+                TranscriptLine(speaker: $0.speaker, role: role, text: $0.text)
+            }
+        }
+        return transcriptLines(
+            from: recording.transcript,
+            speaker: fallbackSpeaker,
+            role: fallbackRole
+        )
     }
 
     private func detectedSensitiveFlags(for meeting: Meeting) -> [SensitiveFlag] {
@@ -2316,6 +2853,151 @@ final class MeetingStore {
         }
         .prefix(2)
         .map { $0 }
+    }
+
+    private func sourceProof(
+        references: [SourceReference],
+        meeting: Meeting,
+        fallbackDetail: String
+    ) -> SourceProof {
+        SourceProof(
+            confidence: sourceConfidence(for: references),
+            sourceMeetingTitle: meeting.title,
+            references: references,
+            fallbackDetail: fallbackDetail
+        )
+    }
+
+    private func sourceConfidence(for references: [SourceReference]) -> SourceProofConfidence {
+        if references.contains(where: { $0.kind == .transcript || $0.kind == .audioTranscript }) {
+            return .confirmed
+        }
+        if references.contains(where: { $0.kind == .note || $0.kind == .calendar }) {
+            return .likely
+        }
+        if references.contains(where: { $0.kind == .meetingContext }) {
+            return .inferred
+        }
+        return .needsReview
+    }
+
+    private func sourceReferences(for text: String, in meeting: Meeting) -> [SourceReference] {
+        let transcriptReferences = matchingTranscriptReferences(for: text, in: meeting)
+        let audioReferences = matchingAudioReferences(for: text, in: meeting)
+        let noteReferences = matchingNoteReferences(for: text, in: meeting)
+
+        let directReferences = transcriptReferences + audioReferences + noteReferences
+        if !directReferences.isEmpty {
+            return Array(directReferences.prefix(3))
+        }
+
+        if let calendarReference = calendarReference(for: text, in: meeting) {
+            return [calendarReference]
+        }
+
+        return []
+    }
+
+    private func bestEvidenceMatch(for text: String, in meeting: Meeting) -> EvidenceItem? {
+        meeting.evidenceItems.first { sourceTextMatches(text, $0.text) }
+    }
+
+    private func matchingTranscriptReferences(for text: String, in meeting: Meeting) -> [SourceReference] {
+        meeting.transcript.enumerated().compactMap { index, line in
+            guard sourceTextMatches(text, line.text) else { return nil }
+            return SourceReference(
+                meetingID: meeting.id,
+                meetingTitle: meeting.title,
+                kind: .transcript,
+                snippet: line.text,
+                speaker: line.speaker,
+                transcriptLineID: line.id,
+                lineIndex: index
+            )
+        }
+        .prefix(2)
+        .map { $0 }
+    }
+
+    private func matchingAudioReferences(for text: String, in meeting: Meeting) -> [SourceReference] {
+        meeting.audioRecordings.flatMap { recording in
+            let paragraphs = [recording.linkedNote, recording.transcript]
+                .flatMap { $0.components(separatedBy: .newlines) }
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+
+            return paragraphs.enumerated().compactMap { entry -> SourceReference? in
+                let (index, paragraph) = entry
+                guard sourceTextMatches(text, paragraph) else { return nil }
+                return SourceReference(
+                    meetingID: meeting.id,
+                    meetingTitle: meeting.title,
+                    kind: .audioTranscript,
+                    snippet: paragraph,
+                    speaker: recording.title,
+                    lineIndex: index
+                )
+            }
+        }
+        .prefix(1)
+        .map { $0 }
+    }
+
+    private func matchingNoteReferences(for text: String, in meeting: Meeting) -> [SourceReference] {
+        noteLinesWithIndex(from: meeting.rawNotes).compactMap { index, line in
+            guard sourceTextMatches(text, line) else { return nil }
+            return SourceReference(
+                meetingID: meeting.id,
+                meetingTitle: meeting.title,
+                kind: .note,
+                snippet: polishedSignalLine(line),
+                lineIndex: index
+            )
+        }
+        .prefix(1)
+        .map { $0 }
+    }
+
+    private func calendarReference(for text: String, in meeting: Meeting) -> SourceReference? {
+        guard meeting.calendarEventID != nil else { return nil }
+        let calendarText = "\(meeting.title) \(meeting.attendees.joined(separator: " ")) \(meeting.objective)"
+        guard sourceTextMatches(text, calendarText) else { return nil }
+
+        let end = meeting.calendarEndDate.map { " - \($0.formatted(date: .omitted, time: .shortened))" } ?? ""
+        return SourceReference(
+            meetingID: meeting.id,
+            meetingTitle: meeting.title,
+            kind: .calendar,
+            snippet: "\(meeting.when.formatted(date: .abbreviated, time: .shortened))\(end)"
+        )
+    }
+
+    private func noteLinesWithIndex(from notes: String) -> [(Int, String)] {
+        notes
+            .components(separatedBy: .newlines)
+            .enumerated()
+            .map { ($0.offset, $0.element.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            .filter { !$0.1.isEmpty }
+    }
+
+    private func sourceTextMatches(_ claim: String, _ source: String) -> Bool {
+        let cleanedClaim = sentenceBody(claim).lowercased()
+        let cleanedSource = sentenceBody(source).lowercased()
+        guard !cleanedClaim.isEmpty, !cleanedSource.isEmpty else { return false }
+
+        if cleanedClaim.count >= 8,
+           cleanedSource.contains(cleanedClaim) || cleanedClaim.contains(cleanedSource)
+        {
+            return true
+        }
+
+        let claimTokens = significantTokens(in: cleanedClaim)
+        let sourceTokens = significantTokens(in: cleanedSource)
+        guard claimTokens.count >= 2, sourceTokens.count >= 2 else { return false }
+
+        let overlap = claimTokens.intersection(sourceTokens).count
+        let requiredOverlap = max(2, Int(ceil(Double(claimTokens.count) * 0.5)))
+        return overlap >= requiredOverlap
     }
 
     private func extractedSignalLines(
@@ -2622,7 +3304,8 @@ final class MeetingStore {
         objective: String,
         notes: String,
         transcriptParagraphs: [String],
-        style: NoteRewriteStyle
+        style: NoteRewriteStyle,
+        isPersonalCapture: Bool
     ) async -> NotePolishOutcome {
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *) {
@@ -2634,7 +3317,8 @@ final class MeetingStore {
                         objective: objective,
                         notes: notes,
                         transcriptParagraphs: transcriptParagraphs,
-                        style: style
+                        style: style,
+                        isPersonalCapture: isPersonalCapture
                     )
 
                     if !rewritten.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -2656,7 +3340,9 @@ final class MeetingStore {
         #endif
 
         if !transcriptParagraphs.isEmpty {
-            let rewritten = enhancedLiveNotes(notes: notes, transcriptParagraphs: transcriptParagraphs)
+            let rewritten = isPersonalCapture
+                ? enhancedPersonalNotes(notes: notes, transcriptParagraphs: transcriptParagraphs)
+                : enhancedLiveNotes(notes: notes, transcriptParagraphs: transcriptParagraphs)
             return .heuristic(rewritten, "Saved with transcript-based note enhancement in \(style.title.lowercased()) style.")
         }
 
@@ -2682,7 +3368,8 @@ private enum AppleIntelligenceNoteTransformer {
         objective: String,
         notes: String,
         transcriptParagraphs: [String],
-        style: NoteRewriteStyle
+        style: NoteRewriteStyle,
+        isPersonalCapture: Bool
     ) async throws -> String {
         let styleInstruction: String
         switch style {
@@ -2696,12 +3383,15 @@ private enum AppleIntelligenceNoteTransformer {
             styleInstruction = "Emphasize owners, commitments, next steps, and follow-through."
         }
 
+        let purposeInstruction = isPersonalCapture
+            ? "This is a personal note. Organize the person's ideas and facts without turning them into meeting decisions, risks, owners, or tasks."
+            : "This is a meeting note. Prioritize confirmed outcomes, context, owners, and next steps when supported."
         let session = LanguageModelSession(instructions: """
-        You are an expert meeting notes writer.
-        Rewrite rough meeting notes into polished, professional notes that sound like a smart human wrote them during a meeting.
+        You are an expert notes editor.
+        Rewrite rough notes into polished, professional notes that remain faithful to the capture.
         Return only 4 to 6 concise bullet points.
         Each bullet must be one sentence, specific, and useful.
-        Prioritize decisions, important requirements, concerns, risks, owners, and next steps.
+        \(purposeInstruction)
         Use the person's rough notes as the anchor and use transcript context to fill in detail.
         \(styleInstruction)
         Do not add headings.
@@ -2785,6 +3475,17 @@ private struct GeneratedSection {
 
 @available(iOS 26.0, *)
 @Generable
+private struct GeneratedSpeakerContribution {
+    @Guide(description: "The speaker label exactly as it appears in the numbered transcript.")
+    var speaker: String
+    @Guide(description: "One plain-language sentence describing this person's most important contribution, position, question, or commitment. Do not infer personality or emotion.")
+    var contribution: String
+    @Guide(description: "The 1-based numbered transcript line that directly supports the contribution. Use 0 only when there is no valid source, in which case the item will be discarded.")
+    var sourceLineNumber: Int
+}
+
+@available(iOS 26.0, *)
+@Generable
 private struct GeneratedBrief {
     @Guide(description: "true if the input is real, meaningful notes (even if rough or misspelled); false if it is random, unclear, or meaningless gibberish like 'asdf 123 jkl'.")
     var makesSense: Bool
@@ -2802,6 +3503,10 @@ private struct GeneratedBrief {
     var keyPoints: [String]
     @Guide(description: "Risks, blockers, or concerns raised. Empty if none.")
     var risks: [String]
+    @Guide(description: "Up to four short points the note owner most needs to understand, ranked for the stated objective and brief focus. Do not repeat the summary or invent recommendations.")
+    var whatMatters: [String]
+    @Guide(description: "At most one important, source-backed contribution per reliably labeled speaker. Empty when the transcript has fewer than two distinct speaker labels.")
+    var speakerContributions: [GeneratedSpeakerContribution]
     @Guide(description: "For each point the user wrote, the original text as the anchor plus added context. Keep the user's structure and order.")
     var enhancedNotes: [GeneratedEnhancedNote]
     @Guide(description: "Sections specific to this meeting type that are NOT already a decision, action, question, or risk. Standup: Done / In progress. Sales: Customer needs / Budget / Stakeholders. 1:1: Wins / Looking ahead. Empty for a general meeting.")
@@ -2818,29 +3523,36 @@ private enum AppleIntelligenceBriefExtractor {
         SystemLanguageModel.default.availability
     }
 
-    static func extract(title: String, notes: String, transcriptParagraphs: [String], focus: String) async throws -> (brief: AIBriefData, detectedType: String) {
-        let lensLine = focus.isEmpty ? "" : "\n        Lens for this meeting type — emphasize accordingly: \(focus)"
+    static func extract(meeting: Meeting) async throws -> (brief: AIBriefData, detectedType: String) {
+        let purposeInstruction = meeting.isPersonalCapture
+            ? "This is a personal capture. Organize ideas and facts, but do not create meeting decisions, risks, owners, or action items unless they are explicitly written."
+            : "This is a meeting capture. Separate confirmed outcomes, commitments, unresolved questions, and context."
         let session = LanguageModelSession(instructions: """
         You are an expert meeting-notes editor inside a professional app. Turn
-        rough notes and ideas into the cleanest, most useful, presentation-ready
-        brief possible. Follow these rules strictly:
+        rough notes and transcripts into a calm brief that answers what the note
+        owner needs next. Follow these rules strictly:
 
         1. NEVER invent anything. Use only what the input (and transcript) supports.
         2. If the input is random, unclear, or meaningless gibberish, set
            makesSense=false and leave every other field empty. Do not manufacture
            meaning from nonsense.
-        3. If the input is real notes, miss NO important detail.
-        4. Be clean, professional, and easy to read.
+        3. Preserve important details, but rank them instead of repeating them.
+        4. Use short sentences, familiar words, and one idea per bullet.
         5. Put each piece of information where it belongs: summary, decisions,
            actions (with the responsible person and deadline when stated),
            openQuestions, risks/problems, keyPoints, and type-specific sections.
         6. Language: simple, sharp, professional.
         7. Remove repetition, but keep every important meaning.
-        8. Lead with what matters most so the meeting is graspable in seconds.
+        8. The summary is the bottom line. whatMatters is the smallest ranked set
+           of facts the owner needs to understand the note in seconds.
         9. If a point is genuinely unclear, put it in needsClarification — do not
            guess it.
         10. Correct spelling and grammar. Write tasks as short imperative phrases.
-            If a category has nothing, return it empty.\(lensLine)
+            If a category has nothing, return it empty.
+        11. Never merge speakers. For speakerContributions, use only the supplied
+            speaker label and cite one numbered transcript line that directly
+            supports the sentence. If labels are not distinct, return none.
+        12. \(purposeInstruction)
 
         For enhancedNotes, treat the user's own bullet points as the skeleton:
         keep each one VERBATIM as the anchor (in their order) and add a short
@@ -2848,17 +3560,37 @@ private enum AppleIntelligenceBriefExtractor {
         Never reword the anchor. Leave detail empty when there is nothing to add.
         """)
 
-        let transcriptContext = transcriptParagraphs.suffix(12).joined(separator: "\n")
+        let transcriptEvidence = selectedTranscriptEvidence(from: meeting.transcript, limit: 18)
+        let evidenceLineIndices = Set(transcriptEvidence.map { $0.0 })
+        let transcriptContext = transcriptEvidence.map { lineIndex, line in
+            let lineNumber = lineIndex + 1
+            let speaker = SpeakerIdentityResolver.normalizedDisplayName(line.speaker)
+            let role = line.role.trimmingCharacters(in: .whitespacesAndNewlines)
+            let roleLabel = role.isEmpty ? "" : " (\(role))"
+            return "\(lineNumber). [\(speaker)\(roleLabel)]: \(bounded(line.text, maxCharacters: 260))"
+        }.joined(separator: "\n")
+        let detectedSpeakers = Set(meeting.transcript.map {
+            SpeakerIdentityResolver.canonicalKey(for: $0.speaker)
+        }).filter { !$0.isEmpty }.count
+        let notes = bounded(
+            meeting.rawNotes.trimmingCharacters(in: .whitespacesAndNewlines),
+            maxCharacters: 3_600
+        )
         let prompt = """
-        Meeting title: \(title.isEmpty ? "(untitled)" : title)
+        Capture title: \(meeting.title.isEmpty ? "(untitled)" : meeting.title)
+        Objective: \(meeting.objective.isEmpty ? "Understand and organize the capture." : meeting.objective)
+        Brief focus: \(meeting.selectedTemplate.title) — \(meeting.selectedTemplate.aiHint)
+        Domain lens: \(meeting.contextMode.title) — \(meeting.contextMode.aiHint)
+        Capture purpose: \(meeting.isPersonalCapture ? "Personal note" : "Meeting")
+        Distinct transcript labels: \(detectedSpeakers)
 
         Notes (may contain typos and shorthand):
         \(notes.isEmpty ? "(none)" : notes)
 
-        Transcript context:
+        Numbered transcript evidence:
         \(transcriptContext.isEmpty ? "(none)" : transcriptContext)
 
-        Produce the structured brief now.
+        Produce the structured brief for the note owner now.
         """
 
         let response = try await session.respond(to: prompt, generating: GeneratedBrief.self)
@@ -2871,6 +3603,40 @@ private enum AppleIntelligenceBriefExtractor {
             return (AIBriefData(makesSense: false), detected)
         }
 
+        var seenSpeakers: Set<String> = []
+        let speakerContributions = g.speakerContributions.compactMap { item -> AISpeakerContribution? in
+            let contribution = clean(item.contribution)
+            let lineIndex = item.sourceLineNumber - 1
+            guard detectedSpeakers > 1,
+                  !contribution.isEmpty,
+                  meeting.transcript.indices.contains(lineIndex),
+                  evidenceLineIndices.contains(lineIndex)
+            else { return nil }
+
+            let sourceLine = meeting.transcript[lineIndex]
+            let speaker = SpeakerIdentityResolver.normalizedDisplayName(sourceLine.speaker)
+            let key = SpeakerIdentityResolver.canonicalKey(for: speaker)
+            let generatedSpeaker = clean(item.speaker)
+            guard !generatedSpeaker.isEmpty else { return nil }
+            let generatedSpeakerKey = SpeakerIdentityResolver.canonicalKey(for: generatedSpeaker)
+            guard generatedSpeakerKey == key else { return nil }
+            guard seenSpeakers.insert(key).inserted else { return nil }
+
+            return AISpeakerContribution(
+                speaker: speaker,
+                contribution: contribution,
+                sourceReferences: [SourceReference(
+                    meetingID: meeting.id,
+                    meetingTitle: meeting.title,
+                    kind: .transcript,
+                    snippet: sourceLine.text,
+                    speaker: speaker,
+                    transcriptLineID: sourceLine.id,
+                    lineIndex: lineIndex
+                )]
+            )
+        }
+
         let brief = AIBriefData(
             summary: clean(g.summary),
             decisions: g.decisions.map(clean).filter { !$0.isEmpty },
@@ -2881,6 +3647,8 @@ private enum AppleIntelligenceBriefExtractor {
             openQuestions: g.openQuestions.map(clean).filter { !$0.isEmpty },
             keyPoints: g.keyPoints.map(clean).filter { !$0.isEmpty },
             risks: g.risks.map(clean).filter { !$0.isEmpty },
+            whatMatters: Array(g.whatMatters.map(clean).filter { !$0.isEmpty }.prefix(4)),
+            speakerContributions: Array(speakerContributions.prefix(6)),
             enhancedNotes: g.enhancedNotes
                 .map { EnhancedNoteData(anchor: clean($0.anchor), detail: clean($0.detail)) }
                 .filter { !$0.anchor.isEmpty },
@@ -2891,6 +3659,37 @@ private enum AppleIntelligenceBriefExtractor {
             needsClarification: g.needsClarification.map(clean).filter { !$0.isEmpty }
         )
         return (brief, detected)
+    }
+
+    private static func selectedTranscriptEvidence(
+        from lines: [TranscriptLine],
+        limit: Int
+    ) -> [(Int, TranscriptLine)] {
+        guard lines.count > limit else {
+            return lines.enumerated().map { ($0.offset, $0.element) }
+        }
+
+        var selectedIndices: Set<Int> = []
+        var representedSpeakers: Set<String> = []
+        for (index, line) in lines.enumerated() {
+            let key = SpeakerIdentityResolver.canonicalKey(for: line.speaker)
+            if representedSpeakers.insert(key).inserted {
+                selectedIndices.insert(index)
+            }
+            if selectedIndices.count == limit { break }
+        }
+
+        for index in lines.indices.reversed() where selectedIndices.count < limit {
+            selectedIndices.insert(index)
+        }
+
+        return selectedIndices.sorted().map { ($0, lines[$0]) }
+    }
+
+    private static func bounded(_ text: String, maxCharacters: Int) -> String {
+        guard text.count > maxCharacters else { return text }
+        let half = maxCharacters / 2
+        return "\(text.prefix(half))\n[earlier/later context omitted]\n\(text.suffix(half))"
     }
 }
 
@@ -2906,14 +3705,15 @@ private enum AppleIntelligenceMeetingAssistant {
         """)
 
         let transcriptContext = meeting.transcript
-            .map(\.text)
-            .suffix(8)
+            .map { "[\($0.speaker)]: \($0.text)" }
+            .suffix(12)
             .joined(separator: "\n")
 
         let request = """
         Meeting title: \(meeting.title)
         Objective: \(meeting.objective)
         Workspace: \(meeting.workspace)
+        Brief focus: \(meeting.selectedTemplate.title) — \(meeting.selectedTemplate.aiHint)
 
         Notes:
         \(meeting.rawNotes)
@@ -2962,7 +3762,7 @@ private enum AppleIntelligenceWorkspaceAssistant {
         let context = limitedMeetings.map { meeting in
             let notes = meeting.rawNotes.trimmingCharacters(in: .whitespacesAndNewlines)
             let transcript = includeTranscripts
-                ? meeting.transcript.map(\.text).suffix(4).joined(separator: "\n")
+                ? meeting.transcript.map { "[\($0.speaker)]: \($0.text)" }.suffix(6).joined(separator: "\n")
                 : "Transcripts not included for this query."
 
             return """

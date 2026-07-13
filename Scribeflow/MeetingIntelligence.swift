@@ -6,7 +6,95 @@ struct SpeakerSegment: Identifiable, Equatable {
     let speaker: String
     let role: String
     let lineCount: Int
+    let wordCount: Int
+    let talkShare: Double
     let sample: String
+}
+
+enum SpeakerDetectionMethod: String, Equatable {
+    case diarized
+    case partiallyDiarized
+    case labeledTranscript
+    case mixedTrack
+    case singleTrack
+    case none
+}
+
+struct SpeakerDetectionSummary: Equatable {
+    let detectedCount: Int
+    let expectedCount: Int
+    let method: SpeakerDetectionMethod
+    let title: String
+    let detail: String
+
+    var badge: String {
+        switch method {
+        case .diarized: "Diarized"
+        case .partiallyDiarized: "Mixed sources"
+        case .labeledTranscript: "Labeled"
+        case .mixedTrack: "Mixed audio"
+        case .singleTrack: "Single track"
+        case .none: "No audio"
+        }
+    }
+}
+
+enum SpeakerIdentityResolver {
+    private static let genericPrefixes = ["speaker", "spk", "person", "participant", "voice"]
+    private static let unknownLabels: Set<String> = [
+        "", "unknown", "unidentified", "none", "null", "n/a", "na"
+    ]
+
+    static func normalizedDisplayName(_ rawValue: String) -> String {
+        let cleaned = rawValue
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = cleaned.lowercased()
+
+        guard !unknownLabels.contains(lower) else { return "Speaker 1" }
+        if lower.allSatisfy(\.isNumber), let value = Int(lower) {
+            return "Speaker \(value + 1)"
+        }
+
+        let parts = lower.split(separator: " ").map(String.init)
+        if let prefix = parts.first,
+           genericPrefixes.contains(prefix) {
+            guard parts.count > 1 else { return "Speaker 1" }
+            let token = parts[1]
+            if let value = Int(token) {
+                let isZeroBased = value == 0 || token.hasPrefix("0")
+                return "Speaker \(isZeroBased ? value + 1 : value)"
+            }
+            if token.count == 1,
+               let scalar = token.uppercased().unicodeScalars.first,
+               (65...90).contains(Int(scalar.value)) {
+                return "Speaker \(Int(scalar.value) - 64)"
+            }
+        }
+
+        return cleaned
+    }
+
+    static func canonicalKey(for rawValue: String) -> String {
+        normalizedDisplayName(rawValue)
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .joined()
+    }
+
+    static func normalizedSegments(_ segments: [TranscriptionSegment]) -> [TranscriptionSegment] {
+        segments.compactMap { segment in
+            let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            var normalized = segment
+            normalized.speaker = normalizedDisplayName(segment.speaker)
+            normalized.text = text
+            return normalized
+        }
+    }
 }
 
 struct ExtractedActionItem: Identifiable, Equatable {
@@ -26,7 +114,7 @@ enum MeetingIntelligenceMode: String, Equatable {
         case .localHeuristic:
             "Local intelligence"
         case .backendReady:
-            "Backend-ready"
+            "Production transcription"
         }
     }
 
@@ -35,7 +123,7 @@ enum MeetingIntelligenceMode: String, Equatable {
         case .localHeuristic:
             "Runs on saved notes and transcripts without uploading data."
         case .backendReady:
-            "Use the service interface when a production AI backend is configured."
+            "Uses the configured transcription service while note intelligence remains source-backed."
         }
     }
 }
@@ -49,12 +137,22 @@ struct MeetingIntelligenceReport: Equatable {
     let openQuestions: [String]
     let followUps: [String]
     let speakerSegments: [SpeakerSegment]
+    let speakerDetection: SpeakerDetectionSummary
     let confidenceLabel: String
     let mode: MeetingIntelligenceMode
     let speakerDetectionNote: String
 }
 
 enum SpeakerTranscriptParser {
+    private static let structuralLabels: Set<String> = [
+        "action", "action item", "actions", "agenda", "blocker", "blockers",
+        "concern", "concerns", "context", "decision", "decisions", "done",
+        "due", "goal", "idea", "ideas", "in progress", "key point",
+        "next step", "note", "notes", "objective", "open question", "owner",
+        "progress", "question", "risk", "risks", "summary", "takeaway",
+        "takeaways", "task", "tasks", "todo"
+    ]
+
     static func lines(from transcript: String, defaultSpeaker: String, defaultRole: String) -> [TranscriptLine] {
         let rawLines = transcript
             .components(separatedBy: .newlines)
@@ -68,7 +166,11 @@ enum SpeakerTranscriptParser {
             }
 
             return splitSentences(line).map {
-                TranscriptLine(speaker: defaultSpeaker, role: defaultRole, text: $0)
+                TranscriptLine(
+                    speaker: SpeakerIdentityResolver.normalizedDisplayName(defaultSpeaker),
+                    role: defaultRole,
+                    text: $0
+                )
             }
         }
 
@@ -82,9 +184,14 @@ enum SpeakerTranscriptParser {
         let speaker = String(parts[0]).trimmingCharacters(in: .whitespacesAndNewlines)
         let body = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
         guard speaker.count >= 2, speaker.count <= 32, body.count > 4 else { return nil }
-        guard speaker.rangeOfCharacter(from: .decimalDigits) == nil else { return nil }
+        guard speaker.rangeOfCharacter(from: .letters) != nil else { return nil }
+        guard !structuralLabels.contains(speaker.lowercased()) else { return nil }
 
-        return TranscriptLine(speaker: speaker, role: defaultRole, text: body)
+        return TranscriptLine(
+            speaker: SpeakerIdentityResolver.normalizedDisplayName(speaker),
+            role: defaultRole,
+            text: body
+        )
     }
 
     private static func splitLongParagraph(_ paragraph: String) -> [String] {
@@ -127,6 +234,8 @@ enum MeetingIntelligenceEngine {
             : []
         let summary = summary(from: meeting, corpus: corpus, decisions: decisions, structuredActions: structuredActions)
         let speakers = speakerSegments(for: meeting)
+        let speakerDetection = speakerDetectionSummary(for: meeting, speakers: speakers)
+        let usedBackend = meeting.audioRecordings.contains { $0.transcriptionProvider == .backend }
 
         return MeetingIntelligenceReport(
             headline: headline(for: meeting, decisions: decisions, actions: actions, questions: questions),
@@ -137,9 +246,10 @@ enum MeetingIntelligenceEngine {
             openQuestions: questions,
             followUps: followUps,
             speakerSegments: speakers,
+            speakerDetection: speakerDetection,
             confidenceLabel: confidenceLabel(corpusCount: corpus.count, speakerCount: speakers.count),
-            mode: .localHeuristic,
-            speakerDetectionNote: speakerDetectionNote(for: speakers)
+            mode: usedBackend ? .backendReady : .localHeuristic,
+            speakerDetectionNote: speakerDetection.detail
         )
     }
 
@@ -177,6 +287,7 @@ enum MeetingIntelligenceEngine {
     /// signal. Empty for content-free input, so nothing is invented.
     static func keyPoints(for meeting: Meeting, limit: Int = 5) -> [String] {
         let source = sourceLines(for: meeting)
+        let focusTokens = focusTokens(for: meeting)
         var seen: Set<String> = []
         var scored: [(text: String, score: Int)] = []
         for line in source {
@@ -191,7 +302,7 @@ enum MeetingIntelligenceEngine {
             guard !point.isEmpty, hasSubstance(point) else { continue }
             let key = fingerprint(point)
             guard seen.insert(key).inserted else { continue }
-            scored.append((point, score(raw)))
+            scored.append((point, focusedScore(raw, focusTokens: focusTokens)))
         }
         return scored.sorted { $0.score > $1.score }.prefix(limit).map(\.text)
     }
@@ -427,28 +538,32 @@ enum MeetingIntelligenceEngine {
         var bullets: [String] = []
         var used: Set<String> = []
 
-        // Lead with what was settled, then who owns the next move — the two
-        // things a reader actually needs — phrased as notes, not "signal:" labels.
-        if let decision = decisions.first {
-            bullets.append("Decided: \(lowerFirst(decision))")
-            used.insert(fingerprint(decision))
-        }
-        if let action = structuredActions.first {
-            bullets.append("Next: \(commitmentSentence(action))")
-            used.insert(fingerprint(action.text))
+        if meeting.allowsMeetingSignalExtraction {
+            // Lead with the outcome and the next move. These are the two facts a
+            // reader most often needs when reopening a meeting note.
+            if let decision = decisions.first {
+                bullets.append("Outcome: \(lowerFirst(decision))")
+                used.insert(fingerprint(decision))
+            }
+            if let action = structuredActions.first {
+                bullets.append("Next move: \(commitmentSentence(action))")
+                used.insert(fingerprint(action.text))
+            }
         }
 
-        // Fill with the most substantive remaining lines, distilled to a clause.
+        // Fill with lines that match the objective, chosen note template, and
+        // meeting lens before falling back to generic signal strength.
+        let focusTokens = focusTokens(for: meeting)
         let ranked = corpus
             .filter { $0.count > 18 }
-            .sorted { score($0) > score($1) }
+            .sorted { focusedScore($0, focusTokens: focusTokens) > focusedScore($1, focusTokens: focusTokens) }
 
         for line in ranked {
             let clause = polished(line)
             let key = fingerprint(clause)
             guard !clause.isEmpty, !used.contains(key) else { continue }
             used.insert(key)
-            bullets.append(clause)
+            bullets.append(meeting.isPersonalCapture ? clause : "What matters: \(lowerFirst(clause))")
             if bullets.count == 4 { break }
         }
 
@@ -482,14 +597,29 @@ enum MeetingIntelligenceEngine {
     }
 
     private static func speakerSegments(for meeting: Meeting) -> [SpeakerSegment] {
-        let grouped = Dictionary(grouping: meeting.transcript, by: \.speaker)
+        let grouped = Dictionary(grouping: meeting.transcript) {
+            SpeakerIdentityResolver.canonicalKey(for: $0.speaker)
+        }
+        let totalWords = max(1, meeting.transcript.reduce(0) { partial, line in
+            partial + line.text.split(whereSeparator: \.isWhitespace).count
+        })
         return grouped
-            .map { speaker, lines in
-                SpeakerSegment(
+            .compactMap { _, lines -> SpeakerSegment? in
+                guard let first = lines.first else { return nil }
+                let speaker = SpeakerIdentityResolver.normalizedDisplayName(first.speaker)
+                let wordCount = lines.reduce(0) { partial, line in
+                    partial + line.text.split(whereSeparator: \.isWhitespace).count
+                }
+                let sample = lines.max { lhs, rhs in
+                    score(lhs.text) < score(rhs.text)
+                }?.text ?? first.text
+                return SpeakerSegment(
                     speaker: speaker,
-                    role: lines.first?.role ?? "Speaker",
+                    role: first.role.isEmpty ? "Speaker" : first.role,
                     lineCount: lines.count,
-                    sample: lines.first?.text ?? ""
+                    wordCount: wordCount,
+                    talkShare: Double(wordCount) / Double(totalWords),
+                    sample: sample
                 )
             }
             .sorted { lhs, rhs in
@@ -522,12 +652,103 @@ enum MeetingIntelligenceEngine {
         return "Needs more context"
     }
 
-    private static func speakerDetectionNote(for speakers: [SpeakerSegment]) -> String {
-        if speakers.count > 1 {
-            return "Speaker labels came from transcript text and user-corrected labels. Acoustic diarization still needs a production transcription provider."
+    private static func speakerDetectionSummary(
+        for meeting: Meeting,
+        speakers: [SpeakerSegment]
+    ) -> SpeakerDetectionSummary {
+        let expectedPeople = Set(meeting.attendees.compactMap { attendee -> String? in
+            let cleaned = attendee.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleaned.isEmpty else { return nil }
+            return cleaned.lowercased()
+        }).count
+        let detected = speakers.count
+        let speakerKeys = Set(speakers.map { SpeakerIdentityResolver.canonicalKey(for: $0.speaker) })
+        let diarizedSpeakerKeys = Set(
+            meeting.audioRecordings
+                .filter { $0.diarizationAvailable }
+                .flatMap { $0.transcriptionSegments }
+                .map { SpeakerIdentityResolver.canonicalKey(for: $0.speaker) }
+                .filter { !$0.isEmpty }
+        )
+
+        if detected == 0 {
+            return SpeakerDetectionSummary(
+                detectedCount: 0,
+                expectedCount: expectedPeople,
+                method: .none,
+                title: "No voices identified",
+                detail: expectedPeople > 0
+                    ? "\(expectedPeople) people are listed, but there is no speaker-labeled transcript yet."
+                    : "Add a transcript to identify and review speakers."
+            )
         }
 
-        return "Only one speaker label is available. Rename or merge labels manually, or connect a diarization-capable transcription backend."
+        if !diarizedSpeakerKeys.isEmpty, diarizedSpeakerKeys == speakerKeys {
+            return SpeakerDetectionSummary(
+                detectedCount: detected,
+                expectedCount: expectedPeople,
+                method: .diarized,
+                title: "\(detected) voice\(detected == 1 ? "" : "s") separated",
+                detail: "The transcription provider separated the audio by voice. Review names before sharing."
+            )
+        }
+
+        if !diarizedSpeakerKeys.isEmpty {
+            return SpeakerDetectionSummary(
+                detectedCount: detected,
+                expectedCount: expectedPeople,
+                method: .partiallyDiarized,
+                title: "\(detected) labels · \(diarizedSpeakerKeys.count) diarized",
+                detail: "Some voices came from provider diarization and others came from saved transcript labels. Review the combined speaker list before sharing."
+            )
+        }
+
+        if detected > 1 {
+            return SpeakerDetectionSummary(
+                detectedCount: detected,
+                expectedCount: expectedPeople,
+                method: .labeledTranscript,
+                title: "\(detected) labeled speakers",
+                detail: "Counted from transcript labels and any names you corrected. The app did not infer identities from voiceprints."
+            )
+        }
+
+        if expectedPeople > 1 {
+            return SpeakerDetectionSummary(
+                detectedCount: detected,
+                expectedCount: expectedPeople,
+                method: .mixedTrack,
+                title: "1 mixed speaker track",
+                detail: "\(expectedPeople) people are listed, but this transcript has one shared label. Enable a diarization-capable provider or split labels manually."
+            )
+        }
+
+        return SpeakerDetectionSummary(
+            detectedCount: 1,
+            expectedCount: expectedPeople,
+            method: .singleTrack,
+            title: "1 speaker track",
+            detail: "The transcript contains one speaker label. You can rename it at any time."
+        )
+    }
+
+    private static func focusTokens(for meeting: Meeting) -> Set<String> {
+        let focusText = [
+            meeting.objective,
+            meeting.contextMode.aiHint,
+            meeting.selectedTemplate.description
+        ].joined(separator: " ")
+        return Set(
+            focusText.lowercased()
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { $0.count >= 4 }
+        )
+    }
+
+    private static func focusedScore(_ line: String, focusTokens: Set<String>) -> Int {
+        let lower = line.lowercased()
+        let matches = focusTokens.reduce(0) { $0 + (lower.contains($1) ? 2 : 0) }
+        return score(line) + min(matches, 10)
     }
 
     private static func score(_ line: String) -> Int {

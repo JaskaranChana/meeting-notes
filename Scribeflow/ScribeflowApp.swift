@@ -9,6 +9,7 @@ struct ScribeflowApp: App {
     @AppStorage(AppearancePreference.storageKey) private var appearanceRaw = AppearancePreference.system.rawValue
 
     init() {
+        NotificationRouter.shared.configure()
         MetricsSubscriber.shared.start()
         AnalyticsLog.shared.log("app.launch")
     }
@@ -16,9 +17,22 @@ struct ScribeflowApp: App {
     var body: some Scene {
         WindowGroup {
             ZStack {
-                LocalAuthFlow {
+                Group {
+                    #if DEBUG
                     ContentView()
                         .environment(store)
+                    #else
+                    if hasCompletedLaunchOnboarding {
+                        AuthGateView {
+                            ContentView()
+                                .environment(store)
+                        }
+                    } else {
+                        LaunchOnboardingView {
+                            hasCompletedLaunchOnboarding = true
+                        }
+                    }
+                    #endif
                 }
                 .environment(authSession)
                 .preferredColorScheme(AppearancePreference(rawValue: appearanceRaw)?.colorScheme)

@@ -62,6 +62,34 @@ enum NoteTemplate: String, Codable, CaseIterable, Identifiable {
             "Organizes ideas, themes, and next moves from a working session."
         }
     }
+
+    var aiHint: String {
+        switch self {
+        case .discovery:
+            "Help the note owner understand needs, constraints, intent signals, and the agreed next step."
+        case .exec:
+            "Lead with the bottom line, business impact, decisions, risks, and only the follow-through leadership needs."
+        case .manager:
+            "Focus on the other person's perspective, goals, blockers, commitments, and the next useful coaching conversation."
+        case .standup:
+            "Organize progress, current work, blockers, dependencies, owners, and near-term delivery dates."
+        case .interview:
+            "Separate observed evidence from interpretation, highlight strengths and gaps, and preserve decision rationale."
+        case .brainstorm:
+            "Cluster the strongest ideas, tensions, constraints, and experiments worth pursuing next."
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .discovery: "magnifyingglass"
+        case .exec: "chart.bar.doc.horizontal"
+        case .manager: "person.text.rectangle"
+        case .standup: "figure.stand"
+        case .interview: "person.badge.clock"
+        case .brainstorm: "lightbulb.max.fill"
+        }
+    }
 }
 
 // MARK: - Meeting Context Mode (Tier 2: Adaptive Modes)
@@ -592,6 +620,47 @@ struct EvidenceItem: Codable, Hashable, Identifiable {
     var text: String
     var level: EvidenceLevel
     var supportingSnippets: [String]
+    var sourceReferences: [SourceReference] = []
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case text
+        case level
+        case supportingSnippets
+        case sourceReferences
+    }
+
+    init(
+        id: UUID = UUID(),
+        text: String,
+        level: EvidenceLevel,
+        supportingSnippets: [String],
+        sourceReferences: [SourceReference] = []
+    ) {
+        self.id = id
+        self.text = text
+        self.level = level
+        self.supportingSnippets = supportingSnippets
+        self.sourceReferences = sourceReferences
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        text = try container.decode(String.self, forKey: .text)
+        level = try container.decode(EvidenceLevel.self, forKey: .level)
+        supportingSnippets = try container.decodeIfPresent([String].self, forKey: .supportingSnippets) ?? []
+        sourceReferences = try container.decodeIfPresent([SourceReference].self, forKey: .sourceReferences) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(text, forKey: .text)
+        try container.encode(level, forKey: .level)
+        try container.encode(supportingSnippets, forKey: .supportingSnippets)
+        try container.encode(sourceReferences, forKey: .sourceReferences)
+    }
 
     var confidenceLabel: String {
         switch level {
@@ -640,6 +709,92 @@ struct Commitment: Codable, Hashable, Identifiable {
     var priority: String? = nil
     /// One line on why this matters, so a task isn't just a verb with no stakes.
     var rationale: String? = nil
+    var reminderID: String? = nil
+    var reminderFireDate: Date? = nil
+    var reminderScheduledAt: Date? = nil
+    var sourceReferences: [SourceReference] = []
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case statement
+        case owner
+        case sourceSpeaker
+        case dueHint
+        case dueDateOverride
+        case status
+        case priority
+        case rationale
+        case reminderID
+        case reminderFireDate
+        case reminderScheduledAt
+        case sourceReferences
+    }
+
+    init(
+        id: UUID = UUID(),
+        statement: String,
+        owner: String,
+        sourceSpeaker: String,
+        dueHint: String?,
+        dueDateOverride: Date? = nil,
+        status: CommitmentStatus,
+        priority: String? = nil,
+        rationale: String? = nil,
+        reminderID: String? = nil,
+        reminderFireDate: Date? = nil,
+        reminderScheduledAt: Date? = nil,
+        sourceReferences: [SourceReference] = []
+    ) {
+        self.id = id
+        self.statement = statement
+        self.owner = owner
+        self.sourceSpeaker = sourceSpeaker
+        self.dueHint = dueHint
+        self.dueDateOverride = dueDateOverride
+        self.status = status
+        self.priority = priority
+        self.rationale = rationale
+        self.reminderID = reminderID
+        self.reminderFireDate = reminderFireDate
+        self.reminderScheduledAt = reminderScheduledAt
+        self.sourceReferences = sourceReferences
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        statement = try container.decode(String.self, forKey: .statement)
+        owner = try container.decodeIfPresent(String.self, forKey: .owner) ?? "Owner not named"
+        sourceSpeaker = try container.decodeIfPresent(String.self, forKey: .sourceSpeaker) ?? "Meeting"
+        dueHint = try container.decodeIfPresent(String.self, forKey: .dueHint)
+        dueDateOverride = try container.decodeIfPresent(Date.self, forKey: .dueDateOverride)
+        status = try container.decodeIfPresent(CommitmentStatus.self, forKey: .status) ?? .open
+        priority = try container.decodeIfPresent(String.self, forKey: .priority)
+        rationale = try container.decodeIfPresent(String.self, forKey: .rationale)
+        reminderID = try container.decodeIfPresent(String.self, forKey: .reminderID)
+        reminderFireDate = try container.decodeIfPresent(Date.self, forKey: .reminderFireDate)
+        reminderScheduledAt = try container.decodeIfPresent(Date.self, forKey: .reminderScheduledAt)
+        sourceReferences = try container.decodeIfPresent([SourceReference].self, forKey: .sourceReferences) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(statement, forKey: .statement)
+        try container.encode(owner, forKey: .owner)
+        try container.encode(sourceSpeaker, forKey: .sourceSpeaker)
+        try container.encodeIfPresent(dueHint, forKey: .dueHint)
+        try container.encodeIfPresent(dueDateOverride, forKey: .dueDateOverride)
+        try container.encode(status, forKey: .status)
+        try container.encodeIfPresent(priority, forKey: .priority)
+        try container.encodeIfPresent(rationale, forKey: .rationale)
+        try container.encodeIfPresent(reminderID, forKey: .reminderID)
+        try container.encodeIfPresent(reminderFireDate, forKey: .reminderFireDate)
+        try container.encodeIfPresent(reminderScheduledAt, forKey: .reminderScheduledAt)
+        try container.encode(sourceReferences, forKey: .sourceReferences)
+    }
+
+    var hasReminder: Bool { reminderID != nil }
 }
 
 enum SensitiveFlag: String, Codable, CaseIterable, Identifiable {
@@ -678,6 +833,12 @@ struct AIBriefData: Codable, Hashable {
     var openQuestions: [String] = []
     var keyPoints: [String] = []
     var risks: [String] = []
+    /// The smallest set of points the note owner needs in order to understand
+    /// the capture quickly. Ranked for the selected template and meeting lens.
+    var whatMatters: [String] = []
+    /// One source-backed contribution per detected speaker. Empty when the
+    /// transcript does not reliably separate people.
+    var speakerContributions: [AISpeakerContribution] = []
     /// Granola-style: each note the user wrote, expanded with AI context while
     /// keeping their words as the anchor.
     var enhancedNotes: [EnhancedNoteData] = []
@@ -691,11 +852,97 @@ struct AIBriefData: Codable, Hashable {
     /// Genuinely unclear points the user should clarify — surfaced, never guessed.
     var needsClarification: [String] = []
 
+    init(
+        summary: String = "",
+        decisions: [String] = [],
+        actions: [AIActionItem] = [],
+        openQuestions: [String] = [],
+        keyPoints: [String] = [],
+        risks: [String] = [],
+        whatMatters: [String] = [],
+        speakerContributions: [AISpeakerContribution] = [],
+        enhancedNotes: [EnhancedNoteData] = [],
+        sections: [AIBriefSection] = [],
+        makesSense: Bool = true,
+        needsClarification: [String] = []
+    ) {
+        self.summary = summary
+        self.decisions = decisions
+        self.actions = actions
+        self.openQuestions = openQuestions
+        self.keyPoints = keyPoints
+        self.risks = risks
+        self.whatMatters = whatMatters
+        self.speakerContributions = speakerContributions
+        self.enhancedNotes = enhancedNotes
+        self.sections = sections
+        self.makesSense = makesSense
+        self.needsClarification = needsClarification
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case summary
+        case decisions
+        case actions
+        case openQuestions
+        case keyPoints
+        case risks
+        case whatMatters
+        case speakerContributions
+        case enhancedNotes
+        case sections
+        case makesSense
+        case needsClarification
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        summary = try container.decodeIfPresent(String.self, forKey: .summary) ?? ""
+        decisions = try container.decodeIfPresent([String].self, forKey: .decisions) ?? []
+        actions = try container.decodeIfPresent([AIActionItem].self, forKey: .actions) ?? []
+        openQuestions = try container.decodeIfPresent([String].self, forKey: .openQuestions) ?? []
+        keyPoints = try container.decodeIfPresent([String].self, forKey: .keyPoints) ?? []
+        risks = try container.decodeIfPresent([String].self, forKey: .risks) ?? []
+        whatMatters = try container.decodeIfPresent([String].self, forKey: .whatMatters) ?? []
+        speakerContributions = try container.decodeIfPresent(
+            [AISpeakerContribution].self,
+            forKey: .speakerContributions
+        ) ?? []
+        enhancedNotes = try container.decodeIfPresent([EnhancedNoteData].self, forKey: .enhancedNotes) ?? []
+        sections = try container.decodeIfPresent([AIBriefSection].self, forKey: .sections) ?? []
+        makesSense = try container.decodeIfPresent(Bool.self, forKey: .makesSense) ?? true
+        needsClarification = try container.decodeIfPresent([String].self, forKey: .needsClarification) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(summary, forKey: .summary)
+        try container.encode(decisions, forKey: .decisions)
+        try container.encode(actions, forKey: .actions)
+        try container.encode(openQuestions, forKey: .openQuestions)
+        try container.encode(keyPoints, forKey: .keyPoints)
+        try container.encode(risks, forKey: .risks)
+        try container.encode(whatMatters, forKey: .whatMatters)
+        try container.encode(speakerContributions, forKey: .speakerContributions)
+        try container.encode(enhancedNotes, forKey: .enhancedNotes)
+        try container.encode(sections, forKey: .sections)
+        try container.encode(makesSense, forKey: .makesSense)
+        try container.encode(needsClarification, forKey: .needsClarification)
+    }
+
     var isEmpty: Bool {
         summary.isEmpty && decisions.isEmpty && actions.isEmpty
             && openQuestions.isEmpty && keyPoints.isEmpty && risks.isEmpty
+            && whatMatters.isEmpty && speakerContributions.isEmpty
             && enhancedNotes.isEmpty && sections.isEmpty && needsClarification.isEmpty
     }
+}
+
+struct AISpeakerContribution: Codable, Hashable, Identifiable {
+    var id: String { "\(speaker.lowercased())|\(contribution.lowercased())" }
+    var speaker: String
+    var contribution: String
+    var sourceReferences: [SourceReference] = []
 }
 
 /// A model-chosen, meeting-type-specific section (heading + bullets).

@@ -54,6 +54,16 @@
 		A10000000000000000006501 /* DeviceAuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000006502 /* DeviceAuthService.swift */; };
 		A10000000000000000007001 /* CaptureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000007002 /* CaptureView.swift */; };
 		A10000000000000000007101 /* MeetingCalendarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000007102 /* MeetingCalendarView.swift */; };
+		A10000000000000000007201 /* SourceProof.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000007202 /* SourceProof.swift */; };
+		A10000000000000000007301 /* NotificationRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000007302 /* NotificationRouter.swift */; };
+		A10000000000000000007401 /* BackupArchiveService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000007402 /* BackupArchiveService.swift */; };
+		A10000000000000000007501 /* UsageImpactView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000007502 /* UsageImpactView.swift */; };
+		A10000000000000000007601 /* InvestorPresentationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000007602 /* InvestorPresentationView.swift */; };
+		A10000000000000000007701 /* ProductionServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000007702 /* ProductionServices.swift */; };
+		A10000000000000000007801 /* ReleaseOperations.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000007802 /* ReleaseOperations.swift */; };
+		A10000000000000000007901 /* Localization.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000007902 /* Localization.swift */; };
+		A10000000000000000007A01 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000007A02 /* Localizable.xcstrings */; };
+		A10000000000000000007B01 /* InfoPlist.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000007B02 /* InfoPlist.xcstrings */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -106,6 +116,7 @@
 		A10000000000000000006004 /* DataManagementModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataManagementModels.swift; sourceTree = "<group>"; };
 		A10000000000000000006006 /* DataControlsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataControlsView.swift; sourceTree = "<group>"; };
 		A10000000000000000006008 /* ProductCapabilityModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProductCapabilityModels.swift; sourceTree = "<group>"; };
+		A10000000000000000006010 /* Scribeflow.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Scribeflow.entitlements; sourceTree = "<group>"; };
 		A10000000000000000006102 /* AuthModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthModels.swift; sourceTree = "<group>"; };
 		A10000000000000000006104 /* AuthKeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthKeychainStore.swift; sourceTree = "<group>"; };
 		A10000000000000000006106 /* AuthService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthService.swift; sourceTree = "<group>"; };
@@ -116,6 +127,16 @@
 		A10000000000000000006502 /* DeviceAuthService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceAuthService.swift; sourceTree = "<group>"; };
 		A10000000000000000007002 /* CaptureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureView.swift; sourceTree = "<group>"; };
 		A10000000000000000007102 /* MeetingCalendarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingCalendarView.swift; sourceTree = "<group>"; };
+		A10000000000000000007202 /* SourceProof.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceProof.swift; sourceTree = "<group>"; };
+		A10000000000000000007302 /* NotificationRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationRouter.swift; sourceTree = "<group>"; };
+		A10000000000000000007402 /* BackupArchiveService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupArchiveService.swift; sourceTree = "<group>"; };
+		A10000000000000000007502 /* UsageImpactView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageImpactView.swift; sourceTree = "<group>"; };
+		A10000000000000000007602 /* InvestorPresentationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InvestorPresentationView.swift; sourceTree = "<group>"; };
+		A10000000000000000007702 /* ProductionServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProductionServices.swift; sourceTree = "<group>"; };
+		A10000000000000000007802 /* ReleaseOperations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReleaseOperations.swift; sourceTree = "<group>"; };
+		A10000000000000000007902 /* Localization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Localization.swift; sourceTree = "<group>"; };
+		A10000000000000000007A02 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		A10000000000000000007B02 /* InfoPlist.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = InfoPlist.xcstrings; sourceTree = "<group>"; };
 		A10000000000000000008001 /* SOURCE_MAP.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = SOURCE_MAP.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -169,6 +190,7 @@
 			children = (
 				A10000000000000000000001 /* ScribeflowApp.swift */,
 				A10000000000000000000002 /* ContentView.swift */,
+				A10000000000000000007302 /* NotificationRouter.swift */,
 			);
 			name = App;
 			sourceTree = "<group>";
@@ -180,6 +202,9 @@
 				A10000000000000000000008 /* MeetingPurpose.swift */,
 				A10000000000000000000004 /* MeetingStore.swift */,
 				A10000000000000000001002 /* AppCore.swift */,
+				A10000000000000000007702 /* ProductionServices.swift */,
+				A10000000000000000007802 /* ReleaseOperations.swift */,
+				A10000000000000000007902 /* Localization.swift */,
 			);
 			name = Core;
 			sourceTree = "<group>";
@@ -199,6 +224,8 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000001016 /* TodayView.swift */,
+				A10000000000000000007502 /* UsageImpactView.swift */,
+				A10000000000000000007602 /* InvestorPresentationView.swift */,
 				A10000000000000000007102 /* MeetingCalendarView.swift */,
 				A10000000000000000001014 /* MeetingsView.swift */,
 				A10000000000000000006302 /* ActionItemsView.swift */,
@@ -212,6 +239,7 @@
 			children = (
 				A10000000000000000001018 /* MeetingDetailView.swift */,
 				A10000000000000000006002 /* MeetingIntelligence.swift */,
+				A10000000000000000007202 /* SourceProof.swift */,
 				A10000000000000000002006 /* MeetingSavedSheet.swift */,
 				A10000000000000000000007 /* LiveMeetingCoordinator.swift */,
 			);
@@ -254,7 +282,9 @@
 				A10000000000000000000201 /* SettingsView.swift */,
 				A10000000000000000006006 /* DataControlsView.swift */,
 				A10000000000000000006004 /* DataManagementModels.swift */,
+				A10000000000000000007402 /* BackupArchiveService.swift */,
 				A10000000000000000006008 /* ProductCapabilityModels.swift */,
+				A10000000000000000006010 /* Scribeflow.entitlements */,
 				A10000000000000000002004 /* AudioDiagnostics.swift */,
 			);
 			name = "Settings And Data";
@@ -276,6 +306,8 @@
 			children = (
 				A10000000000000000000005 /* Assets.xcassets */,
 				A10000000000000000005006 /* PrivacyInfo.xcprivacy */,
+				A10000000000000000007A02 /* Localizable.xcstrings */,
+				A10000000000000000007B02 /* InfoPlist.xcstrings */,
 			);
 			name = Resources;
 			sourceTree = "<group>";
@@ -379,6 +411,8 @@
 			files = (
 				A10000000000000000000015 /* Assets.xcassets in Resources */,
 				A10000000000000000005005 /* PrivacyInfo.xcprivacy in Resources */,
+				A10000000000000000007A01 /* Localizable.xcstrings in Resources */,
+				A10000000000000000007B01 /* InfoPlist.xcstrings in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -440,6 +474,14 @@
 				A10000000000000000006501 /* DeviceAuthService.swift in Sources */,
 				A10000000000000000007001 /* CaptureView.swift in Sources */,
 				A10000000000000000007101 /* MeetingCalendarView.swift in Sources */,
+				A10000000000000000007201 /* SourceProof.swift in Sources */,
+				A10000000000000000007301 /* NotificationRouter.swift in Sources */,
+				A10000000000000000007401 /* BackupArchiveService.swift in Sources */,
+				A10000000000000000007501 /* UsageImpactView.swift in Sources */,
+				A10000000000000000007601 /* InvestorPresentationView.swift in Sources */,
+				A10000000000000000007701 /* ProductionServices.swift in Sources */,
+				A10000000000000000007801 /* ReleaseOperations.swift in Sources */,
+				A10000000000000000007901 /* Localization.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -577,9 +619,9 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Scribeflow can attach your notes to calendar meetings and pre-fill titles so each capture is linked to the right event.";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Scribeflow uses Face ID to unlock your secure session.";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Scribeflow uses the microphone to record meetings, voice notes, and phone-call notes you choose to capture. Audio stays on this device unless you export it.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Scribeflow uses the microphone to record meetings and voice notes you choose to capture. Audio stays on this device unless you explicitly enable a configured service or export it.";
 				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Scribeflow adds your action items to Apple Reminders, with their due dates, when you choose to.";
-				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Scribeflow uses on-device speech recognition to turn your recordings into searchable transcripts. Audio is processed on your device whenever on-device recognition is supported.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Scribeflow uses Apple Speech to turn recordings into searchable transcripts on this device.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -613,9 +655,9 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Scribeflow can attach your notes to calendar meetings and pre-fill titles so each capture is linked to the right event.";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Scribeflow uses Face ID to unlock your secure session.";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Scribeflow uses the microphone to record meetings, voice notes, and phone-call notes you choose to capture. Audio stays on this device unless you export it.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Scribeflow uses the microphone to record meetings and voice notes you choose to capture. Audio stays on this device unless you explicitly enable a configured service or export it.";
 				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Scribeflow adds your action items to Apple Reminders, with their due dates, when you choose to.";
-				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Scribeflow uses on-device speech recognition to turn your recordings into searchable transcripts. Audio is processed on your device whenever on-device recognition is supported.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Scribeflow uses Apple Speech to turn recordings into searchable transcripts on this device.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;

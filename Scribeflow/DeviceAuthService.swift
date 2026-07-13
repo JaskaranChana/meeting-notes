@@ -99,7 +99,8 @@ enum DeviceAuthService {
             displayName: displayName,
             accessToken: UUID().uuidString, // Synthetic — no remote validation needed.
             issuedAt: .now,
-            expiresAt: expires
+            expiresAt: expires,
+            kind: .localDevice
         )
     }
 

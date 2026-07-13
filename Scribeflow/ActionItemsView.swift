@@ -22,6 +22,15 @@ struct AggregatedActionItem: Identifiable, Hashable {
         return commitment.dueHint?.nilIfBlank?.capitalized
     }
 
+    var reminderLabel: String? {
+        guard commitment.hasReminder, let fireDate = commitment.reminderFireDate else { return nil }
+        if fireDate <= .now { return "Reminder sent" }
+        if Calendar.current.isDateInToday(fireDate) {
+            return "Today \(fireDate.formatted(date: .omitted, time: .shortened))"
+        }
+        return fireDate.formatted(date: .abbreviated, time: .shortened)
+    }
+
     private var isLive: Bool { commitment.status == .open || commitment.status == .atRisk }
 
     /// Past its real deadline and still open — judged by time, not keywords.
@@ -563,7 +572,7 @@ struct ActionItemsView: View {
                     }
                     VStack(spacing: 0) {
                         ForEach(group.items) { item in
-                            ActionItemRow(item: item, onStatusChange: setStatus, onOpen: openMeeting, onAddToReminders: addToReminders, onScheduleReminder: scheduleReminder)
+                            ActionItemRow(item: item, onStatusChange: setStatus, onOpen: openMeeting, onAddToReminders: addToReminders, onScheduleReminder: scheduleReminder, onCancelReminder: cancelReminder)
                             if item.id != group.items.last?.id { EditorialRule() }
                         }
                     }
@@ -577,7 +586,7 @@ struct ActionItemsView: View {
                     }
                     VStack(spacing: 0) {
                         ForEach(group.items) { item in
-                            ActionItemRow(item: item, onStatusChange: setStatus, onOpen: openMeeting, onAddToReminders: addToReminders, onScheduleReminder: scheduleReminder)
+                            ActionItemRow(item: item, onStatusChange: setStatus, onOpen: openMeeting, onAddToReminders: addToReminders, onScheduleReminder: scheduleReminder, onCancelReminder: cancelReminder)
                                 .editorialReveal()
                             if item.id != group.items.last?.id { EditorialRule() }
                         }
@@ -751,6 +760,7 @@ struct ActionItemsView: View {
             dueDateOverride: request.dueDate
         )
         Task {
+            let fireDate = request.fireDate
             let result: Result<String, ReminderScheduler.ScheduleError>
             switch request.timing {
             case .dueDate:
@@ -765,11 +775,17 @@ struct ActionItemsView: View {
                     commitment: commitment,
                     meetingID: request.item.meetingID,
                     meetingTitle: request.item.meetingTitle,
-                    fireDate: request.fireDate
+                    fireDate: fireDate
                 )
             }
             switch result {
-            case .success:
+            case .success(let identifier):
+                store.updateCommitmentReminder(
+                    commitmentID: commitment.id,
+                    for: request.item.meetingID,
+                    identifier: identifier,
+                    fireDate: fireDate
+                )
                 HapticEngine.notify(.success)
                 toast = ToastItem(message: "Reminder scheduled", icon: "bell.badge.fill")
             case .failure(let error):
@@ -777,6 +793,12 @@ struct ActionItemsView: View {
                 toast = ToastItem(message: error.message, icon: "exclamationmark.triangle.fill")
             }
         }
+    }
+
+    private func cancelReminder(_ item: AggregatedActionItem) {
+        store.clearCommitmentReminder(commitmentID: item.commitment.id, for: item.meetingID)
+        HapticEngine.notify(.success)
+        toast = ToastItem(message: "Reminder canceled", icon: "bell.slash.fill")
     }
 }
 
@@ -833,6 +855,7 @@ private struct ActionItemRow: View {
     let onOpen: (Meeting.ID) -> Void
     let onAddToReminders: (AggregatedActionItem) -> Void
     let onScheduleReminder: (AggregatedActionItem) -> Void
+    let onCancelReminder: (AggregatedActionItem) -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
@@ -894,6 +917,10 @@ private struct ActionItemRow: View {
                             Spacer(minLength: 0)
                         }
 
+                        if let reminderLabel = item.reminderLabel {
+                            metaChip(reminderLabel, icon: "bell.fill", tint: AppPalette.accent)
+                        }
+
                         HStack(spacing: 6) {
                             Image(systemName: "doc.text.magnifyingglass")
                                 .font(.caption2)
@@ -950,7 +977,16 @@ private struct ActionItemRow: View {
             } label: { Label("Add to Reminders", systemImage: "list.bullet.rectangle") }
             Button {
                 onScheduleReminder(item)
-            } label: { Label("Notify me", systemImage: "bell.badge") }
+            } label: {
+                Label(item.commitment.hasReminder ? "Reschedule notification" : "Notify me", systemImage: "bell.badge")
+            }
+            if item.commitment.hasReminder {
+                Button(role: .destructive) {
+                    onCancelReminder(item)
+                } label: {
+                    Label("Cancel notification", systemImage: "bell.slash")
+                }
+            }
             Button {
                 onOpen(item.meetingID)
             } label: { Label("Open meeting", systemImage: "doc.text.magnifyingglass") }

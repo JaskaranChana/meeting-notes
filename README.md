@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/social.png" width="860" alt="Scribeflow — meetings, remembered, entirely on your device"/>
+<img src="docs/social.png" width="860" alt="Scribeflow - meetings remembered with local-first privacy"/>
 
 <br/>
 
@@ -66,7 +66,7 @@ Scribeflow runs **Apple Intelligence on-device** (`FoundationModels`, guided gen
 | 🪪 **Your words stay yours** | Granola-style: your bullets are the anchor (your text), the model adds context beneath in quieter ink. You always see what *you* wrote vs. what AI added. |
 | ❓ **Flags, doesn't guess** | Anything ambiguous goes to a **Needs clarification** list instead of a confident guess. |
 | 🧹 **Cleans, never loses** | Fixes spelling, removes repetition, keeps every important detail. |
-| 📴 **On-device, with a fallback** | Runs the model where available; degrades to a fast deterministic engine otherwise. Nothing uploaded. |
+| 📴 **Local-first, with a fallback** | Intelligence runs on device where available and degrades to a deterministic engine. Backend transcription is used only in builds explicitly configured for it. |
 
 ### The brief, anatomized
 
@@ -110,7 +110,7 @@ Most meeting tools record to the cloud and hand you a transcript. Scribeflow is 
 - 🗓️ **Real dates** — "Friday" or "eod" resolve to actual dates, so *overdue* and *due-soon* are judged by time, not guesses.
 - 📅 **A real calendar surface** — month, week, and agenda modes combine saved notes, calendar events, and open loops in one place.
 - 🔁 **It remembers across meetings** — ask your whole history, get a cited answer.
-- 🔒 **Private by design** — recordings, transcripts, and notes never leave the device.
+- 🔒 **Private by design** — recordings, transcripts, and notes stay on device by default; exports, private iCloud backup, and a configured transcription service are explicit user-controlled boundaries.
 
 ---
 

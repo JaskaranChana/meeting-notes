@@ -74,7 +74,8 @@ enum GoogleSignInService {
                 displayName: displayName,
                 accessToken: idToken,
                 issuedAt: .now,
-                expiresAt: expires
+                expiresAt: expires,
+                kind: .googleLocal
             )
             return .success(session)
         } catch let error as NSError {

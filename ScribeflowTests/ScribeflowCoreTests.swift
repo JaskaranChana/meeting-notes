@@ -132,7 +132,7 @@ struct ScribeflowCoreTests {
     }
 
     @Test
-    func productCapabilityStatusDoesNotClaimCloudSync() {
+    func productCapabilityStatusDoesNotClaimCloudSyncIsReady() {
         let snapshot = StorageSnapshot(
             notesCount: 2,
             recordingsCount: 1,
@@ -145,7 +145,7 @@ struct ScribeflowCoreTests {
         let cloudSync = statuses.first { $0.id == "cloud-sync" }
         let manualBackup = statuses.first { $0.id == "manual-backup" }
 
-        #expect(cloudSync?.state == .needsBackend)
+        #expect(cloudSync?.state == .needsEntitlement)
         #expect(manualBackup?.state == .available)
     }
 

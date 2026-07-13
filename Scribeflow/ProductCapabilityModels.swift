@@ -37,17 +37,17 @@ struct LocalOnlyAccountSyncService: AccountSyncStatusProviding {
         [
             ProductCapabilityStatus(
                 id: "account",
-                title: "Account login",
-                detail: "No production auth provider is configured. Add Sign in with Apple or a backend identity service before claiming accounts.",
-                systemImage: "person.crop.circle.badge.exclamationmark",
-                state: .needsBackend
+                title: "Account boundary",
+                detail: "Device and Apple identity sessions are Keychain-backed. Server features require a backend-issued Scribeflow session.",
+                systemImage: "person.crop.circle.badge.checkmark",
+                state: .localOnly
             ),
             ProductCapabilityStatus(
                 id: "cloud-sync",
-                title: "Cloud sync",
-                detail: "Notes, transcripts, and audio are stored locally. Cross-device sync needs encrypted server storage or CloudKit entitlements.",
-                systemImage: "icloud.slash",
-                state: .needsBackend
+                title: "iCloud backup",
+                detail: "Conflict-safe private backup is ready. Enable the build flag only after the CloudKit profile and production schema are live.",
+                systemImage: "icloud",
+                state: .needsEntitlement
             ),
             ProductCapabilityStatus(
                 id: "manual-backup",
@@ -59,14 +59,14 @@ struct LocalOnlyAccountSyncService: AccountSyncStatusProviding {
             ProductCapabilityStatus(
                 id: "ai-summary",
                 title: "Meeting intelligence",
-                detail: "Local extraction is available. Granola-level summaries need a private AI backend with evals, retention policy, and user consent.",
+                detail: "Purpose-aware local briefs rank what matters, preserve the user's words, and keep claims tied to saved sources.",
                 systemImage: "sparkles",
                 state: .localOnly
             ),
             ProductCapabilityStatus(
                 id: "speaker-detection",
                 title: "Speaker detection",
-                detail: "Speaker labels can be parsed and corrected. Strong diarization needs a transcription provider that supports speaker separation.",
+                detail: "Speaker labels are normalized and editable. Provider diarization is preserved end to end with honest detected-versus-listed counts.",
                 systemImage: "person.wave.2.fill",
                 state: .localOnly
             )
@@ -79,13 +79,26 @@ protocol CloudSyncProviding {
     func pullLatestBackup() async throws -> Data
 }
 
-struct UnconfiguredCloudSyncProvider: CloudSyncProviding {
+struct CloudKitBackupProvider: CloudSyncProviding {
     func pushBackup(_ data: Data) async throws -> Date {
-        throw CloudSyncProviderError.notConfigured
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let package = try decoder.decode(ScribeflowBackupPackage.self, from: data)
+        let preview = ScribeflowBackupPreview(
+            schemaVersion: package.schemaVersion,
+            exportedAt: package.exportedAt,
+            meetingsCount: package.meetings.count,
+            audioFilesCount: package.audioFiles.count
+        )
+        return try await ScribeflowCloudBackupService.upload(
+            data: data,
+            preview: preview,
+            includesAudio: !package.audioFiles.isEmpty
+        ).exportedAt
     }
 
     func pullLatestBackup() async throws -> Data {
-        throw CloudSyncProviderError.notConfigured
+        try await ScribeflowCloudBackupService.download().data
     }
 }
 
@@ -95,7 +108,7 @@ enum CloudSyncProviderError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .notConfigured:
-            "Cloud sync is not configured in this build. Add an authenticated backend or CloudKit container first."
+            "Cloud sync is not enabled for this build. Add the CloudKit entitlement and container before release."
         }
     }
 }

@@ -20,6 +20,7 @@ struct ContentView: View {
     @State private var selectedTab: RootTab = .home
     #endif
     @State private var selectedMeetingID: Meeting.ID?
+    @State private var libraryPath = NavigationPath()
     @State private var captureMode: CaptureView.Mode?
     @State private var showingSettings = false
     @State private var isPrivacyScreenVisible = false
@@ -135,8 +136,7 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .scribeflowOpenMeeting)) { note in
             if let meetingID = note.object as? Meeting.ID {
-                activateRootTab(.library)
-                selectedMeetingID = meetingID
+                openMeeting(meetingID)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .scribeflowToast)) { note in
@@ -156,7 +156,14 @@ struct ContentView: View {
         .onChange(of: pendingInbox.openAskRequested) { _, requested in
             if requested { drainPendingCaptureIntents() }
         }
+        .onChange(of: pendingInbox.openMeetingID) { _, meetingID in
+            if meetingID != nil { drainPendingCaptureIntents() }
+        }
         .task { drainPendingCaptureIntents() }
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
+            await TranscriptionRecoveryCoordinator.shared.processPending(using: store)
+        }
         .sensoryFeedback(.success, trigger: toast?.id)
         .sensoryFeedback(.selection, trigger: selectedMeetingID)
         .onChange(of: toast) { _, newToast in
@@ -202,11 +209,11 @@ struct ContentView: View {
         if navChrome.detailDepth == 0 {
             RootTabBar(
                 items: [
-                    RootTabBarItem(id: RootTab.home.rawValue, label: "Today", systemImage: "house"),
-                    RootTabBarItem(id: RootTab.library.rawValue, label: "Library", systemImage: "rectangle.stack"),
-                    RootTabBarItem(id: RootTab.tasks.rawValue, label: "Tasks", systemImage: "checklist", badge: openActionItemCount),
-                    RootTabBarItem(id: RootTab.calendar.rawValue, label: "Calendar", systemImage: "calendar"),
-                    RootTabBarItem(id: RootTab.ask.rawValue, label: "Ask", systemImage: "magnifyingglass")
+                    RootTabBarItem(id: RootTab.home.rawValue, label: AppStrings.Navigation.today, systemImage: "house"),
+                    RootTabBarItem(id: RootTab.library.rawValue, label: AppStrings.Navigation.library, systemImage: "rectangle.stack"),
+                    RootTabBarItem(id: RootTab.tasks.rawValue, label: AppStrings.Navigation.tasks, systemImage: "checklist", badge: openActionItemCount),
+                    RootTabBarItem(id: RootTab.calendar.rawValue, label: AppStrings.Navigation.calendar, systemImage: "calendar"),
+                    RootTabBarItem(id: RootTab.ask.rawValue, label: AppStrings.Navigation.ask, systemImage: "magnifyingglass")
                 ],
                 selection: Binding(
                     get: { selectedTab.rawValue },
@@ -237,7 +244,7 @@ struct ContentView: View {
                 }
                 .tag(RootTab.home)
 
-                NavigationStack {
+                NavigationStack(path: $libraryPath) {
                     MeetingsView(
                         selectedMeetingID: $selectedMeetingID,
                         onAskTap: { activateRootTab(.ask) },
@@ -300,14 +307,17 @@ struct ContentView: View {
         let identifier = activity.userInfo?[CSSearchableItemActivityIdentifier] as? String
             ?? activity.userInfo?["meetingID"] as? String
         guard let identifier, let uuid = UUID(uuidString: identifier) else { return }
-        activateRootTab(.library)
-        selectedMeetingID = uuid
+        openMeeting(uuid)
     }
 
     /// Drain Siri / Shortcuts pending intents into UI state. Called when the
     /// scene becomes active and whenever the inbox publishes a new request,
     /// covering both cold-launch and warm-resume paths.
     private func drainPendingCaptureIntents() {
+        if let meetingID = pendingInbox.openMeetingID {
+            pendingInbox.openMeetingID = nil
+            openMeeting(meetingID)
+        }
         if pendingInbox.startRecordRequested {
             pendingInbox.startRecordRequested = false
             captureMode = .record
@@ -319,14 +329,21 @@ struct ContentView: View {
         if pendingInbox.openLastMeetingRequested {
             pendingInbox.openLastMeetingRequested = false
             if let latest = store.recentMeetings.first {
-                activateRootTab(.library)
-                selectedMeetingID = latest.id
+                openMeeting(latest.id)
             }
         }
         if pendingInbox.openAskRequested {
             pendingInbox.openAskRequested = false
             activateRootTab(.ask)
         }
+    }
+
+    private func openMeeting(_ meetingID: Meeting.ID) {
+        guard store.meeting(withID: meetingID) != nil else { return }
+        selectedMeetingID = meetingID
+        activateRootTab(.library)
+        libraryPath = NavigationPath()
+        libraryPath.append(meetingID)
     }
 
     private func refreshRootChromeSnapshot() {

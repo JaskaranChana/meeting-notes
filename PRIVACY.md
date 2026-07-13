@@ -1,23 +1,23 @@
 # Privacy Policy
 
 **Scribeflow**
-_Last updated: 2 June 2026_
+_Last updated: 12 July 2026_
 
-Scribeflow is built to keep your meeting data on your device. This policy explains what the app stores, what it accesses, and what leaves your device (almost nothing).
+Scribeflow is local-first. This policy explains what the app stores, what it accesses, and the user-controlled situations in which data may leave your device.
 
 ## The short version
 
-- Scribeflow has **no backend server**. Your recordings, transcripts, notes, action items, and account are stored **locally on your device**.
+- Recordings, transcripts, notes, and action items are stored **locally on your device** by default.
 - Scribeflow **does not collect, sell, or share** your personal data, and **does not track** you across apps or websites.
-- The only time data leaves your device is when **you** explicitly export or share something (for example, sharing a recap), or as described under "Speech recognition" below.
+- Data leaves your device only when you export or share it, enable private iCloud backup, use Apple services, or explicitly enable a configured remote transcription service.
 
 ## What Scribeflow stores (on your device)
 
 - **Recordings and transcripts** of meetings and voice notes you capture.
 - **Notes, action items, decisions, and summaries** generated from them.
-- Your **local account** (email and a hashed password) and preferences.
+- Your Keychain-backed local or Apple identity session and preferences.
 
-This data lives in the app's protected container on your device. Deleting the app, or using **Settings → Delete account**, removes it.
+This data lives in the app's protected container. Using **Settings > Delete account** removes local data and, when configured, requires remote account and private cloud deletion to succeed before reporting completion.
 
 ## Permissions Scribeflow requests
 
@@ -32,7 +32,9 @@ You can decline any permission and still use the rest of the app. Permissions ar
 
 ## Speech recognition
 
-Transcription uses Apple's **Speech** framework. When on-device recognition is available, it runs entirely on your device and **no audio leaves it**. If on-device recognition is unavailable for your device or language, audio may be processed by **Apple** solely to produce the transcript; per Apple, this audio is not retained. In all cases, **no audio or transcript is ever sent to Scribeflow**, and we never receive it.
+By default, transcription uses Apple's **Speech** framework. When on-device recognition is available, processing occurs on the device. Apple may process speech according to its own service terms when on-device recognition is unavailable.
+
+Some builds may offer **Remote transcription** under Recording privacy. It is off by default and requires explicit activation. When enabled, future recording audio is encrypted in transit and sent to the configured Scribeflow transcription service. Before enabling this feature in a distributed build, the service retention period, subprocessors, deletion behavior, and App Store privacy disclosures must be published and kept current. If the option is not shown, the service is not configured.
 
 ## Apple Intelligence
 
@@ -40,7 +42,7 @@ When available, Scribeflow uses Apple's on-device foundation models to draft sum
 
 ## Analytics & tracking
 
-Scribeflow includes **no third-party analytics, advertising, or tracking SDKs**. We do not use the Advertising Identifier and do not track you. Our App Privacy details list **"Data Not Collected."**
+Scribeflow includes no advertising or cross-app tracking SDKs and does not use the Advertising Identifier. Apple MetricKit diagnostics are stored in a bounded local archive and leave the device only when you explicitly export them. App Store privacy answers must match the capabilities enabled in the distributed build.
 
 ## Children
 

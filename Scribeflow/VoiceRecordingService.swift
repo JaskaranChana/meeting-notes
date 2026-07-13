@@ -24,7 +24,7 @@ struct CompletedVoiceRecording {
     var fileSizeBytes: Int
 }
 
-enum TranscriptionProviderKind: String, Codable, Equatable {
+enum TranscriptionProviderKind: String, Codable, Equatable, Sendable {
     case localAppleSpeech
     case backend
 
@@ -38,7 +38,7 @@ enum TranscriptionProviderKind: String, Codable, Equatable {
     }
 }
 
-struct TranscriptionSegment: Codable, Hashable, Identifiable {
+struct TranscriptionSegment: Codable, Hashable, Identifiable, Sendable {
     var id = UUID()
     var speaker: String
     var text: String
@@ -46,7 +46,7 @@ struct TranscriptionSegment: Codable, Hashable, Identifiable {
     var endTime: TimeInterval?
 }
 
-struct TranscriptionResult: Codable, Hashable {
+struct TranscriptionResult: Codable, Hashable, Sendable {
     var text: String
     var segments: [TranscriptionSegment]
     var provider: TranscriptionProviderKind
@@ -56,6 +56,7 @@ struct TranscriptionResult: Codable, Hashable {
 
 @MainActor
 protocol TranscriptionProviding {
+    var requiresSpeechAuthorization: Bool { get }
     func transcribe(audioURL: URL) async throws -> TranscriptionResult
 }
 
@@ -69,7 +70,7 @@ struct LocalMeetingSummarizer: MeetingSummarizing {
     }
 }
 
-enum TranscriptionJobState: String, Codable, Equatable {
+enum TranscriptionJobState: String, Codable, Equatable, Sendable {
     case queued
     case running
     case failed
@@ -89,13 +90,15 @@ enum TranscriptionJobState: String, Codable, Equatable {
     }
 }
 
-struct TranscriptionRetryJob: Codable, Hashable, Identifiable {
+struct TranscriptionRetryJob: Codable, Hashable, Identifiable, Sendable {
     var id = UUID()
     var recordingID: UUID
     var fileName: String
     var attempts = 0
     var state: TranscriptionJobState = .queued
     var lastError: String?
+    var meetingID: Meeting.ID?
+    var nextRetryAt: Date?
     var createdAt = Date()
     var updatedAt = Date()
 
@@ -107,18 +110,22 @@ struct TranscriptionRetryJob: Codable, Hashable, Identifiable {
         attempts += 1
         state = .running
         lastError = nil
+        nextRetryAt = nil
         updatedAt = now
     }
 
     mutating func markFailed(_ message: String, now: Date = .now) {
         state = .failed
         lastError = message
+        let delay = min(pow(2, Double(max(attempts - 1, 0))) * 30, 3_600)
+        nextRetryAt = now.addingTimeInterval(delay)
         updatedAt = now
     }
 
     mutating func markCompleted(now: Date = .now) {
         state = .completed
         lastError = nil
+        nextRetryAt = nil
         updatedAt = now
     }
 }
@@ -230,6 +237,8 @@ enum VoiceRecordingPermissionService {
 
 @MainActor
 final class LocalVoiceRecordingService: NSObject, AVAudioRecorderDelegate, TranscriptionProviding {
+    let requiresSpeechAuthorization = true
+
     private var recorder: AVAudioRecorder?
     private var recordingID: UUID?
     private var startedAt: Date?

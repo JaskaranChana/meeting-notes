@@ -40,6 +40,93 @@ struct AudioRecordingAttachment: Codable, Hashable, Identifiable {
     var linkedNote: String
     var source: AudioRecordingSource
     var fileSizeBytes: Int
+    var transcriptionSegments: [TranscriptionSegment]
+    var transcriptionProvider: TranscriptionProviderKind?
+    var diarizationAvailable: Bool
+
+    init(
+        id: UUID = UUID(),
+        title: String,
+        createdAt: Date,
+        durationSeconds: Int,
+        fileName: String,
+        transcript: String,
+        linkedNote: String,
+        source: AudioRecordingSource,
+        fileSizeBytes: Int,
+        transcriptionSegments: [TranscriptionSegment] = [],
+        transcriptionProvider: TranscriptionProviderKind? = nil,
+        diarizationAvailable: Bool = false
+    ) {
+        self.id = id
+        self.title = title
+        self.createdAt = createdAt
+        self.durationSeconds = durationSeconds
+        self.fileName = fileName
+        self.transcript = transcript
+        self.linkedNote = linkedNote
+        self.source = source
+        self.fileSizeBytes = fileSizeBytes
+        self.transcriptionSegments = transcriptionSegments
+        self.transcriptionProvider = transcriptionProvider
+        self.diarizationAvailable = diarizationAvailable
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case createdAt
+        case durationSeconds
+        case fileName
+        case transcript
+        case linkedNote
+        case source
+        case fileSizeBytes
+        case transcriptionSegments
+        case transcriptionProvider
+        case diarizationAvailable
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        title = try container.decode(String.self, forKey: .title)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        durationSeconds = try container.decode(Int.self, forKey: .durationSeconds)
+        fileName = try container.decode(String.self, forKey: .fileName)
+        transcript = try container.decodeIfPresent(String.self, forKey: .transcript) ?? ""
+        linkedNote = try container.decodeIfPresent(String.self, forKey: .linkedNote) ?? ""
+        source = try container.decode(AudioRecordingSource.self, forKey: .source)
+        fileSizeBytes = try container.decodeIfPresent(Int.self, forKey: .fileSizeBytes) ?? 0
+        transcriptionSegments = try container.decodeIfPresent(
+            [TranscriptionSegment].self,
+            forKey: .transcriptionSegments
+        ) ?? []
+        transcriptionProvider = try container.decodeIfPresent(
+            TranscriptionProviderKind.self,
+            forKey: .transcriptionProvider
+        )
+        diarizationAvailable = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .diarizationAvailable
+        ) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(title, forKey: .title)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(durationSeconds, forKey: .durationSeconds)
+        try container.encode(fileName, forKey: .fileName)
+        try container.encode(transcript, forKey: .transcript)
+        try container.encode(linkedNote, forKey: .linkedNote)
+        try container.encode(source, forKey: .source)
+        try container.encode(fileSizeBytes, forKey: .fileSizeBytes)
+        try container.encode(transcriptionSegments, forKey: .transcriptionSegments)
+        try container.encodeIfPresent(transcriptionProvider, forKey: .transcriptionProvider)
+        try container.encode(diarizationAvailable, forKey: .diarizationAvailable)
+    }
 
     var durationLabel: String {
         let minutes = durationSeconds / 60
@@ -53,6 +140,12 @@ struct AudioRecordingAttachment: Codable, Hashable, Identifiable {
 
     var hasTranscript: Bool {
         !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var detectedSpeakerCount: Int {
+        Set(transcriptionSegments.map { SpeakerIdentityResolver.canonicalKey(for: $0.speaker) })
+            .filter { !$0.isEmpty }
+            .count
     }
 }
 

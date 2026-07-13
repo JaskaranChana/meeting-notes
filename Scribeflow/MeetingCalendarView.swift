@@ -1,8 +1,10 @@
+import EventKit
 import SwiftUI
 
 struct MeetingCalendarView: View {
     @Environment(MeetingStore.self) private var store
     @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
     @Binding var selectedMeetingID: Meeting.ID?
     let onCapture: (CaptureView.Mode) -> Void
     @Binding var toast: ToastItem?
@@ -76,6 +78,13 @@ struct MeetingCalendarView: View {
             }
             .task(id: snapshotKey) {
                 await refreshSnapshot(for: snapshotKey)
+            }
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active else { return }
+                Task { await refreshCalendarEvents() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
+                Task { await refreshCalendarEvents() }
             }
             .onReceive(NotificationCenter.default.publisher(for: .scribeflowDockScrollToTop)) { note in
                 guard (note.object as? String) == "calendar" else { return }
@@ -540,7 +549,7 @@ struct MeetingCalendarView: View {
         let access = service.refreshAccessState()
         let range = Self.visibleDateRange(for: displayedMonth)
         let events = access.canReadEvents
-            ? service.fetchEvents(from: range.start, to: range.end, limit: 180)
+            ? await service.fetchEvents(from: range.start, to: range.end, limit: 240)
             : []
 
         guard !Task.isCancelled else { return }
@@ -815,6 +824,7 @@ private struct MeetingCalendarSnapshot {
     var selectedMeetings: [Meeting] = []
     var selectedEvents: [CalendarEventSnapshot] = []
     var linkedMeetingsByEventID: [String: Meeting] = [:]
+    var linkedMeetingsByFingerprint: [String: Meeting] = [:]
     var monthMeetingCount = 0
     var monthEventCount = 0
     var selectedOpenLoopCount = 0
@@ -843,8 +853,12 @@ private struct MeetingCalendarSnapshot {
         selectedMeetings = (meetingsByDay[selectedDay] ?? []).sorted(by: Self.sortMeetingsByTime)
         selectedEvents = (eventsByDay[selectedDay] ?? []).sorted { $0.startDate < $1.startDate }
         for meeting in meetings {
-            guard let eventID = meeting.calendarEventID else { continue }
-            linkedMeetingsByEventID[eventID] = meeting
+            if let eventID = meeting.calendarEventID {
+                linkedMeetingsByEventID[eventID] = meeting
+            }
+            if let startDate = meeting.calendarStartDate {
+                linkedMeetingsByFingerprint[Self.eventFingerprint(title: meeting.title, startDate: startDate)] = meeting
+            }
         }
         selectedOpenLoopCount = selectedMeetings.reduce(0) { total, meeting in
             total + meetingOpenLoopCount(meeting)
@@ -912,6 +926,15 @@ private struct MeetingCalendarSnapshot {
 
     func linkedMeeting(for event: CalendarEventSnapshot) -> Meeting? {
         linkedMeetingsByEventID[event.id]
+            ?? linkedMeetingsByFingerprint[Self.eventFingerprint(title: event.title, startDate: event.startDate)]
+    }
+
+    private static func eventFingerprint(title: String, startDate: Date) -> String {
+        let normalizedTitle = title
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let minute = Int(startDate.timeIntervalSince1970 / 60)
+        return "\(normalizedTitle)|\(minute)"
     }
 
     private static func sortMeetingsByTime(_ lhs: Meeting, _ rhs: Meeting) -> Bool {

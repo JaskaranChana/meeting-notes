@@ -388,8 +388,10 @@ final class MetricsSubscriber: NSObject, MXMetricManagerSubscriber {
 
     func didReceive(_ payloads: [MXMetricPayload]) {
         for payload in payloads {
+            let data = payload.jsonRepresentation()
+            Task { await DiagnosticsArchive.shared.append(kind: .metrics, data: data) }
             #if DEBUG
-            metricsLog.debug("metric payload: \(String(decoding: payload.jsonRepresentation(), as: UTF8.self), privacy: .public)")
+            metricsLog.debug("metric payload: \(String(decoding: data, as: UTF8.self), privacy: .public)")
             #else
             let launchMs = payload.applicationLaunchMetrics?.histogrammedTimeToFirstDraw.totalBucketCount ?? 0
             let hangs = payload.applicationResponsivenessMetrics?.histogrammedApplicationHangTime.totalBucketCount ?? 0
@@ -400,10 +402,12 @@ final class MetricsSubscriber: NSObject, MXMetricManagerSubscriber {
 
     func didReceive(_ payloads: [MXDiagnosticPayload]) {
         for payload in payloads {
+            let data = payload.jsonRepresentation()
+            Task { await DiagnosticsArchive.shared.append(kind: .diagnostics, data: data) }
             #if DEBUG
-            metricsLog.debug("diagnostic payload: \(String(decoding: payload.jsonRepresentation(), as: UTF8.self), privacy: .public)")
+            metricsLog.debug("diagnostic payload: \(String(decoding: data, as: UTF8.self), privacy: .public)")
             #else
-            metricsLog.notice("diagnostic payload received (size=\(payload.jsonRepresentation().count, privacy: .public))")
+            metricsLog.notice("diagnostic payload received (size=\(data.count, privacy: .public))")
             #endif
         }
     }
@@ -474,7 +478,7 @@ enum CalendarAccessState: String, Equatable {
 
 /// Stable calendar event shape for UI and persistence handoff. Views never need
 /// to hold EventKit objects, and saved meetings can keep a light source link.
-struct CalendarEventSnapshot: Identifiable, Equatable, Codable, Hashable {
+struct CalendarEventSnapshot: Identifiable, Equatable, Codable, Hashable, Sendable {
     var id: String
     var title: String
     var startDate: Date
@@ -510,10 +514,61 @@ struct CalendarEventSnapshot: Identifiable, Equatable, Codable, Hashable {
     }
 }
 
+private actor CalendarEventReader {
+    private let store = EKEventStore()
+
+    func fetchEvents(from start: Date, to end: Date, limit: Int) -> [CalendarEventSnapshot] {
+        store.refreshSourcesIfNecessary()
+        let predicate = store.predicateForEvents(withStart: start, end: end, calendars: nil)
+        return store.events(matching: predicate)
+            .filter { !$0.isAllDay && $0.status != .canceled }
+            .sorted { $0.startDate < $1.startDate }
+            .prefix(limit)
+            .map(Self.snapshot(from:))
+    }
+
+    private static func attendeeNames(from event: EKEvent) -> [String] {
+        let names = (event.attendees ?? [])
+            .compactMap { participant -> String? in
+                let name = participant.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if !name.isEmpty { return name }
+                return participant.url.absoluteString
+                    .replacingOccurrences(of: "mailto:", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .nilIfEmpty
+            }
+        return Array(NSOrderedSet(array: names)) as? [String] ?? names
+    }
+
+    private static func detectVideoCall(_ event: EKEvent) -> Bool {
+        let haystack = [
+            event.notes ?? "",
+            event.location ?? "",
+            event.url?.absoluteString ?? ""
+        ].joined(separator: " ").lowercased()
+        let markers = ["zoom.us", "meet.google", "teams.microsoft", "webex", "whereby", "around.co", "facetime"]
+        return markers.contains(where: haystack.contains)
+    }
+
+    private static func snapshot(from event: EKEvent) -> CalendarEventSnapshot {
+        CalendarEventSnapshot(
+            id: event.eventIdentifier ?? UUID().uuidString,
+            title: event.title ?? "Meeting",
+            startDate: event.startDate,
+            endDate: event.endDate,
+            location: event.location,
+            notes: event.notes,
+            attendees: attendeeNames(from: event),
+            isVideoCall: detectVideoCall(event)
+        )
+    }
+}
+
 @MainActor
 final class CalendarService {
     static let shared = CalendarService()
     private let store = EKEventStore()
+    private let reader = CalendarEventReader()
 
     private(set) var accessState = CalendarAccessState.from(EKEventStore.authorizationStatus(for: .event))
 
@@ -554,59 +609,18 @@ final class CalendarService {
         }
     }
 
-    func fetchUpcoming(hours: Int = 24, limit: Int = 3) -> [CalendarEventSnapshot] {
+    func fetchUpcoming(hours: Int = 24, limit: Int = 3) async -> [CalendarEventSnapshot] {
         accessState = CalendarAccessState.from(EKEventStore.authorizationStatus(for: .event))
         guard accessState.canReadEvents else { return [] }
         let now = Date.now
         guard let end = Calendar.current.date(byAdding: .hour, value: hours, to: now) else { return [] }
-        return fetchEvents(from: now, to: end, limit: limit)
+        return await fetchEvents(from: now, to: end, limit: limit)
     }
 
-    func fetchEvents(from start: Date, to end: Date, limit: Int = 120) -> [CalendarEventSnapshot] {
+    func fetchEvents(from start: Date, to end: Date, limit: Int = 120) async -> [CalendarEventSnapshot] {
         accessState = CalendarAccessState.from(EKEventStore.authorizationStatus(for: .event))
         guard accessState.canReadEvents else { return [] }
-        let predicate = store.predicateForEvents(withStart: start, end: end, calendars: nil)
-        let events = store.events(matching: predicate)
-            .filter { !$0.isAllDay }
-            .sorted { $0.startDate < $1.startDate }
-            .prefix(limit)
-        return events.map(Self.snapshot(from:))
-    }
-
-    private static func attendeeNames(from event: EKEvent) -> [String] {
-        let names = (event.attendees ?? [])
-            .compactMap { participant -> String? in
-                let name = participant.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                if !name.isEmpty { return name }
-                return participant.url.absoluteString
-                    .replacingOccurrences(of: "mailto:", with: "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .nilIfEmpty
-            }
-        return Array(NSOrderedSet(array: names)) as? [String] ?? names
-    }
-
-    private static func detectVideoCall(_ event: EKEvent) -> Bool {
-        let haystack = [
-            event.notes ?? "",
-            event.location ?? "",
-            event.url?.absoluteString ?? ""
-        ].joined(separator: " ").lowercased()
-        let markers = ["zoom.us", "meet.google", "teams.microsoft", "webex", "whereby", "around.co", "facetime"]
-        return markers.contains(where: haystack.contains)
-    }
-
-    private static func snapshot(from event: EKEvent) -> CalendarEventSnapshot {
-        CalendarEventSnapshot(
-            id: event.eventIdentifier ?? UUID().uuidString,
-            title: event.title ?? "Meeting",
-            startDate: event.startDate,
-            endDate: event.endDate,
-            location: event.location,
-            notes: event.notes,
-            attendees: attendeeNames(from: event),
-            isVideoCall: detectVideoCall(event)
-        )
+        return await reader.fetchEvents(from: start, to: end, limit: limit)
     }
 }
 
@@ -671,7 +685,6 @@ enum ReminderScheduler {
         "scribeflow.action.\(meetingID.uuidString).\(commitmentID.uuidString)"
     }
 
-    @MainActor
     static func cancel(meetingID: Meeting.ID, commitmentID: Commitment.ID) {
         let identifier = notificationID(meetingID: meetingID, commitmentID: commitmentID)
         let center = UNUserNotificationCenter.current()
@@ -685,7 +698,6 @@ enum ReminderScheduler {
         return candidate > now ? candidate : nil
     }
 
-    @MainActor
     static func schedule(
         commitment: Commitment,
         meetingID: Meeting.ID,
@@ -703,7 +715,6 @@ enum ReminderScheduler {
         )
     }
 
-    @MainActor
     static func schedule(
         commitment: Commitment,
         meetingID: Meeting.ID,
@@ -713,7 +724,18 @@ enum ReminderScheduler {
         guard fireDate > .now else { return .failure(.invalidDate) }
         do {
             let center = UNUserNotificationCenter.current()
-            let granted = try await center.requestAuthorization(options: [.alert, .sound, .badge])
+            let settings = await center.notificationSettings()
+            let granted: Bool
+            switch settings.authorizationStatus {
+            case .authorized, .provisional, .ephemeral:
+                granted = true
+            case .notDetermined:
+                granted = try await center.requestAuthorization(options: [.alert, .sound, .badge])
+            case .denied:
+                granted = false
+            @unknown default:
+                granted = false
+            }
             guard granted else { return .failure(.permissionDenied) }
 
             let content = UNMutableNotificationContent()
@@ -721,15 +743,17 @@ enum ReminderScheduler {
             content.body = commitment.statement
             content.subtitle = meetingTitle
             content.sound = .default
+            content.threadIdentifier = meetingID.uuidString
             content.userInfo = [
                 "meetingID": meetingID.uuidString,
                 "commitmentID": commitment.id.uuidString
             ]
 
-            let components = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: fireDate)
+            var components = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: fireDate)
+            components.calendar = Calendar.current
+            components.timeZone = TimeZone.current
             let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
             let identifier = notificationID(meetingID: meetingID, commitmentID: commitment.id)
-            center.removePendingNotificationRequests(withIdentifiers: [identifier])
             try await center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: trigger))
             return .success(identifier)
         } catch {
@@ -738,7 +762,7 @@ enum ReminderScheduler {
     }
 }
 
-private extension String {
+extension String {
     var nilIfEmpty: String? {
         isEmpty ? nil : self
     }
@@ -756,11 +780,13 @@ final class PendingCaptureInbox: ObservableObject {
     @Published var startTypeRequested = false
     @Published var openLastMeetingRequested = false
     @Published var openAskRequested = false
+    @Published var openMeetingID: Meeting.ID?
 
     func requestStartRecord()     { startRecordRequested = true }
     func requestStartType()       { startTypeRequested = true }
     func requestOpenLastMeeting() { openLastMeetingRequested = true }
     func requestOpenAsk()         { openAskRequested = true }
+    func requestOpenMeeting(_ id: Meeting.ID) { openMeetingID = id }
 }
 
 // MARK: - App Intents
@@ -881,6 +907,10 @@ enum WidgetSharedStore {
     static func read() -> WidgetSharedSnapshot? {
         guard let defaults, let data = defaults.data(forKey: storageKey) else { return nil }
         return try? JSONDecoder().decode(WidgetSharedSnapshot.self, from: data)
+    }
+
+    static func clear() {
+        defaults?.removeObject(forKey: storageKey)
     }
 }
 
@@ -1228,6 +1258,11 @@ final class WebhookStore: ObservableObject {
     func remove(_ id: UUID) {
         configs.removeAll { $0.id == id }
         save()
+    }
+
+    func clear() {
+        configs.removeAll()
+        UserDefaults.standard.removeObject(forKey: defaultsKey)
     }
 
     func send(meetingTitle: String, body: String, to config: WebhookConfig) async throws {

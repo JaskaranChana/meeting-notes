@@ -343,6 +343,12 @@ struct VoiceRecorderView: View {
                     .foregroundStyle(AppPalette.secondaryInk)
             }
 
+            if let speakerRead = viewModel.speakerReadText {
+                Label(speakerRead, systemImage: "person.wave.2")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(AppPalette.secondaryInk)
+            }
+
             Text(viewModel.transcript)
                 .font(.subheadline)
                 .foregroundStyle(AppPalette.secondaryInk)

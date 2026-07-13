@@ -10,6 +10,8 @@ struct SettingsView: View {
     @AppStorage("hasCompletedLaunchOnboarding") private var hasCompletedLaunchOnboarding = false
     @AppStorage(AppearancePreference.storageKey) private var appearanceRaw = AppearancePreference.system.rawValue
     @AppStorage("homeHeroStyle") private var heroStyleRaw = HeroStyle.briefing.rawValue
+    @AppStorage("scribeflow.investorDemoMode") private var investorDemoMode = false
+    @AppStorage("scribeflow.demoModePreparedAt") private var demoModePreparedAt = 0.0
 
     @State private var hasAnimatedIn = false
     @State private var showingAudioDiagnostics = false
@@ -20,6 +22,9 @@ struct SettingsView: View {
     @State private var showingDeleteAccountConfirm = false
     @State private var showingIntegrations = false
     @State private var showingActivityLog = false
+    @State private var showingDiagnostics = false
+    @State private var showingUsageImpact = false
+    @State private var showingInvestorPresentation = false
     @State private var showingReplaceSamplesConfirm = false
     @State private var sampleDataMessage: String?
     @Namespace private var appearanceNS
@@ -88,7 +93,7 @@ struct SettingsView: View {
                             icon: "externaldrive.fill",
                             iconColor: AppPalette.gold,
                             title: "Storage & backup",
-                            subtitle: "Manage audio files, backups, and deletion"
+                            subtitle: "Export, restore, and protect local notes"
                         ) {
                             showingDataControls = true
                         }
@@ -112,7 +117,7 @@ struct SettingsView: View {
                                 icon: "person.crop.circle.fill",
                                 iconColor: AppPalette.accent,
                                 title: "Signed in",
-                                value: session.email
+                                value: session.accountLabel
                             )
                         }
 
@@ -165,6 +170,26 @@ struct SettingsView: View {
 
                     settingsGroup(title: "Experience") {
                         settingLinkRow(
+                            icon: "play.fill",
+                            iconColor: AppPalette.accent,
+                            title: "Launch presentation",
+                            subtitle: "A live walkthrough using the current workspace"
+                        ) {
+                            launchInvestorPresentation()
+                        }
+
+                        settingLinkRow(
+                            icon: "chart.bar.xaxis",
+                            iconColor: AppPalette.success,
+                            title: "Usage impact",
+                            subtitle: "Captures, follow-through, and source-backed outcomes"
+                        ) {
+                            showingUsageImpact = true
+                        }
+
+                        demoModeRow
+
+                        settingLinkRow(
                             icon: "shippingbox.fill",
                             iconColor: AppPalette.accent,
                             title: "Add sample data",
@@ -176,8 +201,8 @@ struct SettingsView: View {
                         settingLinkRow(
                             icon: "arrow.triangle.2.circlepath",
                             iconColor: AppPalette.gold,
-                            title: "Replace with samples",
-                            subtitle: "Reset local meetings to the demo workspace"
+                            title: "Reset demo workspace",
+                            subtitle: demoModePreparedSubtitle
                         ) {
                             showingReplaceSamplesConfirm = true
                         }
@@ -199,6 +224,15 @@ struct SettingsView: View {
                     .padding(.bottom, 24)
 
                     settingsGroup(title: "Support") {
+                        settingLinkRow(
+                            icon: "stethoscope",
+                            iconColor: AppPalette.success,
+                            title: "App health",
+                            subtitle: "Readiness checks and private diagnostics"
+                        ) {
+                            showingDiagnostics = true
+                        }
+
                         settingLinkRow(
                             icon: "envelope.fill",
                             iconColor: AppPalette.accent,
@@ -274,12 +308,12 @@ struct SettingsView: View {
                 }
             }
             .background(AppPalette.background.ignoresSafeArea())
-            .navigationTitle("Settings")
+            .navigationTitle(AppStrings.Screen.settings)
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
                 if showsDoneButton {
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button("Done") { dismiss() }
+                        Button(AppStrings.Action.done) { dismiss() }
                             .fontWeight(.semibold)
                             .tint(AppPalette.ink)
                     }
@@ -298,6 +332,13 @@ struct SettingsView: View {
                 DataControlsView()
                     .presentationDragIndicator(.visible)
             }
+            .sheet(isPresented: $showingUsageImpact) {
+                UsageImpactView()
+                    .presentationDragIndicator(.visible)
+            }
+            .fullScreenCover(isPresented: $showingInvestorPresentation) {
+                InvestorPresentationView()
+            }
             .sheet(isPresented: $showingAccountSync) {
                 AccountSyncView()
                     .presentationDragIndicator(.visible)
@@ -305,11 +346,7 @@ struct SettingsView: View {
             .sheet(isPresented: $showingLogoutSheet) {
                 LogoutConfirmationSheet {
                     showingLogoutSheet = false
-                    // New local auth flow — clear our keys, plus the legacy
-                    // backend session for safety.
                     authSession.logout()
-                    UserDefaults.standard.removeObject(forKey: "scribeflow.currentUserEmail")
-                    UserDefaults.standard.removeObject(forKey: "scribeflow.bioAsked")
                     HapticEngine.notify(.warning)
                 }
                 .presentationDetents([.height(370)])
@@ -323,13 +360,18 @@ struct SettingsView: View {
                 ActivityLogSheet()
                     .presentationDragIndicator(.visible)
             }
+            .sheet(isPresented: $showingDiagnostics) {
+                DiagnosticsAndReadinessView()
+                    .presentationDragIndicator(.visible)
+            }
             .alert("Delete account?", isPresented: $showingDeleteAccountConfirm) {
                 Button("Cancel", role: .cancel) {}
                 Button("Delete everything", role: .destructive) {
                     Task {
-                        meetingStore.deleteAllUserData()
-                        await authSession.deleteAccount()
-                        dismiss()
+                        if await authSession.deleteAccount() {
+                            await meetingStore.deleteAllUserData()
+                            dismiss()
+                        }
                     }
                 }
             } message: {
@@ -338,9 +380,7 @@ struct SettingsView: View {
             .alert("Replace with sample data?", isPresented: $showingReplaceSamplesConfirm) {
                 Button("Cancel", role: .cancel) {}
                 Button("Replace", role: .destructive) {
-                    meetingStore.replaceWithSampleData()
-                    sampleDataMessage = "Loaded the full demo workspace."
-                    HapticEngine.notify(.success)
+                    prepareDemoWorkspace()
                 }
             } message: {
                 Text("This removes local meetings and recordings on this device, then loads the demo workspace for testing calendar prep, reminders, source-backed summaries, transcription states, and recall.")
@@ -566,6 +606,47 @@ struct SettingsView: View {
         .padding(.vertical, 13)
     }
 
+    private var demoModePreparedSubtitle: String {
+        guard demoModePreparedAt > 0 else {
+            return "Load the investor-ready sample workspace"
+        }
+        let date = Date(timeIntervalSince1970: demoModePreparedAt)
+        return "Prepared \(date.formatted(date: .abbreviated, time: .shortened))"
+    }
+
+    private var demoModeRow: some View {
+        HStack(spacing: 14) {
+            Image(systemName: investorDemoMode ? "play.rectangle.fill" : "play.rectangle")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(investorDemoMode ? AppPalette.accent : AppPalette.secondaryInk)
+                .frame(width: 24, height: 24)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Investor demo mode")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(AppPalette.ink)
+                Text(investorDemoMode ? demoModePreparedSubtitle : "Keep walkthrough data repeatable")
+                    .font(.system(size: 12))
+                    .foregroundStyle(AppPalette.tertiaryInk)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+            }
+
+            Spacer()
+
+            Toggle("", isOn: $investorDemoMode)
+                .labelsHidden()
+                .tint(AppPalette.accent)
+                .onChange(of: investorDemoMode) { _, isOn in
+                    if isOn && demoModePreparedAt == 0 {
+                        prepareDemoWorkspace()
+                    }
+                }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 13)
+    }
+
     private func addSampleData() {
         let added = meetingStore.addSampleData()
         if added == 0 {
@@ -573,6 +654,24 @@ struct SettingsView: View {
         } else {
             sampleDataMessage = "Added \(added) sample meetings for testing."
         }
+        HapticEngine.notify(.success)
+    }
+
+    private func launchInvestorPresentation() {
+        if meetingStore.meetings.isEmpty {
+            _ = meetingStore.addSampleData()
+            investorDemoMode = true
+            demoModePreparedAt = Date().timeIntervalSince1970
+        }
+        HapticEngine.tap(.medium)
+        showingInvestorPresentation = true
+    }
+
+    private func prepareDemoWorkspace() {
+        meetingStore.replaceWithSampleData()
+        investorDemoMode = true
+        demoModePreparedAt = Date().timeIntervalSince1970
+        sampleDataMessage = "Loaded the investor demo workspace."
         HapticEngine.notify(.success)
     }
 

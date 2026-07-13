@@ -601,6 +601,13 @@ func meetingDigestMarkdown(_ m: Meeting, signals: MeetingSignals) -> String {
     lines.append("")
     lines.append(synopsis)
 
+    let whatMatters = m.aiBrief?.whatMatters ?? []
+    if !whatMatters.isEmpty {
+        lines.append("")
+        lines.append("## What matters")
+        for point in whatMatters { lines.append("- \(point)") }
+    }
+
     if !signals.decisions.isEmpty {
         lines.append("")
         lines.append("## Decisions")
@@ -654,6 +661,15 @@ func meetingDigestMarkdown(_ m: Meeting, signals: MeetingSignals) -> String {
         lines.append("")
         lines.append("## Needs clarification")
         for c in clarifications { lines.append("- \(c)") }
+    }
+
+    let contributions = m.aiBrief?.speakerContributions ?? []
+    if !contributions.isEmpty {
+        lines.append("")
+        lines.append("## Who said what")
+        for contribution in contributions {
+            lines.append("- **\(contribution.speaker):** \(contribution.contribution)")
+        }
     }
 
     // --- The user's own words, kept separate from the AI summary above ---

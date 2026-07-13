@@ -2,7 +2,9 @@ import SwiftUI
 
 struct RecordingPrivacyView: View {
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(TranscriptionProviderFactory.remoteTranscriptionConsentKey) private var remoteTranscriptionEnabled = false
     @State private var hasAnimatedIn = false
+    @State private var showingRemoteTranscriptionConfirmation = false
 
     private let items: [(icon: String, title: String, body: String, tint: Color)] = [
         ("waveform.badge.mic", "Voice notes", RecordingCompliance.localAudioStorage, AppPalette.accent),
@@ -41,8 +43,15 @@ struct RecordingPrivacyView: View {
                         .padding(.trailing, 20)
                     }
 
+                    if TranscriptionProviderFactory.isBackendConfigured {
+                        remoteTranscriptionControl
+                            .motionEntrance(step: 5, active: hasAnimatedIn)
+                            .padding(.horizontal, 20)
+                            .padding(.top, 28)
+                    }
+
                     footer
-                        .motionEntrance(step: 5, active: hasAnimatedIn)
+                        .motionEntrance(step: 6, active: hasAnimatedIn)
                         .padding(.horizontal, 20)
                         .padding(.top, 32)
                         .padding(.bottom, 40)
@@ -59,6 +68,18 @@ struct RecordingPrivacyView: View {
                 }
             }
             .onAppear { hasAnimatedIn = true }
+            .confirmationDialog(
+                "Enable remote transcription?",
+                isPresented: $showingRemoteTranscriptionConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Enable for future recordings") {
+                    remoteTranscriptionEnabled = true
+                }
+                Button(AppStrings.Action.cancel, role: .cancel) {}
+            } message: {
+                Text("Future recordings may be securely uploaded to the configured Scribeflow service for transcription. Apple Speech remains available when this is off.")
+            }
         }
         .modifier(ScribeflowChrome())
     }
@@ -131,7 +152,7 @@ struct RecordingPrivacyView: View {
             Image(systemName: "lock.fill")
                 .font(.caption.weight(.medium))
                 .foregroundStyle(AppPalette.success)
-            Text("Your data never leaves this device unless you choose to export or share it.")
+            Text("Audio stays local unless you export it or explicitly enable remote transcription.")
                 .font(.system(.caption, design: .serif))
                 .foregroundStyle(AppPalette.tertiaryInk)
                 .lineSpacing(1)
@@ -139,5 +160,46 @@ struct RecordingPrivacyView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
         .background(AppPalette.success.opacity(0.04), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var remoteTranscriptionControl: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: remoteTranscriptionEnabled ? "checkmark.shield.fill" : "iphone.and.arrow.forward")
+                .font(.body.weight(.semibold))
+                .foregroundStyle(remoteTranscriptionEnabled ? AppPalette.accent : AppPalette.secondaryInk)
+                .frame(width: 34, height: 34)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Remote transcription")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(AppPalette.ink)
+                Text(remoteTranscriptionEnabled
+                     ? "Enabled for future recordings. Turn it off anytime to use Apple Speech only."
+                     : "Off by default. Audio remains on device and uses Apple Speech.")
+                    .font(.caption)
+                    .foregroundStyle(AppPalette.secondaryInk)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 8)
+
+            Toggle("", isOn: Binding(
+                get: { remoteTranscriptionEnabled },
+                set: { newValue in
+                    if newValue {
+                        showingRemoteTranscriptionConfirmation = true
+                    } else {
+                        remoteTranscriptionEnabled = false
+                    }
+                }
+            ))
+            .labelsHidden()
+            .tint(AppPalette.accent)
+            .accessibilityLabel("Remote transcription")
+            .accessibilityValue(remoteTranscriptionEnabled ? "Enabled" : "Disabled")
+        }
+        .padding(16)
+        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(AppPalette.border.opacity(0.4), lineWidth: 0.7))
     }
 }

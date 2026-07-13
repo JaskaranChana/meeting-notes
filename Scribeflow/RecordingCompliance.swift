@@ -11,5 +11,5 @@ enum RecordingCompliance {
 
     static let speechRecognition = "Transcription uses Apple's Speech framework when permission is granted. Availability and accuracy depend on language, device, and system conditions."
 
-    static let releasePrivacySummary = "Scribeflow does not track users or sell data. Current voice-note audio and transcripts stay on device unless you explicitly export or share them."
+    static let releasePrivacySummary = "Scribeflow does not track users or sell data. Audio stays local unless you export it or explicitly enable a configured remote transcription service."
 }

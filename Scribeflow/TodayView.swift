@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import EventKit
 import UniformTypeIdentifiers
 
 struct DailyPlanItem: Identifiable, Hashable {
@@ -15,6 +16,7 @@ struct DailyPlanItem: Identifiable, Hashable {
 struct TodayView: View {
     @Environment(MeetingStore.self) private var store
     @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
     @Binding var selectedMeetingID: Meeting.ID?
     /// Open the unified capture surface in either `.record` or `.type` mode.
     let onCapture: (CaptureView.Mode) -> Void
@@ -33,10 +35,11 @@ struct TodayView: View {
     @State private var isRequestingCalendarAccess = false
     @State private var imminentEvent: UpcomingEvent?
     @State private var showingHowItWorks = false
-    @State private var autoRecordWatchTimer: Timer?
+    @State private var showingInvestorPresentation = false
     @State private var dismissedEventIDs: Set<String> = []
     @AppStorage("homeHeroStyle") private var heroStyleRaw = HeroStyle.briefing.rawValue
     @AppStorage("scribeflow.currentUserEmail") private var currentUserEmail = ""
+    @AppStorage("scribeflow.investorDemoMode") private var investorDemoMode = false
 
     private var heroStyle: HeroStyle { HeroStyle(rawValue: heroStyleRaw) ?? .briefing }
 
@@ -127,6 +130,12 @@ struct TodayView: View {
                 Color.clear.frame(height: 0).id("top")
                 if let imminent = imminentEvent {
                     imminentMeetingBanner(imminent)
+                        .motionEntrance(step: 0, active: hasAnimatedIn)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+
+                if investorDemoMode {
+                    demoModeBanner
                         .motionEntrance(step: 0, active: hasAnimatedIn)
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
@@ -293,6 +302,9 @@ struct TodayView: View {
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
         }
+        .fullScreenCover(isPresented: $showingInvestorPresentation) {
+            InvestorPresentationView()
+        }
         .navigationDestination(for: Meeting.ID.self) { id in
             MeetingDetailView(meetingID: id)
         }
@@ -304,11 +316,14 @@ struct TodayView: View {
         }
         .task {
             await refreshUpcoming()
-            startAutoRecordWatch()
+            await runAutoRecordWatch()
         }
-        .onDisappear {
-            autoRecordWatchTimer?.invalidate()
-            autoRecordWatchTimer = nil
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await refreshUpcoming() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
+            Task { await refreshUpcoming() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .scribeflowDockScrollToTop)) { note in
             // Re-tap of the Today dock tab → scroll to top.
@@ -318,6 +333,59 @@ struct TodayView: View {
             }
         }
         }
+    }
+
+    private var demoModeBanner: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "play.rectangle.fill")
+                .font(.subheadline.weight(.bold))
+                .foregroundStyle(AppPalette.accent)
+                .frame(width: 28, height: 28)
+                .background(AppPalette.accent.opacity(0.12), in: Circle())
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Investor demo mode")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(AppPalette.ink)
+                Text("Curated workspace is loaded for a repeatable walkthrough.")
+                    .font(.caption)
+                    .foregroundStyle(AppPalette.secondaryInk)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+            }
+
+            Spacer(minLength: 8)
+
+            HStack(spacing: 6) {
+                Button {
+                    HapticEngine.tap(.medium)
+                    showingInvestorPresentation = true
+                } label: {
+                    Image(systemName: "play.fill")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(AppPalette.accent)
+                        .frame(width: 30, height: 30)
+                        .background(AppPalette.paper.opacity(0.72), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Start investor presentation")
+
+                Button {
+                    onSettingsTap()
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(AppPalette.secondaryInk)
+                        .frame(width: 30, height: 30)
+                        .background(AppPalette.paper.opacity(0.72), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Demo mode settings")
+            }
+        }
+        .padding(12)
+        .background(AppPalette.cardBackground.opacity(0.92), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(AppPalette.accent.opacity(0.16), lineWidth: 0.7))
     }
 
     // MARK: - Today's Plan
@@ -671,9 +739,11 @@ struct TodayView: View {
     private func refreshUpcoming() async {
         let service = CalendarService.shared
         let access = service.refreshAccessState()
-        let events = access.canReadEvents ? service.fetchUpcoming() : []
+        let events = access.canReadEvents ? await service.fetchUpcoming() : []
         await MainActor.run {
-            upcomingEvents = events
+            if upcomingEvents != events {
+                upcomingEvents = events
+            }
             calendarAccessState = access
             refreshImminent()
             rebuildHeroModel()
@@ -700,15 +770,16 @@ struct TodayView: View {
     /// is starting within the next 90 seconds. If so, surface a banner asking
     /// the user to record. Background auto-record is intentionally not used
     /// because iOS will not let an app silently start recording the mic.
-    private func startAutoRecordWatch() {
-        autoRecordWatchTimer?.invalidate()
-        autoRecordWatchTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
-            Task { @MainActor in
-                let service = CalendarService.shared
-                upcomingEvents = service.fetchUpcoming()
-                calendarAccessState = service.accessState
-                refreshImminent()
+    private func runAutoRecordWatch() async {
+        let clock = ContinuousClock()
+        while !Task.isCancelled {
+            do {
+                try await clock.sleep(for: .seconds(30))
+            } catch {
+                return
             }
+            guard !Task.isCancelled else { return }
+            await refreshUpcoming()
         }
     }
 

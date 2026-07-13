@@ -42,7 +42,8 @@ struct LocalDevelopmentAuthService: AuthenticationServicing {
             displayName: name,
             accessToken: UUID().uuidString + "." + UUID().uuidString,
             issuedAt: .now,
-            expiresAt: Calendar.current.date(byAdding: .day, value: 30, to: .now) ?? .now
+            expiresAt: Calendar.current.date(byAdding: .day, value: 30, to: .now) ?? .now,
+            kind: .development
         )
     }
 }
@@ -68,6 +69,36 @@ enum DefaultAuthService {
         #else
         return UnconfiguredRemoteAuthService()
         #endif
+    }
+}
+
+protocol AccountDeletionServicing: Sendable {
+    func deleteRemoteAccount(for session: AuthSession) async throws
+}
+
+struct BackendAccountDeletionService: AccountDeletionServicing {
+    func deleteRemoteAccount(for session: AuthSession) async throws {
+        guard session.kind.requiresRemoteDeletion else { return }
+        guard let configuration = BackendConfiguration.current(),
+              let url = URL(string: "/v1/account", relativeTo: configuration.baseURL)?.absoluteURL
+        else {
+            throw AuthError.backendUnavailable
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.timeoutInterval = 30
+        request.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(UUID().uuidString, forHTTPHeaderField: "Idempotency-Key")
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw AuthError.backendUnavailable
+        }
+        guard (200...299).contains(httpResponse.statusCode) || httpResponse.statusCode == 404 else {
+            throw AuthError.backendUnavailable
+        }
     }
 }
 
@@ -152,15 +183,18 @@ final class AuthSessionStore {
     @ObservationIgnored private let authService: AuthenticationServicing
     @ObservationIgnored private let sessionStorage: AuthSessionStorageWorker
     @ObservationIgnored private let biometricAuthenticator: BiometricAuthenticating
+    @ObservationIgnored private let accountDeletionService: AccountDeletionServicing
 
     init(
         authService: AuthenticationServicing = DefaultAuthService.make(),
         sessionStore: AuthSessionStoring = KeychainAuthSessionStore(),
-        biometricAuthenticator: BiometricAuthenticating = LocalBiometricAuthenticator()
+        biometricAuthenticator: BiometricAuthenticating = LocalBiometricAuthenticator(),
+        accountDeletionService: AccountDeletionServicing = BackendAccountDeletionService()
     ) {
         self.authService = authService
         self.sessionStorage = AuthSessionStorageWorker(store: sessionStore)
         self.biometricAuthenticator = biometricAuthenticator
+        self.accountDeletionService = accountDeletionService
         Task {
             await restore()
         }
@@ -210,6 +244,12 @@ final class AuthSessionStore {
                 try? await sessionStorage.clearSession()
                 phase = .signedOut
                 errorMessage = AuthError.sessionExpired.localizedDescription
+            } else if session.kind.needsAppleCredentialCheck,
+                      await appleCredentialIsInvalid(for: session.userID) {
+                try? await sessionStorage.clearSession()
+                KeychainAuthSessionStore.clearCachedAppleEmail(for: session.userID)
+                phase = .signedOut
+                errorMessage = "Your Apple authorization changed. Sign in again to continue."
             } else {
                 phase = .authenticated(session)
             }
@@ -424,7 +464,8 @@ final class AuthSessionStore {
                 displayName: displayName,
                 accessToken: token,
                 issuedAt: .now,
-                expiresAt: Calendar.current.date(byAdding: .day, value: 30, to: .now) ?? .now
+                expiresAt: Calendar.current.date(byAdding: .day, value: 30, to: .now) ?? .now,
+                kind: .appleLocal
             )
 
             do {
@@ -456,24 +497,63 @@ final class AuthSessionStore {
     /// this — typically by calling `MeetingStore.deleteAllUserData()`.
     /// App Store Guideline 5.1.1(v) requires this entry point whenever the app
     /// supports account creation.
-    func deleteAccount() async {
-        guard !isLoading else { return }
+    func deleteAccount() async -> Bool {
+        guard !isLoading else { return false }
         isLoading = true
         errorMessage = nil
         successMessage = nil
 
-        // When a real backend exists, call the account-deletion endpoint here
-        // and handle failure before clearing the local session.
+        let session = currentSession
+        do {
+            if let session {
+                try await accountDeletionService.deleteRemoteAccount(for: session)
+            }
+            if ScribeflowCloudBackupService.isConfigured {
+                try await ScribeflowCloudBackupService.deleteBackup()
+            }
+        } catch {
+            errorMessage = "Remote account or iCloud data could not be deleted. Nothing on this device was removed."
+            isLoading = false
+            HapticEngine.notify(.error)
+            return false
+        }
 
         do {
             try await sessionStorage.clearSession()
         } catch {
             errorMessage = error.localizedDescription
+            isLoading = false
+            HapticEngine.notify(.error)
+            return false
         }
+        if let session, session.kind.needsAppleCredentialCheck {
+            KeychainAuthSessionStore.clearCachedAppleEmail(for: session.userID)
+        }
+        DeviceAuthService.clearLocalIdentity()
         GoogleSignInService.signOut()
         phase = .signedOut
         isLoading = false
         successMessage = "Account deleted. Local data was removed."
         HapticEngine.notify(.success)
+        return true
+    }
+
+    private func appleCredentialIsInvalid(for userID: String) async -> Bool {
+        await withCheckedContinuation { continuation in
+            ASAuthorizationAppleIDProvider().getCredentialState(forUserID: userID) { state, error in
+                if error != nil {
+                    continuation.resume(returning: false)
+                    return
+                }
+                switch state {
+                case .revoked, .notFound:
+                    continuation.resume(returning: true)
+                case .authorized, .transferred:
+                    continuation.resume(returning: false)
+                @unknown default:
+                    continuation.resume(returning: false)
+                }
+            }
+        }
     }
 }
