@@ -252,8 +252,27 @@ enum RecordingFileStore {
         return directoryURL.appendingPathComponent("\(id.uuidString).m4a", isDirectory: false)
     }
 
+    static func adoptFile(at sourceURL: URL) throws -> URL {
+        try ensureDirectory()
+        let pathExtension = sourceURL.pathExtension.isEmpty ? "caf" : sourceURL.pathExtension
+        let destination = directoryURL
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension(pathExtension)
+        do {
+            try FileManager.default.moveItem(at: sourceURL, to: destination)
+        } catch {
+            try FileManager.default.copyItem(at: sourceURL, to: destination)
+            try? FileManager.default.removeItem(at: sourceURL)
+        }
+        protectFile(at: destination)
+        return destination
+    }
+
     static func url(for fileName: String) -> URL {
-        directoryURL.appendingPathComponent(fileName, isDirectory: false)
+        directoryURL.appendingPathComponent(
+            URL(fileURLWithPath: fileName).lastPathComponent,
+            isDirectory: false
+        )
     }
 
     static func fileName(for url: URL) -> String {

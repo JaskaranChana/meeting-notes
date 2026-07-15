@@ -5,7 +5,7 @@ groups; physical file moves should be done in smaller follow-up refactors.
 
 ## App
 
-- `ScribeflowApp.swift` - app entry, auth gate, splash, app commands.
+- `ScribeflowApp.swift` - app entry, optional app lock, splash, app commands.
 - `ContentView.swift` - root tabs, floating dock, sheets, deep links, toasts.
 - `NotificationRouter.swift` - notification presentation and meeting deep-link routing.
 
@@ -31,6 +31,7 @@ groups; physical file moves should be done in smaller follow-up refactors.
 - `TodayView.swift` - home briefing, investor demo banner, daily plan, upcoming meeting cards.
 - `UsageImpactView.swift` - private, on-device capture and follow-through metrics.
 - `InvestorPresentationView.swift` - live-data investor walkthrough and product proof.
+- `MeetingPrep.swift` - source-backed event matching, relationship context, and the before-you-join brief.
 - `MeetingCalendarView.swift` - interactive month/week calendar and day agenda.
 - `MeetingsView.swift` - library list and meeting browsing.
 - `ActionItemsView.swift` - task inbox and reminders flow.
@@ -38,11 +39,12 @@ groups; physical file moves should be done in smaller follow-up refactors.
 
 ## Meeting Detail
 
-- `MeetingDetailView.swift` - recap/detail surface, trust summary, and pushed detail routes.
+- `MeetingDetailView.swift` - recap/detail surface, trust summary, recording transcript recovery, and pushed detail routes.
 - `MeetingIntelligence.swift` - purpose-aware extraction, speaker normalization, people-count confidence, and scoring helpers.
 - `SourceProof.swift` - claim confidence, source references, and proof inspector UI.
 - `MeetingSavedSheet.swift` - post-save confirmation.
 - `LiveMeetingCoordinator.swift` - live meeting capture context and in-call intelligence.
+- `MeetingProcessingCoordinator.swift` - durable post-save queue, enhanced transcription, background resume, and ready notifications.
 
 ## Capture And Audio
 
@@ -51,6 +53,8 @@ groups; physical file moves should be done in smaller follow-up refactors.
 - `VoiceRecorderView.swift` - full recorder UI.
 - `VoiceRecorderViewModel.swift` - recorder UI state and coordination.
 - `VoiceRecordingService.swift` - audio recording service.
+- `SpeechRecognitionPipeline.swift` - live SpeechTranscriber/legacy Speech pipeline and contextual vocabulary.
+- `LocalSpeakerDiarization.swift` - temporary audio writer, constrained on-device speaker separation, and transcript alignment.
 - `VoiceRecordingModels.swift` - recording models plus persisted provider and diarization metadata.
 - `AudioPlaybackControls.swift` - playback UI.
 - `AudioSessionManager.swift` - AVAudioSession setup.
@@ -88,13 +92,17 @@ groups; physical file moves should be done in smaller follow-up refactors.
 - `PrivacyInfo.xcprivacy` - Apple privacy manifest.
 - `Localizable.xcstrings` - core navigation and action String Catalog.
 - `InfoPlist.xcstrings` - localized permission and display-name copy.
+- `Info.plist` - bundle metadata and permitted meeting-processing background task.
 - `Scribeflow.entitlements` - CloudKit entitlement template; wire it only after the Apple Developer profile supports iCloud.
 
 ## Repo Docs
 
+- `PRIVACY.md` - public privacy disclosure and user-controlled data boundaries.
+- `TERMS.md` - public terms template; obtain legal review before App Store release.
 - `INVESTOR_READINESS.md` - demo path, product proof, release checks, and next investor polish.
 - `SCRIBEFLOW_PHASE_EXECUTION.md` - completed phase record and external launch gates.
 - `PRODUCTION_CONFIGURATION.md` - backend, identity, CloudKit, privacy, and CI contracts.
+- `GRANOLA_COMPETITIVE_ANALYSIS.md` - current competitor benchmark, implemented differentiation, and next product gaps.
 
 ## Large Files To Split Later
 

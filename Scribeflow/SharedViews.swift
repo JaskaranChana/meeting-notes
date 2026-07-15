@@ -112,7 +112,7 @@ struct StatusBadge: View {
 
     var body: some View {
         HStack(spacing: 5) {
-            if status == .live {
+            if status == .live || status == .processing {
                 BreathingDot(tint: dotColor, size: 5)
             } else {
                 Circle()
@@ -133,6 +133,7 @@ struct StatusBadge: View {
     private var dotColor: Color {
         switch status {
         case .live:   return AppPalette.coral
+        case .processing: return AppPalette.gold
         case .ready:  return AppPalette.accent
         case .shared: return AppPalette.gold
         }
@@ -141,6 +142,7 @@ struct StatusBadge: View {
     private var labelColor: Color {
         switch status {
         case .live:   return AppPalette.coral
+        case .processing: return AppPalette.gold
         case .ready:  return AppPalette.accent
         case .shared: return AppPalette.gold
         }
@@ -149,6 +151,7 @@ struct StatusBadge: View {
     private var bgColor: Color {
         switch status {
         case .live:   return AppPalette.coral.opacity(0.10)
+        case .processing: return AppPalette.gold.opacity(0.10)
         case .ready:  return AppPalette.accent.opacity(0.10)
         case .shared: return AppPalette.gold.opacity(0.10)
         }
@@ -500,28 +503,10 @@ struct EditorialRowStyle: ButtonStyle {
     }
 }
 
-/// Continuous scroll-reveal: rows soften + lift slightly as they leave the
-/// viewport, snapping crisp at rest. Adds depth to long lists without the
-/// janky "everything animates on first paint" feel. Respects Reduce Motion.
-private struct EditorialRevealModifier: ViewModifier {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    func body(content: Content) -> some View {
-        if reduceMotion {
-            content
-        } else {
-            content.scrollTransition(.interactive(timingCurve: .easeOut)) { view, phase in
-                view
-                    .opacity(phase.isIdentity ? 1 : 0.4)
-                    .scaleEffect(phase.isIdentity ? 1 : 0.97, anchor: .center)
-                    .offset(y: phase.isIdentity ? 0 : (phase.value < 0 ? -6 : 10))
-            }
-        }
-    }
-}
-
 extension View {
-    /// Apply the editorial scroll-reveal to a list row.
-    func editorialReveal() -> some View { modifier(EditorialRevealModifier()) }
+    /// Keep list rows stable while scrolling. Press feedback still provides
+    /// motion without continuously transforming every visible row per frame.
+    func editorialReveal() -> some View { self }
 }
 
 /// A number that tweens through its integer values when `value` is animated.
@@ -592,19 +577,20 @@ func meetingDigestMarkdown(_ m: Meeting, signals: MeetingSignals) -> String {
     let durationStr = m.durationMinutes > 0 ? " · \(m.durationMinutes)m" : ""
 
     var lines: [String] = []
-    lines.append("# \(m.title.isEmpty ? "Untitled meeting" : m.title)")
-    lines.append("_\(date) · \(m.workspace)\(durationStr)_")
+    lines.append("# \(m.title.isEmpty ? "Untitled capture" : m.title)")
+    let purposeTopic = m.purpose.topic.map { " · \($0)" } ?? ""
+    lines.append("_\(date) · \(m.workspace) · \(m.purpose.displayTitle)\(purposeTopic)\(durationStr)_")
     lines.append("")
     // --- AI summary: what Scribeflow extracted ---
     lines.append("## Summary")
-    lines.append("_Auto-summarized by Scribeflow._")
+    lines.append("_Organized by Scribeflow._")
     lines.append("")
     lines.append(synopsis)
 
     let whatMatters = m.aiBrief?.whatMatters ?? []
     if !whatMatters.isEmpty {
         lines.append("")
-        lines.append("## What matters")
+        lines.append("## \(m.allowsMeetingSignalExtraction ? "What matters" : m.purpose.kind.insightTitle)")
         for point in whatMatters { lines.append("- \(point)") }
     }
 
@@ -648,8 +634,14 @@ func meetingDigestMarkdown(_ m: Meeting, signals: MeetingSignals) -> String {
         for r in signals.risks { lines.append("- \(r)") }
     }
 
-    // Meeting-type-specific sections the model chose (standup Done/Blocked, …).
-    for section in m.aiBrief?.sections ?? [] where m.allowsAccountabilityExtraction && !section.items.isEmpty {
+    // Purpose-specific sections chosen by the model. Older briefs may still
+    // contain work headings, so keep the personal-export safety gate here too.
+    let workOnlyHeadings = ["action", "commitment", "decision", "deliverable", "owner", "risk", "blocker"]
+    for section in m.aiBrief?.sections ?? [] where !section.items.isEmpty {
+        if !m.allowsMeetingSignalExtraction,
+           workOnlyHeadings.contains(where: section.heading.lowercased().contains) {
+            continue
+        }
         lines.append("")
         lines.append("## \(section.heading)")
         for item in section.items { lines.append("- \(item)") }

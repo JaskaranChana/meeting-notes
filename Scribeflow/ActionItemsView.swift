@@ -303,6 +303,7 @@ private actor ActionItemsSnapshotBuilder {
 
 struct ActionItemsView: View {
     @Environment(MeetingStore.self) private var store
+    let isActive: Bool
     @Binding var selectedMeetingID: Meeting.ID?
     @Binding var toast: ToastItem?
 
@@ -392,16 +393,16 @@ struct ActionItemsView: View {
             .presentationDragIndicator(.visible)
         }
         .onAppear { hasAnimatedIn = true }
-        .task(id: snapshotKey) {
+        .task(id: isActive ? snapshotKey : nil) {
+            guard isActive else { return }
             await refreshDisplaySnapshot(for: snapshotKey)
         }
     }
 
     private func refreshDisplaySnapshot(for key: ActionItemsSnapshotKey) async {
-        if key.hasSearchQuery {
-            try? await Task.sleep(for: .milliseconds(120))
-            guard !Task.isCancelled else { return }
-        }
+        let delay: Duration = key.hasSearchQuery ? .milliseconds(120) : .milliseconds(70)
+        try? await Task.sleep(for: delay)
+        guard !Task.isCancelled else { return }
 
         let meetings = store.meetings
         let result = await snapshotBuilder.make(meetings: meetings, key: key)

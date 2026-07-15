@@ -1,5 +1,4 @@
 import SwiftUI
-import Speech
 import AVFoundation
 
 // MARK: - Voice Input Manager
@@ -10,78 +9,95 @@ final class VoiceNoteManager {
     var isRecording = false
     var error: String?
 
-    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
-    private var recognitionTask: SFSpeechRecognitionTask?
     private let audioEngine = AVAudioEngine()
-    private let recognizer = SFSpeechRecognizer(locale: .current)
+    private var speechSession: (any LiveSpeechTranscribing)?
+    private var captureGeneration = 0
 
     var onTranscription: ((String) -> Void)?
  
     func requestPermission(completion: @escaping (Bool) -> Void) {
-        SFSpeechRecognizer.requestAuthorization { status in
-            Task { @MainActor in
-                completion(status == .authorized)
-            }
+        Task {
+            let permissions = await VoiceRecordingPermissionService.request()
+            completion(permissions.isReady)
         }
     }
 
-    func start() {
-        guard let recognizer, recognizer.isAvailable else {
-            error = "Speech recognition unavailable."
-            return
-        }
+    func start() async {
+        cancel()
+        captureGeneration &+= 1
+        let generation = captureGeneration
 
         do {
-            // .playAndRecord (not .record) keeps ambient audio alive.
-            // .mixWithOthers prevents silencing music or podcasts.
             try AudioSessionManager.shared.configureForVoiceNote()
-        } catch {
-            self.error = "Microphone unavailable."
-            return
-        }
-
-        recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
-        guard let recognitionRequest else { return }
-        recognitionRequest.shouldReportPartialResults = true
-        // Keep transcription on-device wherever the device supports it.
-        recognitionRequest.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
-
-        let inputNode = audioEngine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-            self?.recognitionRequest?.append(buffer)
-        }
-
-        recognitionTask = recognizer.recognitionTask(with: recognitionRequest) { [weak self] result, error in
-            guard let self else { return }
-            if let result {
-                let text = result.bestTranscription.formattedString
-                Task { @MainActor in self.onTranscription?(text) }
+            let inputNode = audioEngine.inputNode
+            if inputNode.isVoiceProcessingEnabled {
+                try inputNode.setVoiceProcessingEnabled(false)
             }
-            if error != nil || result?.isFinal == true {
-                Task { @MainActor in self.stop() }
+            let format = inputNode.outputFormat(forBus: 0)
+            guard format.sampleRate > 0 else {
+                throw SpeechRecognitionPipelineError.unsupportedAudioFormat
             }
-        }
 
-        do {
+            let session = try await SpeechRecognitionPipeline.makeLiveSession(
+                inputFormat: format,
+                context: SpeechRecognitionContext(
+                    title: "Quick note",
+                    workspace: "Personal workspace",
+                    objective: "Capture the speaker's exact words clearly."
+                ),
+                onTranscript: { [weak self] text, _ in
+                    guard self?.captureGeneration == generation else { return }
+                    self?.onTranscription?(text)
+                },
+                onError: { [weak self] message in
+                    guard let self, self.captureGeneration == generation else { return }
+                    self.error = message
+                    if self.isRecording {
+                        self.cancel()
+                    }
+                }
+            )
+            guard generation == captureGeneration else {
+                session.cancel()
+                return
+            }
+            speechSession = session
+            let audioSink = session.audioSink
+
+            inputNode.removeTap(onBus: 0)
+            inputNode.installTap(onBus: 0, bufferSize: 2048, format: format) { [audioSink] buffer, _ in
+                audioSink.append(buffer)
+            }
             audioEngine.prepare()
             try audioEngine.start()
             isRecording = true
             error = nil
         } catch {
-            stop()
+            cancel()
             self.error = "Could not start recording."
         }
     }
 
-    func stop() {
-        recognitionRequest?.endAudio()
+    func finish() async -> String {
+        guard isRecording || speechSession != nil else { return "" }
+        captureGeneration &+= 1
+        isRecording = false
         audioEngine.inputNode.removeTap(onBus: 0)
         if audioEngine.isRunning { audioEngine.stop() }
-        recognitionTask?.cancel()
-        recognitionRequest = nil
-        recognitionTask = nil
+        let finalTranscript = await speechSession?.finish() ?? ""
+        speechSession = nil
+        onTranscription?(finalTranscript)
+        AudioSessionManager.shared.deactivate()
+        return finalTranscript
+    }
+
+    func cancel() {
+        captureGeneration &+= 1
         isRecording = false
+        audioEngine.inputNode.removeTap(onBus: 0)
+        if audioEngine.isRunning { audioEngine.stop() }
+        speechSession?.cancel()
+        speechSession = nil
         AudioSessionManager.shared.deactivate()
     }
 }
@@ -97,11 +113,12 @@ struct VoiceNoteButton: View {
     var body: some View {
         Button {
             if manager.isRecording {
-                let result = interim
-                manager.stop()
-                interim = ""
-                if !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    onAppend(result)
+                Task {
+                    let result = await manager.finish()
+                    interim = ""
+                    if !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        onAppend(result)
+                    }
                 }
             } else {
                 requestAndStart()
@@ -133,7 +150,7 @@ struct VoiceNoteButton: View {
             manager.onTranscription = { text in interim = text }
         }
         .onDisappear {
-            if manager.isRecording { manager.stop() }
+            if manager.isRecording { manager.cancel() }
         }
         .overlay(alignment: .bottom) {
             if manager.isRecording {
@@ -155,11 +172,11 @@ struct VoiceNoteButton: View {
 
     private func requestAndStart() {
         if authorized {
-            manager.start()
+            Task { await manager.start() }
         } else {
             manager.requestPermission { granted in
                 authorized = granted
-                if granted { manager.start() }
+                if granted { Task { await manager.start() } }
             }
         }
     }

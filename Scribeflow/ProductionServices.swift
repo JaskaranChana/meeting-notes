@@ -449,6 +449,14 @@ actor TranscriptionRetryQueue {
         persist()
     }
 
+    func enqueueFresh(_ job: TranscriptionRetryJob) {
+        jobs.removeAll {
+            $0.recordingID == job.recordingID && $0.meetingID == job.meetingID
+        }
+        jobs.append(job)
+        persist()
+    }
+
     func remove(id: TranscriptionRetryJob.ID) {
         jobs.removeAll { $0.id == id }
         persist()
@@ -463,6 +471,10 @@ actor TranscriptionRetryQueue {
                     && (job.nextRetryAt == nil || job.nextRetryAt! <= now)
             }
             .sorted { $0.createdAt < $1.createdAt }
+    }
+
+    func job(id: TranscriptionRetryJob.ID) -> TranscriptionRetryJob? {
+        jobs.first { $0.id == id }
     }
 
     func clear() {
@@ -489,54 +501,113 @@ final class TranscriptionRecoveryCoordinator {
 
     private var isProcessing = false
 
+    enum RequestOutcome: Equatable {
+        case completed
+        case queued
+        case failed(String)
+    }
+
+    func requestRetranscription(
+        recording: AudioRecordingAttachment,
+        meetingID: Meeting.ID,
+        expectedSpeakerCount: Int?,
+        using store: MeetingStore
+    ) async -> RequestOutcome {
+        let audioURL = RecordingFileStore.url(for: recording.fileName)
+        guard FileManager.default.fileExists(atPath: audioURL.path) else {
+            return .failed("The original audio file is no longer available.")
+        }
+
+        let job = TranscriptionRetryJob(
+            recordingID: recording.id,
+            fileName: recording.fileName,
+            meetingID: meetingID,
+            expectedSpeakerCount: expectedSpeakerCount
+        )
+        await TranscriptionRetryQueue.shared.enqueueFresh(job)
+
+        guard !isProcessing else { return .queued }
+        await processPending(using: store)
+
+        if let pending = await TranscriptionRetryQueue.shared.job(id: job.id) {
+            if pending.state == .failed {
+                return .failed(pending.lastError ?? "The transcript could not be rebuilt yet.")
+            }
+            return .queued
+        }
+
+        let completed = store.meeting(withID: meetingID)?.audioRecordings.first {
+            $0.id == recording.id
+        }?.hasTranscript == true
+        return completed
+            ? .completed
+            : .failed("The recording finished without a usable transcript.")
+    }
+
     func processPending(using store: MeetingStore) async {
-        guard !isProcessing, TranscriptionProviderFactory.isRemoteTranscriptionEnabled else { return }
+        guard !isProcessing else { return }
         isProcessing = true
         defer { isProcessing = false }
 
         let queue = TranscriptionRetryQueue.shared
-        let localFallback = LocalVoiceRecordingService()
-        let provider = TranscriptionProviderFactory.make(localFallback: localFallback)
-        let jobs = await queue.readyJobs()
+        while !Task.isCancelled {
+            let jobs = await queue.readyJobs()
+            guard !jobs.isEmpty else { break }
 
-        for var job in jobs {
-            guard !Task.isCancelled else { return }
-            guard let meetingID = job.meetingID,
-                  store.meeting(withID: meetingID)?.audioRecordings.contains(where: { $0.id == job.recordingID }) == true
-            else {
-                await queue.remove(id: job.id)
-                continue
-            }
-
-            let audioURL = RecordingFileStore.url(for: job.fileName)
-            guard FileManager.default.fileExists(atPath: audioURL.path) else {
-                await queue.remove(id: job.id)
-                continue
-            }
-
-            job.markRunning()
-            await queue.upsert(job)
-            do {
-                let result = try await provider.transcribe(audioURL: audioURL)
-                if store.applyRecoveredTranscript(
-                    result,
-                    recordingID: job.recordingID,
-                    meetingID: meetingID
-                ) {
-                    job.markCompleted()
+            for var job in jobs {
+                guard !Task.isCancelled else { break }
+                guard let meetingID = job.meetingID,
+                      let meeting = store.meeting(withID: meetingID),
+                      meeting.audioRecordings.contains(where: { $0.id == job.recordingID })
+                else {
                     await queue.remove(id: job.id)
-                } else {
-                    job.markFailed(VoiceRecordingError.noTranscription.localizedDescription)
+                    continue
+                }
+
+                let audioURL = RecordingFileStore.url(for: job.fileName)
+                guard FileManager.default.fileExists(atPath: audioURL.path) else {
+                    await queue.remove(id: job.id)
+                    continue
+                }
+
+                let localFallback = LocalVoiceRecordingService()
+                localFallback.configureTranscriptionContext(
+                    title: meeting.title,
+                    workspace: meeting.workspace,
+                    notes: [meeting.objective, meeting.rawNotes, meeting.attendees.joined(separator: ", ")]
+                        .filter { !$0.isEmpty }
+                        .joined(separator: "\n"),
+                    attendees: meeting.attendees,
+                    expectedSpeakerCount: job.expectedSpeakerCount
+                )
+                let provider = TranscriptionProviderFactory.make(localFallback: localFallback)
+
+                job.markRunning()
+                await queue.upsert(job)
+                do {
+                    let result = try await provider.transcribe(audioURL: audioURL)
+                    if store.applyRecoveredTranscript(
+                        result,
+                        recordingID: job.recordingID,
+                        meetingID: meetingID
+                    ) {
+                        job.markCompleted()
+                        await queue.remove(id: job.id)
+                    } else {
+                        job.markFailed(VoiceRecordingError.noTranscription.localizedDescription)
+                        await queue.upsert(job)
+                    }
+                } catch is CancellationError {
+                    job.markFailed("Transcription was interrupted and will retry later.")
+                    await queue.upsert(job)
+                    break
+                } catch {
+                    job.markFailed(error.localizedDescription)
                     await queue.upsert(job)
                 }
-            } catch is CancellationError {
-                job.markFailed("Transcription was interrupted and will retry later.")
-                await queue.upsert(job)
-                return
-            } catch {
-                job.markFailed(error.localizedDescription)
-                await queue.upsert(job)
             }
         }
+
+        await LocalSpeakerDiarizationService.shared.releaseModels()
     }
 }

@@ -120,7 +120,7 @@ struct VoiceRecorderView: View {
 
                 Spacer()
 
-                RecordingStateOrb(level: viewModel.inputLevel, isRecording: viewModel.isRecording)
+                VoiceRecordingStateOrb(viewModel: viewModel)
             }
 
             VStack(spacing: 10) {
@@ -199,7 +199,7 @@ struct VoiceRecorderView: View {
     private var recordingControls: some View {
         SurfaceCard(title: "Recorder", subtitle: "Audio is saved locally with file protection.") {
             VStack(spacing: 14) {
-                VoiceAudioLevelBars(level: max(viewModel.inputLevel, viewModel.isRecording ? 0.08 : 0))
+                VoiceRecordingLevelBars(viewModel: viewModel)
                     .frame(maxWidth: .infinity, alignment: .center)
 
                 HStack(spacing: 12) {
@@ -513,14 +513,30 @@ private struct RecordingStateOrb: View {
             Circle()
                 .fill(isRecording ? AppPalette.coral.opacity(0.8) : .white.opacity(0.6))
                 .frame(width: 20 + CGFloat(level * 28), height: 20 + CGFloat(level * 28))
-                .animation(.easeOut(duration: 0.12), value: level)
             Image(systemName: isRecording ? "waveform" : "mic.fill")
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(isRecording ? .white : AppPalette.accent)
                 .contentTransition(.symbolEffect(.replace))
         }
-        .drawingGroup()
         .accessibilityHidden(true)
+    }
+}
+
+/// Observation boundary for the high-frequency meter value. The parent voice
+/// recorder no longer redraws its forms and controls ten times per second.
+private struct VoiceRecordingStateOrb: View {
+    let viewModel: VoiceRecorderViewModel
+
+    var body: some View {
+        RecordingStateOrb(level: viewModel.inputLevel, isRecording: viewModel.isRecording)
+    }
+}
+
+private struct VoiceRecordingLevelBars: View {
+    let viewModel: VoiceRecorderViewModel
+
+    var body: some View {
+        VoiceAudioLevelBars(level: max(viewModel.inputLevel, viewModel.isRecording ? 0.08 : 0))
     }
 }
 
@@ -528,16 +544,29 @@ private struct VoiceAudioLevelBars: View {
     let level: Double
 
     var body: some View {
-        HStack(alignment: .center, spacing: 5) {
-            ForEach(0..<18, id: \.self) { index in
-                Capsule()
-                    .fill(barColor(index))
-                    .frame(width: 4, height: barHeight(index))
-                    .animation(.easeOut(duration: 0.16), value: level)
+        let barWidth: CGFloat = 4
+        let spacing: CGFloat = 5
+        let count = 18
+        let meterWidth = CGFloat(count) * barWidth + CGFloat(count - 1) * spacing
+
+        Canvas(opaque: false, colorMode: .linear, rendersAsynchronously: true) { context, size in
+            for index in 0..<count {
+                let height = barHeight(index)
+                let rect = CGRect(
+                    x: CGFloat(index) * (barWidth + spacing),
+                    y: (size.height - height) / 2,
+                    width: barWidth,
+                    height: height
+                )
+                var path = Path()
+                path.addRoundedRect(
+                    in: rect,
+                    cornerSize: CGSize(width: barWidth / 2, height: barWidth / 2)
+                )
+                context.fill(path, with: .color(barColor(index)))
             }
         }
-        .frame(height: 46)
-        .drawingGroup()
+        .frame(width: meterWidth, height: 46)
         .accessibilityHidden(true)
     }
 

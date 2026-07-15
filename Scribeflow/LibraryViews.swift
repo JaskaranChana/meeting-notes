@@ -249,6 +249,7 @@ struct EditorialLibraryRow: View {
     }
 
     private var summaryLine: String {
+        if meeting.status == .processing { return meeting.stage }
         if let title = (meeting.summaries.first(where: { $0.template == meeting.selectedTemplate })
             ?? meeting.summaries.first)?.summary.title,
            !title.isEmpty {
@@ -271,6 +272,7 @@ struct EditorialLibraryRow: View {
     /// preview's icon so the visual vocabulary stays consistent.
     private var leadIcon: String {
         if meeting.status == .live { return AppSymbols.mic }
+        if meeting.status == .processing { return "waveform.badge.magnifyingglass" }
         if !meeting.audioRecordings.isEmpty { return AppSymbols.voice }
         if meeting.transcript.isEmpty && !meeting.rawNotes.isEmpty { return AppSymbols.note }
         return "doc.text.fill"
@@ -302,6 +304,9 @@ struct EditorialLibraryRow: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     HStack(spacing: 10) {
+                        if meeting.status == .processing {
+                            EditorialMeta(text: "processing", tint: AppPalette.gold)
+                        }
                         if !meeting.attendees.isEmpty {
                             EditorialAvatarStack(names: meeting.attendees, size: 18, max: 3)
                         }

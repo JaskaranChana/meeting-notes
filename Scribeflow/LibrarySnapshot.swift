@@ -8,6 +8,7 @@ struct LibrarySnapshotKey: Hashable {
     var typeFilter: LibraryTypeFilter
     var dateFilter: LibraryDateFilter
     var sortMode: LibrarySortMode
+    var segment: LibrarySegment
 
     var hasSearchQuery: Bool {
         !query.isEmpty
@@ -25,6 +26,7 @@ struct LibrarySnapshot: Equatable {
     var pinnedCount = 0
     var openLoopCount = 0
     var isMeetingStoreEmpty = true
+    var segmentCounts: [LibrarySegment: Int] = [:]
 }
 
 actor LibrarySnapshotBuilder {
@@ -36,6 +38,12 @@ actor LibrarySnapshotBuilder {
             key: key
         )
         let pinnedIDs = Set(pinnedMeetings.map(\.id))
+        var segmentCounts: [LibrarySegment: Int] = [:]
+        for meeting in scopedMeetings {
+            for segment in LibrarySegment.allCases where segment.matches(meeting) {
+                segmentCounts[segment, default: 0] += 1
+            }
+        }
 
         let pinnedResults: [Meeting]
         if key.mode == .meetings,
@@ -43,25 +51,33 @@ actor LibrarySnapshotBuilder {
            key.collection == .all,
            key.typeFilter == .all,
            key.dateFilter == .all,
-           key.sortMode == .newest {
+           key.sortMode == .newest,
+           key.segment == .all {
             pinnedResults = pinnedMeetings
         } else {
             pinnedResults = []
         }
 
-        let baseResults = key.collection == .all
-            ? scopedMeetings.filter { !pinnedIDs.contains($0.id) }
-            : scopedMeetings
+        let baseResults: [Meeting]
+        if key.segment == .all, !pinnedResults.isEmpty {
+            baseResults = scopedMeetings.filter { !pinnedIDs.contains($0.id) }
+        } else {
+            baseResults = scopedMeetings.filter(key.segment.matches)
+        }
 
         return LibrarySnapshot(
             pinnedResults: pinnedResults,
             libraryResults: sorted(baseResults, mode: key.sortMode),
-            folderResults: folderResults(from: recentMeetings, query: key.query),
-            smartCollections: smartCollections(from: recentMeetings),
+            // The current Library surface renders meetings only. Folder and
+            // collection aggregation used to run on every search keystroke even
+            // though no view consumed it.
+            folderResults: [],
+            smartCollections: [],
             totalMeetingsCount: meetings.count,
             pinnedCount: pinnedMeetings.count,
             openLoopCount: openLoopCount(from: recentMeetings),
-            isMeetingStoreEmpty: meetings.isEmpty
+            isMeetingStoreEmpty: meetings.isEmpty,
+            segmentCounts: segmentCounts
         )
     }
 
@@ -77,7 +93,9 @@ actor LibrarySnapshotBuilder {
     private func sorted(_ meetings: [Meeting], mode: LibrarySortMode) -> [Meeting] {
         switch mode {
         case .newest:
-            meetings.sorted { $0.when > $1.when }
+            // `meetings` is already filtered from `recentMeetings`, preserving
+            // its descending order. Avoid a second O(n log n) sort.
+            meetings
         case .title:
             meetings.sorted {
                 $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
@@ -165,12 +183,14 @@ actor LibrarySnapshotBuilder {
     }
 
     private func openLoopCount(from meetings: [Meeting]) -> Int {
-        meetings
-            .filter { $0.status != .shared }
-            .filter { $0.allowsAccountabilityExtraction }
-            .flatMap(\.commitments)
-            .filter { $0.status == .open || $0.status == .atRisk }
-            .count
+        meetings.reduce(into: 0) { count, meeting in
+            guard meeting.status != .shared, meeting.allowsAccountabilityExtraction else { return }
+            count += meeting.commitments.reduce(into: 0) { commitmentCount, commitment in
+                if commitment.status == .open || commitment.status == .atRisk {
+                    commitmentCount += 1
+                }
+            }
+        }
     }
 
     private func openLoopCount(for meeting: Meeting) -> Int {

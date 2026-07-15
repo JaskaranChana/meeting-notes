@@ -26,12 +26,15 @@ struct CompletedVoiceRecording {
 
 enum TranscriptionProviderKind: String, Codable, Equatable, Sendable {
     case localAppleSpeech
+    case localEnhancedSpeech
     case backend
 
     var title: String {
         switch self {
         case .localAppleSpeech:
             "Apple Speech"
+        case .localEnhancedSpeech:
+            "Enhanced on-device speech"
         case .backend:
             "Backend"
         }
@@ -98,6 +101,7 @@ struct TranscriptionRetryJob: Codable, Hashable, Identifiable, Sendable {
     var state: TranscriptionJobState = .queued
     var lastError: String?
     var meetingID: Meeting.ID?
+    var expectedSpeakerCount: Int? = nil
     var nextRetryAt: Date?
     var createdAt = Date()
     var updatedAt = Date()
@@ -243,6 +247,10 @@ final class LocalVoiceRecordingService: NSObject, AVAudioRecorderDelegate, Trans
     private var recordingID: UUID?
     private var startedAt: Date?
     private var title = "Voice note"
+    private var transcriptionContext = SpeechRecognitionContext(
+        title: "Voice note",
+        workspace: "Voice Notes"
+    )
 
     var isRecording: Bool {
         recorder?.isRecording == true
@@ -341,37 +349,126 @@ final class LocalVoiceRecordingService: NSObject, AVAudioRecorderDelegate, Trans
         }
     }
 
-    func transcribe(audioURL: URL) async throws -> TranscriptionResult {
-        let text = try await transcribe(url: audioURL)
-        let lines = SpeakerTranscriptParser.lines(
-            from: text,
-            defaultSpeaker: "Voice note",
-            defaultRole: "Local transcript"
-        )
-        return TranscriptionResult(
-            text: text,
-            segments: lines.map {
-                TranscriptionSegment(speaker: $0.speaker, text: $0.text, startTime: nil, endTime: nil)
-            },
-            provider: .localAppleSpeech,
-            diarizationAvailable: false,
-            usedFallback: false
+    func configureTranscriptionContext(
+        title: String,
+        workspace: String,
+        notes: String,
+        localeIdentifier: String? = nil,
+        attendees: [String] = [],
+        expectedSpeakerCount: Int? = nil
+    ) {
+        transcriptionContext = SpeechRecognitionContext(
+            title: title,
+            workspace: workspace,
+            objective: "Capture the speaker's exact words clearly.",
+            attendees: attendees,
+            notes: notes,
+            localeIdentifier: SpeechRecognitionSupport.resolvedLocale(
+                identifier: localeIdentifier
+            ).identifier,
+            expectedSpeakerCount: expectedSpeakerCount
         )
     }
 
-    func transcribe(url: URL) async throws -> String {
-        guard let recognizer = SFSpeechRecognizer(locale: .current), recognizer.isAvailable else {
+    func transcribe(audioURL: URL) async throws -> TranscriptionResult {
+        let context = transcriptionContext.title.isEmpty
+            ? SpeechRecognitionContext(
+                title: title,
+                workspace: "Voice Notes",
+                objective: "Capture the speaker's exact words clearly."
+            )
+            : transcriptionContext
+        var usedFallback = false
+        let baseResult: TranscriptionResult
+
+        if #available(iOS 26.0, *) {
+            do {
+                baseResult = try await SpeechAnalyzerFileTranscriber.transcribe(
+                    audioURL: audioURL,
+                    context: context,
+                    defaultSpeaker: "Voice note"
+                )
+                return await LocalSpeakerDiarizationService.shared.enrich(
+                    baseResult,
+                    audioURL: audioURL,
+                    expectedSpeakerCount: context.expectedSpeakerCount
+                )
+            } catch {
+                usedFallback = true
+            }
+        }
+
+        let legacy = try await transcribeLegacy(
+            url: audioURL,
+            context: context,
+            defaultSpeaker: "Voice note"
+        )
+        let result = TranscriptionResult(
+            text: legacy.text,
+            segments: legacy.segments,
+            provider: .localAppleSpeech,
+            diarizationAvailable: false,
+            usedFallback: usedFallback
+        )
+        return await LocalSpeakerDiarizationService.shared.enrich(
+            result,
+            audioURL: audioURL,
+            expectedSpeakerCount: context.expectedSpeakerCount
+        )
+    }
+
+    func transcribeMeetingAudio(
+        audioURL: URL,
+        context: SpeechRecognitionContext
+    ) async throws -> TranscriptionResult {
+        transcriptionContext = context
+        var result = try await transcribe(audioURL: audioURL)
+        if !result.diarizationAvailable {
+            result.segments = result.segments.map { segment in
+                var revised = segment
+                revised.speaker = "Meeting"
+                return revised
+            }
+        }
+        return result
+    }
+
+    fileprivate struct LegacyFileTranscription {
+        var text: String
+        var segments: [TranscriptionSegment]
+    }
+
+    private func transcribeLegacy(
+        url: URL,
+        context: SpeechRecognitionContext,
+        defaultSpeaker: String
+    ) async throws -> LegacyFileTranscription {
+        guard let recognizer = SpeechRecognitionSupport.makeLegacyRecognizer(
+            locale: context.recognitionLocale
+        ), recognizer.isAvailable else {
             throw VoiceRecordingError.speechUnavailable
         }
 
         do {
-            let transcript = try await transcribe(url: url, recognizer: recognizer, requiresOnDevice: recognizer.supportsOnDeviceRecognition)
-            if !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let transcript = try await transcribe(
+                url: url,
+                recognizer: recognizer,
+                requiresOnDevice: recognizer.supportsOnDeviceRecognition,
+                context: context,
+                defaultSpeaker: defaultSpeaker
+            )
+            if !transcript.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return transcript
             }
         } catch {
             if recognizer.supportsOnDeviceRecognition {
-                return try await transcribe(url: url, recognizer: recognizer, requiresOnDevice: false)
+                return try await transcribe(
+                    url: url,
+                    recognizer: recognizer,
+                    requiresOnDevice: false,
+                    context: context,
+                    defaultSpeaker: defaultSpeaker
+                )
             }
             throw error
         }
@@ -382,42 +479,119 @@ final class LocalVoiceRecordingService: NSObject, AVAudioRecorderDelegate, Trans
     private func transcribe(
         url: URL,
         recognizer: SFSpeechRecognizer,
-        requiresOnDevice: Bool
-    ) async throws -> String {
+        requiresOnDevice: Bool,
+        context: SpeechRecognitionContext,
+        defaultSpeaker: String
+    ) async throws -> LegacyFileTranscription {
         let request = SFSpeechURLRecognitionRequest(url: url)
-        request.shouldReportPartialResults = false
-        request.taskHint = .dictation
+        SpeechRecognitionSupport.configureLegacyRequest(
+            request,
+            recognizer: recognizer,
+            context: context,
+            reportsPartialResults: true
+        )
         request.requiresOnDeviceRecognition = requiresOnDevice
-
-        if #available(iOS 16.0, *) {
-            request.addsPunctuation = true
-        }
+        let timeout = transcriptionTimeout(for: url)
 
         return try await withCheckedThrowingContinuation { continuation in
-            var didResume = false
+            let state = LegacyTranscriptionCompletionState()
 
             let task = recognizer.recognitionTask(with: request) { result, error in
-                if didResume { return }
+                if let transcription = result?.bestTranscription {
+                    state.update(Self.legacyPayload(
+                        from: transcription,
+                        defaultSpeaker: defaultSpeaker
+                    ))
+                }
 
                 if let result, result.isFinal {
-                    didResume = true
-                    continuation.resume(returning: result.bestTranscription.formattedString)
+                    let completion = state.claim(Self.legacyPayload(
+                        from: result.bestTranscription,
+                        defaultSpeaker: defaultSpeaker
+                    ))
+                    guard completion.claimed else { return }
+                    continuation.resume(returning: completion.payload)
                     return
                 }
 
                 if let error {
-                    didResume = true
-                    continuation.resume(throwing: error)
+                    let completion = state.claim()
+                    guard completion.claimed else { return }
+                    if completion.payload.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: completion.payload)
+                    }
                 }
             }
 
             Task { @MainActor in
-                try? await Task.sleep(for: .seconds(45))
-                guard !didResume else { return }
-                didResume = true
+                try? await Task.sleep(for: .seconds(timeout))
+                let completion = state.claim()
+                guard completion.claimed else { return }
                 task.cancel()
-                continuation.resume(throwing: VoiceRecordingError.noTranscription)
+                if completion.payload.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    continuation.resume(throwing: VoiceRecordingError.noTranscription)
+                } else {
+                    continuation.resume(returning: completion.payload)
+                }
             }
         }
+    }
+
+    private static func legacyPayload(
+        from transcription: SFTranscription,
+        defaultSpeaker: String
+    ) -> LegacyFileTranscription {
+        let segments = transcription.segments.compactMap { segment -> TranscriptionSegment? in
+            let text = segment.substring.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            return TranscriptionSegment(
+                speaker: defaultSpeaker,
+                text: text,
+                startTime: segment.timestamp,
+                endTime: segment.timestamp + segment.duration
+            )
+        }
+        return LegacyFileTranscription(
+            text: transcription.formattedString,
+            segments: segments
+        )
+    }
+
+    private func transcriptionTimeout(for url: URL) -> Double {
+        guard let file = try? AVAudioFile(forReading: url), file.fileFormat.sampleRate > 0 else {
+            return 90
+        }
+        let duration = Double(file.length) / file.fileFormat.sampleRate
+        return min(max((duration * 2) + 20, 60), 600)
+    }
+}
+
+private final class LegacyTranscriptionCompletionState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var didComplete = false
+    private var latestPayload = LocalVoiceRecordingService.LegacyFileTranscription(
+        text: "",
+        segments: []
+    )
+
+    func update(_ payload: LocalVoiceRecordingService.LegacyFileTranscription) {
+        lock.lock()
+        latestPayload = payload
+        lock.unlock()
+    }
+
+    func claim(
+        _ payload: LocalVoiceRecordingService.LegacyFileTranscription? = nil
+    ) -> (claimed: Bool, payload: LocalVoiceRecordingService.LegacyFileTranscription) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !didComplete else { return (false, latestPayload) }
+        if let payload {
+            latestPayload = payload
+        }
+        didComplete = true
+        return (true, latestPayload)
     }
 }

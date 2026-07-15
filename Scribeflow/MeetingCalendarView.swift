@@ -5,6 +5,7 @@ struct MeetingCalendarView: View {
     @Environment(MeetingStore.self) private var store
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
+    let isActive: Bool
     @Binding var selectedMeetingID: Meeting.ID?
     let onCapture: (CaptureView.Mode) -> Void
     @Binding var toast: ToastItem?
@@ -19,6 +20,7 @@ struct MeetingCalendarView: View {
     @State private var isRequestingAccess = false
     @State private var snapshot = MeetingCalendarSnapshot()
     @State private var snapshotBuilder = MeetingCalendarSnapshotBuilder()
+    @State private var prepPresentation: EventPrepPresentation?
 
     private var snapshotKey: MeetingCalendarSnapshotKey {
         MeetingCalendarSnapshotKey(
@@ -35,14 +37,18 @@ struct MeetingCalendarView: View {
                 LazyVStack(alignment: .leading, spacing: 18, pinnedViews: []) {
                     Color.clear.frame(height: 0).id("calendar.top")
                     calendarHeader
-                    calendarTimelineStrip
+                    if calendarScope == .week {
+                        calendarTimelineStrip
+                    }
                     calendarModeContent
 
                     if accessState != .allowed {
                         calendarAccessCard
                     }
 
-                    selectedDayAgenda
+                    if calendarScope != .agenda {
+                        selectedDayAgenda
+                    }
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 16)
@@ -73,17 +79,40 @@ struct MeetingCalendarView: View {
             .navigationDestination(for: Meeting.ID.self) { id in
                 MeetingDetailView(meetingID: id)
             }
-            .task(id: displayedMonth) {
+            .navigationDestination(for: MeetingCalendarAgendaDay.self) { day in
+                MeetingCalendarDayDetailView(
+                    day: day,
+                    filter: calendarFilter,
+                    linkedMeeting: snapshot.linkedMeeting(for:),
+                    onPrep: showPrep(for:),
+                    onCapture: capture(for:),
+                    onCreateNote: { createNote(on: day.date) }
+                )
+            }
+            .sheet(item: $prepPresentation) { presentation in
+                EventPrepBriefSheet(
+                    event: presentation.event,
+                    brief: presentation.brief,
+                    hasPreparedNote: presentation.hasPreparedNote,
+                    onOpenNote: { prepareNote(for: presentation.event) },
+                    onRecord: { capture(for: presentation.event) },
+                    onOpenSource: openMeeting(_:)
+                )
+            }
+            .task(id: isActive ? displayedMonth : nil) {
+                guard isActive else { return }
                 await refreshCalendarEvents()
             }
-            .task(id: snapshotKey) {
+            .task(id: isActive ? snapshotKey : nil) {
+                guard isActive else { return }
                 await refreshSnapshot(for: snapshotKey)
             }
             .onChange(of: scenePhase) { _, phase in
-                guard phase == .active else { return }
+                guard isActive, phase == .active else { return }
                 Task { await refreshCalendarEvents() }
             }
             .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
+                guard isActive else { return }
                 Task { await refreshCalendarEvents() }
             }
             .onReceive(NotificationCenter.default.publisher(for: .scribeflowDockScrollToTop)) { note in
@@ -323,9 +352,7 @@ struct MeetingCalendarView: View {
                 )
             } else {
                 ForEach(days) { day in
-                    Button {
-                        selectDate(day.date)
-                    } label: {
+                    NavigationLink(value: day) {
                         MeetingCalendarAgendaDayRow(
                             day: day,
                             filter: calendarFilter,
@@ -409,7 +436,7 @@ struct MeetingCalendarView: View {
                             MeetingCalendarEventRow(
                                 event: event,
                                 linkedMeeting: snapshot.linkedMeeting(for: event),
-                                onPrep: prepareNote(for:),
+                                onPrep: showPrep(for:),
                                 onCapture: capture(for:)
                             )
                         }
@@ -588,8 +615,8 @@ struct MeetingCalendarView: View {
     }
 
     private func prepareNote(for event: CalendarEventSnapshot) {
-        if let existing = snapshot.linkedMeeting(for: event) {
-            selectedMeetingID = existing.id
+        if let existing = store.meeting(linkedTo: event) {
+            openMeeting(existing.id)
             toast = ToastItem(message: "That event already has a note", icon: "doc.text.fill")
             HapticEngine.tap(.light)
             return
@@ -610,9 +637,23 @@ struct MeetingCalendarView: View {
             calendarEndDate: event.endDate
         )
         selectedDate = Calendar.current.startOfDay(for: event.startDate)
-        selectedMeetingID = id
+        openMeeting(id)
         HapticEngine.notify(.success)
         toast = ToastItem(message: "Prep note added to calendar", icon: "calendar.badge.checkmark")
+    }
+
+    private func showPrep(for event: CalendarEventSnapshot) {
+        HapticEngine.tap(.light)
+        prepPresentation = EventPrepPresentation(
+            event: event,
+            brief: store.eventPrepBrief(for: event),
+            hasPreparedNote: store.meeting(linkedTo: event) != nil
+        )
+    }
+
+    private func openMeeting(_ id: Meeting.ID) {
+        selectedMeetingID = id
+        NotificationCenter.default.post(name: .scribeflowOpenMeeting, object: id)
     }
 
     private func capture(for event: CalendarEventSnapshot) {
@@ -622,21 +663,25 @@ struct MeetingCalendarView: View {
     }
 
     private func createNoteForSelectedDay() {
-        let title = "Meeting · \(selectedDate.formatted(.dateTime.month(.abbreviated).day()))"
+        createNote(on: selectedDate)
+    }
+
+    private func createNote(on date: Date) {
+        let title = "Meeting · \(date.formatted(.dateTime.month(.abbreviated).day()))"
         let id = store.addMeeting(
             title: title,
             workspace: "Meetings",
             attendees: ["You"],
             objective: "Planned from calendar view",
             notes: "- Agenda:\n- Decisions:\n- Risks:\n- Next steps:",
-            when: selectedDate,
+            when: date,
             stage: "Created from calendar",
             durationMinutes: 30,
             audioRecordings: []
         )
         selectedMeetingID = id
         HapticEngine.notify(.success)
-        toast = ToastItem(message: "Note added for \(selectedDate.formatted(.dateTime.month(.abbreviated).day()))", icon: "square.and.pencil")
+        toast = ToastItem(message: "Note added for \(date.formatted(.dateTime.month(.abbreviated).day()))", icon: "square.and.pencil")
     }
 
     private func moveMonth(by delta: Int) {
@@ -994,6 +1039,88 @@ private struct MeetingCalendarAgendaDay: Identifiable, Hashable {
     var noteCount: Int { meetings.count }
     var eventCount: Int { events.count }
     var hasAnyActivity: Bool { noteCount > 0 || eventCount > 0 || openLoopCount > 0 }
+}
+
+private struct MeetingCalendarDayDetailView: View {
+    let day: MeetingCalendarAgendaDay
+    let filter: CalendarContentFilter
+    let linkedMeeting: (CalendarEventSnapshot) -> Meeting?
+    let onPrep: (CalendarEventSnapshot) -> Void
+    let onCapture: (CalendarEventSnapshot) -> Void
+    let onCreateNote: () -> Void
+
+    private var meetings: [Meeting] { filter.visibleMeetings(from: day.meetings) }
+    private var events: [CalendarEventSnapshot] { filter.visibleEvents(from: day.events) }
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(day.date.formatted(.dateTime.weekday(.wide).month(.wide).day()))
+                        .font(.system(size: 28, weight: .medium, design: .serif))
+                        .foregroundStyle(AppPalette.ink)
+                    Spacer(minLength: 8)
+                    EditorialMeta(text: summary)
+                }
+
+                if meetings.isEmpty && events.isEmpty {
+                    EmptyStateCard(
+                        title: "No matching items",
+                        subtitle: "Choose another calendar filter to see more on this day.",
+                        systemImage: filter.systemImage,
+                        tint: AppPalette.accent
+                    )
+                } else {
+                    if !meetings.isEmpty {
+                        EditorialSectionHead(title: filter == .openLoops ? "Open-loop notes" : "Scribeflow notes", titleSize: 20)
+                        ForEach(meetings) { meeting in
+                            NavigationLink(value: meeting.id) {
+                                MeetingCalendarMeetingRow(meeting: meeting)
+                            }
+                            .buttonStyle(PressScaleButtonStyle(scale: 0.98))
+                        }
+                    }
+
+                    if !events.isEmpty {
+                        EditorialSectionHead(title: "Calendar events", titleSize: 20)
+                            .padding(.top, meetings.isEmpty ? 0 : 6)
+                        ForEach(events) { event in
+                            MeetingCalendarEventRow(
+                                event: event,
+                                linkedMeeting: linkedMeeting(event),
+                                onPrep: onPrep,
+                                onCapture: onCapture
+                            )
+                        }
+                    }
+                }
+
+                Button {
+                    HapticEngine.tap(.light)
+                    onCreateNote()
+                } label: {
+                    Label("Add note on this day", systemImage: "square.and.pencil")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(AppPalette.ink)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 16)
+            .padding(.bottom, 40)
+            .readingWidth()
+        }
+        .background(AppPalette.background.ignoresSafeArea())
+        .navigationTitle("Day agenda")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var summary: String {
+        let total = meetings.count + events.count
+        return total == 0 ? "clear" : "\(total) item\(total == 1 ? "" : "s")"
+    }
 }
 
 private struct MeetingCalendarDayCell: View {

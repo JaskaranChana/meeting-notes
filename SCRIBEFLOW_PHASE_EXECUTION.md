@@ -57,6 +57,7 @@ Status: complete for app-controlled work.
 - Apple Developer CloudKit container, provisioning profile, and production schema.
 - Production transcription provider URL, authentication, monitoring, and quotas.
 - Signed TestFlight delivery credentials and requested device-level smoke automation.
+- Legal review of the repository terms template before public distribution.
 
 ## End-To-End Refinement Pass
 
@@ -73,7 +74,8 @@ Status: complete for the client foundation.
 
 Status: complete for current account modes.
 
-- Release now uses one Keychain-backed session boundary.
+- Local workspaces open without an account; app unlock is an explicit user choice.
+- Enabled sessions use one Keychain-backed boundary.
 - Removed the duplicate local password database and its legacy screens.
 - Distinguishes local, social-identity, development, and backend sessions.
 - Rechecks Apple authorization and blocks partial account deletion failures.
@@ -84,7 +86,8 @@ Status: complete for current account modes.
 
 Status: complete for user-controlled backup; not live sync.
 
-- Cloud capability is enabled by build configuration, not a source edit.
+- The private-backup foundation is present but remains unavailable until the
+  signed target has the CloudKit entitlement and production container.
 - Added SHA-256 integrity verification and remote-change conflict protection.
 - Refreshes when the iCloud account changes and supports idempotent deletion.
 - Still requires the Apple container, provisioning profile, and deployed schema.
@@ -120,6 +123,82 @@ Status: complete for the client and on-device model path.
 - Separates detected voice labels from calendar attendees and explains confidence.
 - Cancels stale AI generations so the latest focus or speaker correction wins.
 
-Production-quality acoustic speaker separation still depends on the configured
-transcription service returning ordered speaker segments. Apple Speech is shown
-honestly as one mixed track rather than pretending to identify multiple voices.
+Enhanced local transcription can use FluidAudio diarization to produce ordered
+speaker turns on device. Apple Speech remains one mixed track when diarization is
+unavailable, and every detected label can be renamed, merged, or corrected for
+an individual transcript turn.
+
+## Trust, Performance, And Release Refinement
+
+Status: app-controlled implementation and compile verification complete; device
+validation remains a separate release step.
+
+### Grounded Intelligence
+
+- Ask retrieves raw note and transcript chunks before generation.
+- The generated answer may cite only validated source IDs from that retrieval.
+- The Sources card displays only evidence actually used by accepted answer bullets.
+- Source proof persists exact, partial, or contextual match strength.
+- Negation mismatches cannot become supporting evidence.
+- Generated claims and actions pass through semantic deduplication.
+
+### Scalable Daily Use
+
+- Persisted derived intelligence is versioned and no longer rebuilt wholesale
+  before the first screen appears.
+- Older rows migrate gradually with yields between meetings.
+- Recall reuses a revision-cached raw-source index between questions.
+- Persistence avoids rewriting an identical library snapshot.
+
+### Speaker And Accessibility Review
+
+- A whole speaker label can still be renamed across the transcript.
+- Any individual transcript turn can now be reassigned to an existing or new speaker.
+- Primary transcript, language, settings, and tab controls use larger hit regions.
+- Meeting tabs scroll at large Dynamic Type sizes instead of clipping.
+- Ready-state fallback notices announce through VoiceOver.
+
+### Production Focus And Truth
+
+- Release builds use one canonical Today hero.
+- Investor presentation, sample reset, and hero experiments remain Debug tools.
+- Webhook URLs require HTTPS and are stored in Keychain; preferences retain metadata only.
+- The unimplemented Live Activity capability flag was removed.
+- Privacy and README language now describe local-first defaults and explicit boundaries.
+- Settings links to a dedicated terms document rather than the source-code licence.
+
+## Reliability And Speech Recovery Pass
+
+Status: implementation and compile verification complete; real-device speech
+quality remains a release validation step.
+
+### Launch And Persistence
+
+- Legacy or incomplete intelligence repair now begins after first paint and
+  yields between meetings.
+- Curated seed commitments remain intact during deferred migration.
+- Pending library edits flush immediately when the app leaves the foreground,
+  closing the normal save debounce window before suspension.
+
+### User-Guided Speaker Separation
+
+- Capture keeps automatic voice detection as the default.
+- Users who know the room can select an exact count from one to six voices.
+- The hint travels through persisted processing jobs and configures FluidAudio's
+  clustering constraint instead of existing only in the interface.
+
+### Recording Transcript Recovery
+
+- Every saved recording can create or improve its transcript.
+- Recovery requests persist before processing and resume after relaunch.
+- Local processing remains the default; a configured backend is used only after
+  the existing explicit consent setting is enabled.
+- Transcript lines retain recording provenance, so an improved transcript
+  replaces that recording's earlier contribution without duplicating unrelated text.
+
+### Verification Checkpoint
+
+- Latest Debug iOS Simulator build succeeded on July 14, 2026.
+- Latest Release iOS Simulator build succeeded on July 14, 2026.
+- Both builds used fresh DerivedData and code signing disabled for compile verification.
+- Tests and screenshots were intentionally not run for this checkpoint.

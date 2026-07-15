@@ -74,7 +74,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Scribeflow uses Apple Speech to turn recordings into searchable transcripts on this device."
+            "value" : "Scribeflow uses on-device speech recognition to turn recordings into searchable transcripts."
           }
         }
       }

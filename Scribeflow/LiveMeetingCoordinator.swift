@@ -1,3 +1,4 @@
+import Accelerate
 import ActivityKit
 import AVFoundation
 import Foundation
@@ -98,6 +99,75 @@ enum CapturePermissionState: Equatable {
     case unsupported
 }
 
+enum LiveSpeechActivity: Equatable {
+    case idle
+    case listening
+    case hearingSpeech
+    case quietInput
+}
+
+enum LiveSpeechFeedback: Equatable {
+    case permissionNeeded
+    case microphoneBlocked
+    case microphoneUnavailable
+    case ready
+    case listening
+    case hearingSpeech
+    case quietInput
+    case paused
+    case captionsUnavailable
+    case finalizing
+    case captured
+
+    var title: String {
+        switch self {
+        case .permissionNeeded: "Tap to begin"
+        case .microphoneBlocked: "Microphone blocked"
+        case .microphoneUnavailable: "Microphone unavailable"
+        case .ready: "Ready"
+        case .listening: "Listening"
+        case .hearingSpeech: "Hearing speech"
+        case .quietInput: "Input is quiet"
+        case .paused: "Paused"
+        case .captionsUnavailable: "Audio is recording"
+        case .finalizing: "Finishing last words"
+        case .captured: "Recording secured"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .permissionNeeded: "Microphone access is requested when you start"
+        case .microphoneBlocked: "Enable microphone access in Settings"
+        case .microphoneUnavailable: "Connect an audio input and try again"
+        case .ready: "Full audio and transcript stay together"
+        case .listening: "Waiting for clear speech"
+        case .hearingSpeech: "Draft captions are updating"
+        case .quietInput: "No clear voice for a few seconds"
+        case .paused: "Audio and captions are paused"
+        case .captionsUnavailable: "Live captions unavailable · transcript rebuilds after Save"
+        case .finalizing: "Keeping the final buffered phrase"
+        case .captured: "Ready to Save · wording and voice labels refine in background"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .permissionNeeded: "hand.tap.fill"
+        case .microphoneBlocked: "mic.slash.fill"
+        case .microphoneUnavailable: "exclamationmark.triangle.fill"
+        case .ready: "mic.fill"
+        case .listening: "ear"
+        case .hearingSpeech: "waveform.badge.mic"
+        case .quietInput: "waveform.slash"
+        case .paused: "pause.fill"
+        case .captionsUnavailable: "waveform.badge.exclamationmark"
+        case .finalizing: "ellipsis.circle.fill"
+        case .captured: "checkmark.shield.fill"
+        }
+    }
+}
+
 enum CaptureSuggestionKind: Equatable {
     case core
     case optional
@@ -117,14 +187,17 @@ struct CaptureBookmark: Identifiable, Equatable {
 @MainActor
 @Observable
 final class LiveMeetingCoordinator {
-    var title = "Live meeting"
-    var workspace = "Personal workspace"
-    var objective = "Capture the key points while I stay present in the meeting."
-    var attendees = ""
-    var manualNotes = ""
+    var title = "" { didSet { schedulePurposeRefresh() } }
+    var workspace = "Personal workspace" { didSet { schedulePurposeRefresh() } }
+    var objective = "" { didSet { schedulePurposeRefresh() } }
+    var attendees = "" { didSet { schedulePurposeRefresh() } }
+    var manualNotes = "" { didSet { schedulePurposeRefresh() } }
     var selectedTemplate: NoteTemplate = .discovery
     var transcriptText = ""
     var transcriptParagraphs: [String] = []
+    var transcriptSegments: [TranscriptionSegment] = []
+    var isFinalizingSpeech = false
+    var speakerStatus: String?
     var meetingMode: MeetingMode = .privateNotes
     var consentState: ConsentState = .privateCapture
     var retentionPolicy: RetentionPolicy = .keepUntilDeleted
@@ -135,26 +208,36 @@ final class LiveMeetingCoordinator {
     var catchUpSummary: String?
     var isGeneratingCatchUp = false
     var permissionState: CapturePermissionState = .unknown
+    var recognitionLocaleIdentifier = SpeechRecognitionSupport.selectedLocaleIdentifier
+    var expectedSpeakerCount: Int?
     var isRecording = false
     var isPaused = false
     var errorMessage: String?
     var elapsedSeconds = 0
     var inputLevel: Double = 0  // 0...1, RMS-normalized, updated from audio tap
-    /// Throttle anchor for waveform updates. Audio tap fires ~50Hz; we
-    /// republish at most every 80ms.
-    private var lastLevelPublishAt: Date = .distantPast
+    var speechActivity: LiveSpeechActivity = .idle
+    private(set) var liveCaptionsAvailable = false
+    var currentPurpose = CapturePurpose(
+        kind: .personalNote,
+        confidence: .conservative,
+        evidence: [.privateCapture],
+        domain: "Personal"
+    )
 
     @ObservationIgnored
     private let audioEngine = AVAudioEngine()
 
     @ObservationIgnored
-    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var speechSession: (any LiveSpeechTranscribing)?
 
     @ObservationIgnored
-    private var recognitionTask: SFSpeechRecognitionTask?
+    private var audioWriter: TemporaryMeetingAudioWriter?
 
     @ObservationIgnored
-    private var speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+    private var pendingAudioFileName: String?
+
+    @ObservationIgnored
+    private var purposeRefreshTask: Task<Void, Never>?
 
     @ObservationIgnored
     private var timer: Timer?
@@ -168,10 +251,24 @@ final class LiveMeetingCoordinator {
     @ObservationIgnored
     private var pendingTranscriptUpdateTask: Task<Void, Never>?
 
+    @ObservationIgnored
+    private var speechContextUpdateTask: Task<Void, Never>?
+
+    @ObservationIgnored
+    private var captureGeneration = 0
+
+    @ObservationIgnored
+    private var lastAudibleInputAt: Date?
+
     /// Audio-thread-readable mirror of `isPaused`. Plain flag so the mic tap
     /// (which runs off the main actor) can check it without hopping actors.
     @ObservationIgnored
     nonisolated(unsafe) private var audioPaused = false
+
+    /// The render callback is serial. Sampling every second 2,048-frame buffer
+    /// keeps the visual meter near 10 Hz without flooding the main actor.
+    @ObservationIgnored
+    nonisolated(unsafe) private var audioMeterBufferCount = 0
 
     var elapsedLabel: String {
         let minutes = elapsedSeconds / 60
@@ -182,24 +279,100 @@ final class LiveMeetingCoordinator {
     var canSave: Bool {
         !manualNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         || !transcriptParagraphs.isEmpty
+        || pendingAudioFileName != nil
+    }
+
+    var hasPendingAudio: Bool { pendingAudioFileName != nil }
+
+    var needsPermissionSettings: Bool {
+        let permissions = VoiceRecordingPermissionService.current()
+        return permissions.microphone == .denied || permissions.speech == .denied
+    }
+
+    var recognitionLanguageTitle: String {
+        SpeechRecognitionSupport.displayName(for: recognitionLocale)
+    }
+
+    var recognitionLocale: Locale {
+        SpeechRecognitionSupport.resolvedLocale(identifier: recognitionLocaleIdentifier)
+    }
+
+    var expectedSpeakerCountTitle: String {
+        expectedSpeakerCount.map { "\($0) voice\($0 == 1 ? "" : "s")" } ?? "Auto voices"
+    }
+
+    var speechFeedback: LiveSpeechFeedback {
+        if isFinalizingSpeech { return .finalizing }
+        if !isRecording, hasPendingAudio { return .captured }
+        guard isRecording else {
+            switch permissionState {
+            case .unknown:
+                return .permissionNeeded
+            case .ready:
+                return .ready
+            case .denied:
+                return .microphoneBlocked
+            case .unsupported:
+                return .microphoneUnavailable
+            }
+        }
+        if isPaused { return .paused }
+        if !liveCaptionsAvailable { return .captionsUnavailable }
+
+        switch speechActivity {
+        case .idle, .listening:
+            return .listening
+        case .hearingSpeech:
+            return .hearingSpeech
+        case .quietInput:
+            return .quietInput
+        }
     }
 
     func prepare() async {
-        guard permissionState == .unknown else { return }
-        await requestPermissions()
+        let permissions = VoiceRecordingPermissionService.current()
+        switch permissions.microphone {
+        case .ready:
+            permissionState = .ready
+            switch permissions.speech {
+            case .denied, .unsupported:
+                speakerStatus = "Recording is ready · live captions need Speech Recognition access"
+                errorMessage = "Scribeflow will keep the audio. Enable Speech Recognition to generate its transcript."
+            case .unknown, .ready:
+                errorMessage = nil
+            }
+        case .denied:
+            permissionState = .denied
+            errorMessage = "Microphone access is blocked. Enable it in Settings to record a meeting."
+        case .unsupported:
+            permissionState = .unsupported
+            errorMessage = "No microphone input is available. Connect an audio input and try again."
+        case .unknown:
+            permissionState = .unknown
+            errorMessage = nil
+        }
+    }
+
+    func selectRecognitionLocale(identifier: String?) {
+        guard !isRecording, !isFinalizingSpeech else { return }
+        let cleaned = identifier?.trimmingCharacters(in: .whitespacesAndNewlines)
+        recognitionLocaleIdentifier = cleaned?.isEmpty == false ? cleaned : nil
+        SpeechRecognitionSupport.persistSelectedLocale(identifier: recognitionLocaleIdentifier)
+    }
+
+    func selectExpectedSpeakerCount(_ count: Int?) {
+        guard !isRecording, !isFinalizingSpeech else { return }
+        expectedSpeakerCount = count.map { min(max($0, 1), 8) }
     }
 
     func requestPermissions() async {
-        guard speechRecognizer != nil else {
-            permissionState = .unsupported
-            errorMessage = "Speech recognition is unavailable on this device."
-            return
-        }
-
-        let speechStatus = await withCheckedContinuation { continuation in
-            SFSpeechRecognizer.requestAuthorization { status in
-                continuation.resume(returning: status)
-            }
+        let hasSpeechRecognizer: Bool
+        if #available(iOS 26.0, *), SpeechTranscriber.isAvailable {
+            hasSpeechRecognizer = true
+        } else {
+            hasSpeechRecognizer = SpeechRecognitionSupport.makeLegacyRecognizer(
+                locale: recognitionLocale
+            ) != nil
         }
 
         let microphoneAllowed = await withCheckedContinuation { continuation in
@@ -214,34 +387,56 @@ final class LiveMeetingCoordinator {
             }
         }
 
-        guard speechStatus == .authorized, microphoneAllowed else {
+        guard microphoneAllowed else {
             permissionState = .denied
-            errorMessage = "Please allow microphone and speech recognition access in Settings to use live capture."
+            errorMessage = "Please allow microphone access in Settings to record a meeting."
             return
         }
 
+        let speechStatus: SFSpeechRecognizerAuthorizationStatus
+        if hasSpeechRecognizer {
+            speechStatus = await withCheckedContinuation { continuation in
+                SFSpeechRecognizer.requestAuthorization { status in
+                    continuation.resume(returning: status)
+                }
+            }
+        } else {
+            speechStatus = .denied
+        }
+
         permissionState = .ready
-        errorMessage = nil
+        if speechStatus == .authorized, hasSpeechRecognizer {
+            errorMessage = nil
+        } else {
+            speakerStatus = "Recording is available · live captions need Speech Recognition access"
+            errorMessage = "Scribeflow will keep the audio. Enable Speech Recognition to generate its transcript."
+        }
     }
 
     func startCapture() async {
+        stopCapture()
+        captureGeneration &+= 1
+        let generation = captureGeneration
+
         if permissionState != .ready {
             await requestPermissions()
         }
 
-        guard permissionState == .ready else { return }
-        guard let speechRecognizer, speechRecognizer.isAvailable else {
-            errorMessage = "Speech recognition is temporarily unavailable. Try again in a quieter environment or a few moments later."
-            return
-        }
-
-        stopCapture()
+        guard generation == captureGeneration, permissionState == .ready else { return }
         transcriptText = ""
         transcriptParagraphs = []
+        transcriptSegments = []
+        speakerStatus = nil
+        isFinalizingSpeech = false
         suggestions = []
         bookmarks = []
         catchUpSummary = nil
         elapsedSeconds = 0
+        inputLevel = 0
+        speechActivity = .listening
+        liveCaptionsAvailable = false
+        lastAudibleInputAt = nil
+        audioMeterBufferCount = 0
         errorMessage = nil
         isPaused = false
         audioPaused = false
@@ -250,24 +445,13 @@ final class LiveMeetingCoordinator {
 
         do {
             try configureAudioSession()
-            let request = SFSpeechAudioBufferRecognitionRequest()
-            request.shouldReportPartialResults = true
-            // Prefer on-device recognition so audio never leaves the device when
-            // supported — matching the app's privacy promise. Falls back to
-            // server recognition only where on-device isn't available.
-            request.requiresOnDeviceRecognition = speechRecognizer.supportsOnDeviceRecognition
-            request.taskHint = .dictation
-
-            if #available(iOS 16.0, *) {
-                request.addsPunctuation = true
-            }
-
-            recognitionRequest = request
             let inputNode = audioEngine.inputNode
 
-            // Enable voice processing for echo cancellation and noise reduction.
-            if inputNode.isVoiceProcessingEnabled == false {
-                try inputNode.setVoiceProcessingEnabled(true)
+            // The long-form speech model is trained for meeting and distant
+            // audio. Preserve the natural microphone signal instead of applying
+            // voice-call echo suppression, which can clip quiet words.
+            if inputNode.isVoiceProcessingEnabled {
+                try inputNode.setVoiceProcessingEnabled(false)
             }
 
             let format = inputNode.outputFormat(forBus: 0)
@@ -275,37 +459,49 @@ final class LiveMeetingCoordinator {
                 errorMessage = "Audio input is unavailable. Check microphone access or try reconnecting audio."
                 return
             }
+            let audioWriter = try TemporaryMeetingAudioWriter(format: format)
+            self.audioWriter = audioWriter
+
+            let context = recognitionContext()
+            let session: (any LiveSpeechTranscribing)?
+            do {
+                session = try await SpeechRecognitionPipeline.makeLiveSession(
+                    inputFormat: format,
+                    context: context,
+                    onTranscript: { [weak self] text, isFinal in
+                        guard self?.captureGeneration == generation else { return }
+                        self?.handleTranscriptUpdate(text, isFinal: isFinal)
+                    },
+                    onError: { [weak self] message in
+                        guard let self, self.captureGeneration == generation else { return }
+                        self.preserveRecordingAfterSpeechFailure(message)
+                    }
+                )
+            } catch {
+                session = nil
+                preserveRecordingAfterSpeechFailure(error.localizedDescription)
+            }
+            guard generation == captureGeneration else {
+                session?.cancel()
+                return
+            }
+            speechSession = session
+            liveCaptionsAvailable = session != nil
+            let audioSink = session?.audioSink
+
             inputNode.removeTap(onBus: 0)
-            inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self, request] buffer, _ in
+            inputNode.installTap(onBus: 0, bufferSize: 2048, format: format) { [weak self, audioSink, audioWriter] buffer, _ in
                 guard let self else { return }
                 // While soft-paused, drop audio so the transcript and level
-                // freeze — without tearing down the engine (instant resume).
+                // freeze without tearing down the engine (instant resume).
                 guard !self.audioPaused else { return }
-                // Append to the captured request (thread-safe), avoiding a
-                // cross-actor read of the main-isolated `recognitionRequest`.
-                request.append(buffer)
+                audioSink?.append(buffer)
+                audioWriter.append(buffer)
                 self.computeAndPublishLevel(buffer)
             }
 
             audioEngine.prepare()
             try audioEngine.start()
-
-            recognitionTask = speechRecognizer.recognitionTask(with: request) { [weak self] result, error in
-                guard let self else { return }
-                let formattedString = result?.bestTranscription.formattedString
-                let isFinal = result?.isFinal ?? false
-                let errorMessage = error?.localizedDescription
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    if let formattedString {
-                        self.handleTranscriptUpdate(formattedString, isFinal: isFinal)
-                    }
-                    if let errorMessage {
-                        self.errorMessage = errorMessage
-                        self.stopCapture()
-                    }
-                }
-            }
 
             isRecording = true
             startTimer()
@@ -324,6 +520,8 @@ final class LiveMeetingCoordinator {
         isPaused = true
         audioPaused = true
         inputLevel = 0
+        speechActivity = .idle
+        lastAudibleInputAt = nil
         updateNowPlaying(isLive: false)
         MeetingRecordingLiveActivity.shared.update(inputLevel: 0, isPaused: true)
     }
@@ -332,32 +530,102 @@ final class LiveMeetingCoordinator {
         guard isRecording, isPaused else { return }
         isPaused = false
         audioPaused = false
+        speechActivity = .listening
+        lastAudibleInputAt = nil
         updateNowPlaying(isLive: true)
     }
 
     func stopCapture() {
+        beginStoppingCapture()
+        stopAudioInput()
+        speechSession?.cancel()
+        speechSession = nil
+        audioWriter?.discard()
+        audioWriter = nil
+        if let pendingAudioFileName {
+            PendingMeetingAudioStore.delete(pendingAudioFileName)
+            self.pendingAudioFileName = nil
+        }
+        isFinalizingSpeech = false
+        deactivateAudioSession()
+    }
+
+    func finishCapture() async {
+        guard isRecording || speechSession != nil || audioWriter != nil else { return }
+
+        let writer = audioWriter
+        let session = speechSession
+        audioWriter = nil
+        speechSession = nil
+        stopAudioInput()
+        isFinalizingSpeech = true
+        speakerStatus = "Finishing the last words"
+        beginStoppingCapture()
+        deactivateAudioSession()
+        defer { isFinalizingSpeech = false }
+
+        // Flush the audio file while Speech finishes its buffered tail. The
+        // previous cancel path could drop the final phrase, especially with
+        // progressive transcription results.
+        let audioFinalization = Task { [writer] in
+            await writer?.finish()
+        }
+        let finalizedTranscript = await session?.finish() ?? ""
+        let cleanedTranscript = finalizedTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleanedTranscript.isEmpty {
+            applyTranscriptUpdate(cleanedTranscript)
+        }
+
+        guard let temporaryURL = await audioFinalization.value else {
+            speakerStatus = "The live transcript is ready to save."
+            return
+        }
+        do {
+            pendingAudioFileName = try PendingMeetingAudioStore.adopt(temporaryURL)
+            speakerStatus = "Recording secured · Save to refine wording and voice labels"
+        } catch {
+            try? FileManager.default.removeItem(at: temporaryURL)
+            speakerStatus = "The live transcript is ready, but enhanced processing is unavailable."
+        }
+    }
+
+    func refreshRecognitionContext() {
+        guard isRecording, let speechSession else { return }
+        let context = recognitionContext()
+        speechContextUpdateTask?.cancel()
+        speechContextUpdateTask = Task {
+            try? await Task.sleep(for: .milliseconds(450))
+            guard !Task.isCancelled else { return }
+            await speechSession.updateContext(context)
+        }
+    }
+
+    private func beginStoppingCapture() {
+        captureGeneration &+= 1
         isRecording = false
         isPaused = false
         audioPaused = false
+        audioMeterBufferCount = 0
+        inputLevel = 0
+        speechActivity = .idle
+        liveCaptionsAvailable = false
+        lastAudibleInputAt = nil
         clearNowPlaying()
         MeetingRecordingLiveActivity.shared.end()
         timer?.invalidate()
         timer = nil
         pendingTranscriptUpdateTask?.cancel()
         pendingTranscriptUpdateTask = nil
+        speechContextUpdateTask?.cancel()
+        speechContextUpdateTask = nil
+    }
 
-        // Correct teardown order:
-        // 1. Signal no more audio to the recognizer
-        // 2. Remove tap BEFORE stopping engine (prevents mid-buffer crash)
-        // 3. Stop engine
-        // 4. Cancel recognition task
-        recognitionRequest?.endAudio()
+    private func stopAudioInput() {
         audioEngine.inputNode.removeTap(onBus: 0)
         if audioEngine.isRunning { audioEngine.stop() }
-        recognitionTask?.cancel()
-        recognitionTask = nil
-        recognitionRequest = nil
+    }
 
+    private func deactivateAudioSession() {
         AudioSessionManager.shared.stopObserving()
         AudioSessionManager.shared.deactivate()
     }
@@ -385,6 +653,40 @@ final class LiveMeetingCoordinator {
         refreshSuggestions()
     }
 
+    private func schedulePurposeRefresh() {
+        purposeRefreshTask?.cancel()
+        purposeRefreshTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(220))
+            guard !Task.isCancelled else { return }
+            self?.refreshPurposeUnderstanding()
+        }
+    }
+
+    func refreshPurposeUnderstanding() {
+        purposeRefreshTask?.cancel()
+        purposeRefreshTask = nil
+        let participantNames = attendees
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let speakerCount = Set(transcriptSegments.compactMap { segment -> String? in
+            let speaker = segment.speaker.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return speaker.isEmpty ? nil : speaker
+        }).count
+
+        currentPurpose = MeetingPurposeClassifier.standard.classifyCapture(
+            title: title,
+            workspace: workspace,
+            objective: objective,
+            attendees: participantNames,
+            notes: manualNotes,
+            transcriptParagraphs: Array(transcriptParagraphs.suffix(40)),
+            distinctSpeakerCount: speakerCount,
+            meetingMode: meetingMode,
+            consentState: consentState
+        )
+    }
+
     func applyMeetingMode(_ mode: MeetingMode) {
         meetingMode = mode
         hasConfirmedTrustSetup = true
@@ -402,6 +704,7 @@ final class LiveMeetingCoordinator {
             retentionPolicy = .transcript24Hours
             transcriptPanelVisible = false
         }
+        refreshPurposeUnderstanding()
     }
 
     func saveMeeting(into store: MeetingStore, calendarEvent: CalendarEventSnapshot? = nil) async -> Meeting.ID {
@@ -412,14 +715,78 @@ final class LiveMeetingCoordinator {
         let eventAttendees = calendarEvent?.attendees ?? []
         let mergedAttendees = normalizedAttendees.isEmpty ? eventAttendees : normalizedAttendees
 
+        let resolvedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Untitled capture" : title
+        let resolvedWorkspace = workspace.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "Personal workspace"
+            : workspace
+        let resolvedObjective = objective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "Understand and organize what matters."
+            : objective
+
+        if let fileName = pendingAudioFileName {
+            let durationMinutes = max(1, Int(ceil(Double(elapsedSeconds) / 60.0)))
+            let capturedAt = Date.now.addingTimeInterval(-Double(elapsedSeconds))
+            let pending = store.addPendingLiveMeeting(
+                title: resolvedTitle,
+                workspace: resolvedWorkspace,
+                attendees: mergedAttendees,
+                objective: resolvedObjective,
+                notes: manualNotes,
+                moments: bookmarks.map(\.text),
+                transcriptParagraphs: transcriptParagraphs,
+                transcriptionSegments: transcriptSegments,
+                when: capturedAt,
+                durationMinutes: durationMinutes,
+                selectedTemplate: selectedTemplate,
+                meetingMode: meetingMode,
+                consentState: consentState,
+                retentionPolicy: retentionPolicy,
+                calendarEventID: calendarEvent?.id,
+                calendarStartDate: calendarEvent?.startDate,
+                calendarEndDate: calendarEvent?.endDate
+            )
+            let job = PendingMeetingProcessingJob(
+                meetingID: pending.id,
+                fileName: fileName,
+                context: recognitionContext(includeLiveVocabulary: true),
+                capturedNotes: manualNotes,
+                pendingNotes: pending.pendingNotes,
+                moments: bookmarks.map(\.text),
+                liveWordCount: transcriptParagraphs.reduce(0) {
+                    $0 + $1.split(whereSeparator: \.isWhitespace).count
+                },
+                recovery: PendingMeetingRecoveryPayload(
+                    title: resolvedTitle,
+                    workspace: resolvedWorkspace,
+                    attendees: mergedAttendees,
+                    objective: resolvedObjective,
+                    liveTranscript: transcriptParagraphs.joined(separator: "\n"),
+                    capturedAt: capturedAt,
+                    durationMinutes: durationMinutes,
+                    durationSeconds: max(1, elapsedSeconds),
+                    selectedTemplate: selectedTemplate,
+                    meetingMode: meetingMode,
+                    consentState: consentState,
+                    retentionPolicy: retentionPolicy,
+                    calendarEventID: calendarEvent?.id,
+                    calendarStartDate: calendarEvent?.startDate,
+                    calendarEndDate: calendarEvent?.endDate
+                )
+            )
+            _ = await MeetingProcessingCoordinator.shared.enqueue(job, using: store)
+            pendingAudioFileName = nil
+            return pending.id
+        }
+
         let id = await store.addLiveMeeting(
-            title: title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Live meeting" : title,
-            workspace: workspace.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Personal workspace" : workspace,
+            title: resolvedTitle,
+            workspace: resolvedWorkspace,
             attendees: mergedAttendees,
-            objective: objective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Capture the key decisions and momentum clearly." : objective,
+            objective: resolvedObjective,
             notes: manualNotes,
             moments: bookmarks.map(\.text),
             transcriptParagraphs: transcriptParagraphs,
+            transcriptionSegments: transcriptSegments,
             meetingMode: meetingMode,
             consentState: consentState,
             retentionPolicy: retentionPolicy,
@@ -464,7 +831,7 @@ final class LiveMeetingCoordinator {
         let notes = manualNotes
 
         guard !notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !transcriptParagraphs.isEmpty || !bookmarks.isEmpty else {
-            catchUpSummary = "Start capturing a little more meeting context first, then Scribeflow can give you a clean catch-up."
+            catchUpSummary = "Capture a little more context first, then Scribeflow can organize what matters."
             return
         }
 
@@ -480,7 +847,8 @@ final class LiveMeetingCoordinator {
                         title: title,
                         objective: objective,
                         notes: notes,
-                        transcriptParagraphs: transcriptParagraphs
+                        transcriptParagraphs: transcriptParagraphs,
+                        purpose: currentPurpose.kind
                     )
                     return
                 } catch {
@@ -496,6 +864,7 @@ final class LiveMeetingCoordinator {
     }
 
     private func handleTranscriptUpdate(_ text: String, isFinal: Bool) {
+        noteAudibleSpeech()
         pendingTranscriptUpdateTask?.cancel()
 
         if isFinal {
@@ -505,7 +874,7 @@ final class LiveMeetingCoordinator {
 
         let candidate = text
         pendingTranscriptUpdateTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(650))
+            try? await Task.sleep(for: .milliseconds(180))
             guard !Task.isCancelled else { return }
             self?.applyTranscriptUpdate(candidate)
         }
@@ -518,8 +887,99 @@ final class LiveMeetingCoordinator {
             .components(separatedBy: CharacterSet(charactersIn: ".!?\n"))
             .map { cleanSentence($0) }
             .filter { !$0.isEmpty }
+        refreshPurposeUnderstanding()
         refreshSuggestions()
         autoSuggestTitleIfNeeded()
+    }
+
+    private func preserveRecordingAfterSpeechFailure(_ message: String) {
+        speechSession?.cancel()
+        speechSession = nil
+        liveCaptionsAvailable = false
+        speakerStatus = "Recording continues safely · live captions will be rebuilt after Save"
+        let detail = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        errorMessage = detail.isEmpty
+            ? "Live captions paused. The full recording is still being captured."
+            : "Live captions paused: \(detail) The full recording is still being captured."
+    }
+
+    private func applyFinalTranscriptionResult(_ result: TranscriptionResult) {
+        let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+
+        transcriptText = text
+        transcriptSegments = SpeakerIdentityResolver.normalizedSegments(result.segments)
+        if transcriptSegments.isEmpty {
+            transcriptParagraphs = text
+                .components(separatedBy: CharacterSet(charactersIn: ".!?\n"))
+                .map { cleanSentence($0) }
+                .filter { !$0.isEmpty }
+        } else {
+            transcriptParagraphs = transcriptSegments.map(\.text)
+        }
+
+        if result.diarizationAvailable {
+            let speakerCount = Set(transcriptSegments.map {
+                SpeakerIdentityResolver.canonicalKey(for: $0.speaker)
+            }).filter { !$0.isEmpty }.count
+            speakerStatus = speakerCount == 1
+                ? "1 speaker detected on device"
+                : "\(speakerCount) speakers detected on device"
+        } else {
+            speakerStatus = "Transcript refined. Speaker separation was unavailable."
+        }
+        refreshPurposeUnderstanding()
+        refreshSuggestions()
+        autoSuggestTitleIfNeeded()
+    }
+
+    private func recognitionContext(includeLiveVocabulary: Bool = false) -> SpeechRecognitionContext {
+        let participantNames = attendees
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        return SpeechRecognitionContext(
+            title: title,
+            workspace: workspace,
+            objective: objective,
+            attendees: participantNames,
+            notes: manualNotes,
+            templateTitle: selectedTemplate.title,
+            templateGuidance: "\(selectedTemplate.description) \(selectedTemplate.aiHint)",
+            vocabulary: includeLiveVocabulary ? finalPassVocabulary : [],
+            localeIdentifier: recognitionLocale.identifier,
+            expectedSpeakerCount: expectedSpeakerCount
+        )
+    }
+
+    private var finalPassVocabulary: [String] {
+        let stopWords: Set<String> = [
+            "about", "after", "because", "before", "could", "meeting", "should",
+            "their", "there", "these", "they", "this", "through", "today", "would"
+        ]
+        let tokens = transcriptParagraphs
+            .joined(separator: " ")
+            .components(separatedBy: CharacterSet.alphanumerics
+                .union(CharacterSet(charactersIn: "+#.'-"))
+                .inverted)
+            .filter { $0.count >= 3 }
+        var seen: Set<String> = []
+
+        return tokens.compactMap { token in
+            let lower = token.lowercased()
+            guard !stopWords.contains(lower) else { return nil }
+            let isDistinctive = token != lower
+                || token.rangeOfCharacter(from: .decimalDigits) != nil
+                || token.contains("+")
+                || token.contains("#")
+                || token.contains("-")
+                || token.count >= 9
+            guard isDistinctive, seen.insert(lower).inserted else { return nil }
+            return String(token.prefix(48))
+        }
+        .prefix(40)
+        .map { $0 }
     }
 
     /// When the user hasn't typed a title yet and we have meaningful
@@ -528,6 +988,7 @@ final class LiveMeetingCoordinator {
     private func autoSuggestTitleIfNeeded() {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let isPlaceholder = trimmed.isEmpty
+            || trimmed == "New capture"
             || trimmed == "Live meeting"
             || trimmed == "Meeting"
             || trimmed == "Untitled note"
@@ -537,7 +998,7 @@ final class LiveMeetingCoordinator {
         let suggested = suggestedMeetingTitle(
             objective: objective,
             notes: firstParagraph,
-            fallback: "Meeting"
+            fallback: "Capture"
         )
         guard !suggested.isEmpty, suggested != trimmed else { return }
         title = suggested
@@ -554,17 +1015,18 @@ final class LiveMeetingCoordinator {
         var bullets: [String] = []
 
         if let first = noteLines.first {
-            bullets.append("- Current focus: \(cleanSentence(first)).")
+            bullets.append("- \(cleanSentence(first)).")
         }
 
         if noteLines.count > 1 {
-            bullets.append("- Important signal: \(cleanSentence(String(noteLines.dropFirst().first ?? ""))).")
+            bullets.append("- \(cleanSentence(String(noteLines.dropFirst().first ?? ""))).")
         } else if let lastTranscript = transcriptLines.last {
-            bullets.append("- Recent discussion: \(cleanSentence(lastTranscript)).")
+            bullets.append("- \(cleanSentence(lastTranscript)).")
         }
 
-        if let lastTranscript = transcriptLines.first {
-            bullets.append("- Next to verify: \(cleanSentence(lastTranscript)).")
+        if let earlierTranscript = transcriptLines.first,
+           transcriptLines.count > 1 {
+            bullets.append("- \(cleanSentence(earlierTranscript)).")
         }
 
         return bullets.isEmpty
@@ -604,7 +1066,14 @@ final class LiveMeetingCoordinator {
     }
 
     private func rankedCandidateBullets(from paragraphs: [String]) -> [String] {
-        let weightedTerms = SignalWeights.terms
+        let purpose = currentPurpose.kind
+        let weightedTerms = purpose.allowsMeetingSignals
+            ? SignalWeights.terms
+            : [
+                ("important", 4), ("remember", 4), ("realized", 4), ("idea", 4),
+                ("because", 2), ("learned", 4), ("noticed", 3), ("question", 2),
+                ("feel", 2), ("plan", 3), ("means", 2), ("example", 2)
+            ]
 
         let recentParagraphs = Array(paragraphs.suffix(12))
 
@@ -622,7 +1091,7 @@ final class LiveMeetingCoordinator {
                 score += 1
             }
 
-            return (noteBullet(from: paragraph), score)
+            return (noteBullet(from: paragraph, purpose: purpose), score)
         }
 
         return scored
@@ -635,9 +1104,22 @@ final class LiveMeetingCoordinator {
             .map(\.text)
     }
 
-    private func noteBullet(from sentence: String) -> String {
+    private func noteBullet(from sentence: String, purpose: CapturePurposeKind) -> String {
         let cleaned = cleanSentence(sentence)
         let lower = cleaned.lowercased()
+
+        if !purpose.allowsMeetingSignals {
+            switch purpose {
+            case .reflection: return "Reflection: \(cleaned)"
+            case .idea: return "Idea: \(cleaned)"
+            case .personalPlan: return "Plan: \(cleaned)"
+            case .conversation: return "Highlight: \(cleaned)"
+            case .appointment: return "Remember: \(cleaned)"
+            case .learning: return "Takeaway: \(cleaned)"
+            case .personalNote: return cleaned
+            case .meeting, .call: break
+            }
+        }
 
         if lower.contains("next") || lower.contains("follow up") || lower.contains("owner") {
             return "Next step: \(cleaned)"
@@ -688,6 +1170,12 @@ final class LiveMeetingCoordinator {
             .replacingOccurrences(of: "budget signal: ", with: "")
             .replacingOccurrences(of: "timing: ", with: "")
             .replacingOccurrences(of: "risk: ", with: "")
+            .replacingOccurrences(of: "reflection: ", with: "")
+            .replacingOccurrences(of: "idea: ", with: "")
+            .replacingOccurrences(of: "plan: ", with: "")
+            .replacingOccurrences(of: "highlight: ", with: "")
+            .replacingOccurrences(of: "remember: ", with: "")
+            .replacingOccurrences(of: "takeaway: ", with: "")
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
             .joined()
     }
@@ -699,6 +1187,7 @@ final class LiveMeetingCoordinator {
                 guard let self else { return }
                 guard !self.isPaused else { return }
                 self.elapsedSeconds += 1
+                self.refreshSpeechActivity()
                 // Refresh elapsed time on Lock Screen / Control Center every 5s
                 if self.elapsedSeconds % 5 == 0 {
                     self.updateNowPlaying(isLive: true)
@@ -769,36 +1258,65 @@ final class LiveMeetingCoordinator {
     }
 
     private nonisolated func computeAndPublishLevel(_ buffer: AVAudioPCMBuffer) {
+        audioMeterBufferCount &+= 1
+        guard audioMeterBufferCount >= 2 else { return }
+        audioMeterBufferCount = 0
+
         guard let data = buffer.floatChannelData else { return }
         let frames = Int(buffer.frameLength)
         guard frames > 0 else { return }
-        var sum: Float = 0
-        let channel = data[0]
-        for i in 0..<frames {
-            let s = channel[i]
-            sum += s * s
-        }
-        let rms = sqrt(sum / Float(frames))
+        var rms: Float = 0
+        vDSP_rmsqv(data[0], 1, &rms, vDSP_Length(frames))
         let normalized = min(max(Double(rms) * 12, 0), 1)
         Task { @MainActor [weak self] in
             guard let self else { return }
-            // Throttle to ~12Hz. Audio tap fires at ~50Hz which over-renders
-            // the waveform meter, costing GPU + battery while recording.
-            let now = Date.now
-            if now.timeIntervalSince(self.lastLevelPublishAt) >= 0.08 {
-                self.lastLevelPublishAt = now
-                self.inputLevel = normalized
+            // A small low-pass filter removes visual chatter without scheduling
+            // overlapping SwiftUI animations for every audio sample.
+            self.inputLevel = (self.inputLevel * 0.35) + (normalized * 0.65)
+            if normalized >= 0.08 {
+                self.noteAudibleSpeech()
             }
+        }
+    }
+
+    private func noteAudibleSpeech() {
+        guard isRecording, !isPaused else { return }
+        lastAudibleInputAt = .now
+        if speechActivity != .hearingSpeech {
+            speechActivity = .hearingSpeech
+        }
+    }
+
+    private func refreshSpeechActivity(now: Date = .now) {
+        guard isRecording, !isPaused else { return }
+        guard let lastAudibleInputAt else {
+            if elapsedSeconds >= 3, speechActivity != .quietInput {
+                speechActivity = .quietInput
+            }
+            return
+        }
+
+        let next: LiveSpeechActivity = now.timeIntervalSince(lastAudibleInputAt) > 2.5
+            ? .quietInput
+            : .hearingSpeech
+        if speechActivity != next {
+            speechActivity = next
         }
     }
 
     private func handleRouteDisconnect() {
         guard audioEngine.isRunning else { return }
+        let audioSink = speechSession?.audioSink
+        let audioWriter = self.audioWriter
+        guard audioWriter != nil else { return }
         audioEngine.inputNode.removeTap(onBus: 0)
         let format = audioEngine.inputNode.outputFormat(forBus: 0)
-        audioEngine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buf, _ in
-            self?.recognitionRequest?.append(buf)
-            self?.computeAndPublishLevel(buf)
+        guard format.sampleRate > 0 else { return }
+        audioEngine.inputNode.installTap(onBus: 0, bufferSize: 2048, format: format) { [weak self, audioSink, audioWriter] buffer, _ in
+            guard let self, !self.audioPaused else { return }
+            audioSink?.append(buffer)
+            audioWriter?.append(buffer)
+            self.computeAndPublishLevel(buffer)
         }
     }
 }
@@ -814,19 +1332,24 @@ private enum AppleIntelligenceLiveAssistant {
         title: String,
         objective: String,
         notes: String,
-        transcriptParagraphs: [String]
+        transcriptParagraphs: [String],
+        purpose: CapturePurposeKind
     ) async throws -> String {
         let session = LanguageModelSession(instructions: """
-        You are a live meeting copilot inside a professional note-taking app.
-        Generate a short catch-up for someone who wants to rejoin the conversation quickly.
+        You are a live capture assistant inside a private note-taking app.
+        Generate a short catch-up that matches the actual capture purpose: \(purpose.title).
         Return exactly 3 concise bullet points.
-        Focus on where the meeting stands now, the most important signal or decision, and the next action or open question.
+        For a work meeting or structured call, focus on where the discussion stands,
+        the most important supported outcome, and an explicit action or question.
+        For every other purpose, summarize the central thought, the most useful
+        supporting detail, and one thing worth remembering. Do not introduce work
+        language such as decisions, owners, risks, or action items.
         Do not invent facts that are not supported by the notes or transcript.
         """)
 
         let transcriptContext = transcriptParagraphs.suffix(8).joined(separator: "\n")
         let prompt = """
-        Meeting title: \(title)
+        Capture title: \(title)
         Objective: \(objective)
 
         Rough notes:

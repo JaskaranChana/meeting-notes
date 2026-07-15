@@ -271,7 +271,9 @@ enum MeetingIntelligenceEngine {
     /// are really action items ("need to clarify X") are excluded so they show
     /// once, under Actions, instead of in both places.
     static func openQuestions(for meeting: Meeting, limit: Int = 4) -> [String] {
-        let lines = sourceLines(for: meeting).map(\.text).filter { !looksActionable($0) }
+        let lines = sourceLines(for: meeting).map(\.text).filter {
+            !meeting.allowsAccountabilityExtraction || !looksActionable($0)
+        }
         return extractQuestions(from: lines, limit: limit)
     }
 
@@ -294,8 +296,9 @@ enum MeetingIntelligenceEngine {
             let raw = line.text
             let lower = raw.lowercased()
             // Skip what's already surfaced elsewhere.
-            if looksActionable(raw) { continue }
-            if decisionCues.contains(where: lower.contains) { continue }
+            if meeting.allowsAccountabilityExtraction, looksActionable(raw) { continue }
+            if meeting.allowsMeetingSignalExtraction,
+               decisionCues.contains(where: lower.contains) { continue }
             if raw.contains("?") { continue }
 
             let point = polished(raw)
@@ -634,6 +637,15 @@ enum MeetingIntelligenceEngine {
         actions: [String],
         questions: [String]
     ) -> String {
+        if !meeting.allowsMeetingSignalExtraction {
+            let modelSummary = meeting.aiBrief?.summary
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !modelSummary.isEmpty { return modelSummary }
+            if let topic = meeting.purpose.topic {
+                return "\(meeting.purpose.displayTitle): \(lowerFirst(topic))"
+            }
+            return "Organized as \(meeting.purpose.displayTitle.lowercased())."
+        }
         if let decision = decisions.first {
             return "Decision captured: \(lowerFirst(decision))"
         }
@@ -724,11 +736,11 @@ enum MeetingIntelligenceEngine {
         }
 
         return SpeakerDetectionSummary(
-            detectedCount: 1,
+            detectedCount: 0,
             expectedCount: expectedPeople,
             method: .singleTrack,
-            title: "1 speaker track",
-            detail: "The transcript contains one speaker label. You can rename it at any time."
+            title: "Speaker separation not available",
+            detail: "The transcript has one shared label, not a confirmed person count. Run on-device speaker analysis or label turns during review."
         )
     }
 

@@ -4,16 +4,16 @@
 
 <br/>
 
-### Hit record, start from calendar, or just type. Scribeflow turns rough notes into a clean, owned recap, on your iPhone — and never makes anything up.
+### Hit record, start from calendar, or just type. Scribeflow turns rough notes into a clean, owned recap with inspectable sources and clear inference labels.
 
-What was **decided**, who **owns** what, by **when**, what's still **open** — pulled from your words when Scribeflow can prove it was a meeting or call. Personal notes stay personal, without fake tasks or risks. Ask your whole history a question and get a cited answer. Nothing ever leaves the device.
+What was **decided**, who **owns** what, by **when**, what's still **open** — pulled from your words when Scribeflow can prove it was a meeting or call. Personal notes stay personal, without fake tasks or risks. Ask your whole history a question and get an answer grounded in cited source excerpts. Data stays local by default; exports, private iCloud backup, Apple services, configured webhooks, and optional remote transcription are explicit user-controlled boundaries.
 
 <br/>
 
 ![iOS](https://img.shields.io/badge/iOS-26-000000?logo=apple&logoColor=white)
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-Observation-FA7343?logo=swift&logoColor=white)
 ![Apple Intelligence](https://img.shields.io/badge/Apple%20Intelligence-on--device-1F8A70?logo=apple&logoColor=white)
-![Privacy](https://img.shields.io/badge/data-stays%20local-2E7D71)
+![Privacy](https://img.shields.io/badge/local--first-2E7D71)
 ![Build](https://img.shields.io/badge/build-green-3FB950)
 ![License](https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey)
 
@@ -110,6 +110,7 @@ Most meeting tools record to the cloud and hand you a transcript. Scribeflow is 
 - 🗓️ **Real dates** — "Friday" or "eod" resolve to actual dates, so *overdue* and *due-soon* are judged by time, not guesses.
 - 📅 **A real calendar surface** — month, week, and agenda modes combine saved notes, calendar events, and open loops in one place.
 - 🔁 **It remembers across meetings** — ask your whole history, get a cited answer.
+- 🧭 **It prepares the next conversation** — upcoming events carry forward related decisions, open promises, and unresolved questions with links to the exact source notes.
 - 🔒 **Private by design** — recordings, transcripts, and notes stay on device by default; exports, private iCloud backup, and a configured transcription service are explicit user-controlled boundaries.
 
 ---
@@ -135,13 +136,14 @@ Every surface is built on adaptive tokens — beautiful in light and dark, switc
 
 | | |
 |---|---|
-| 🎙️ **Live capture + transcription** | Record on-device (`SFSpeechRecognizer`) or just type — no bot on the call. |
+| 🎙️ **Live capture + transcription** | Record on device, optionally guide the voice count, and rebuild a saved recording's transcript without a bot on the call. |
 | 🧠 **On-device AI brief** | The model turns rough notes into summary · decisions · actions · questions · risks, typo-corrected. |
 | 🧭 **Purpose-aware extraction** | Meeting intelligence runs for meetings and calls; personal captures stay lightweight and private. |
 | 🪪 **Enhanced notes** | Your bullets, expanded with AI context — your words kept distinct from the model's. |
 | 🎯 **Auto meeting lenses** | Detects sales / legal / coaching / product / standup and tailors the sections. |
 | ✅ **Action items that move** | Owner · deadline · **priority** · *why* — surfaced until done. |
 | 📅 **Interactive calendar** | Month, week, and agenda views with filters for notes, events, and open loops. |
+| 🧭 **Before-you-join brief** | Matches an upcoming event to people and prior topics, then carries forward source-linked commitments and questions. |
 | 🤖 **Live Copilot** | Mid-call, recalls open promises with the same people and flags decisions as they're spoken. |
 | 🔎 **Ask your library** | Retrieval-augmented Q&A across every meeting, with citations and follow-ups. |
 | 📤 **One-tap recap** | Share a clean Markdown digest — AI summary kept separate from your verbatim notes. |
@@ -212,7 +214,7 @@ xcodebuild test \
 
 ## Privacy
 
-Recordings, transcripts, and notes stay on the device — nothing is uploaded to a Scribeflow server. Speech recognition and the AI brief run on-device; calendar access is optional and used only to pre-fill meeting context. Full policy: **[scribeflow privacy](https://jaskaranchana.github.io/meeting-notes/PRIVACY)**.
+Recordings, transcripts, and notes stay on the device by default. Speech recognition and the AI brief prefer on-device processing; calendar access is optional and used to pre-fill meeting context. User-triggered exports, private iCloud backup, Apple services, configured webhooks, and optional remote transcription are documented boundaries. Full policy: **[Scribeflow privacy](https://jaskaranchana.github.io/meeting-notes/PRIVACY)**.
 
 ## License
 

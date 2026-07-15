@@ -38,6 +38,8 @@ actor BackupArchiveService {
 
     private let maximumAutomaticBackups = 7
     private let minimumAutomaticBackupInterval: TimeInterval = 6 * 60 * 60
+    private var cachedLatestAutomaticBackupAt: Date?
+    private var hasLoadedAutomaticBackupMetadata = false
 
     func makeBackupData(
         meetings: [Meeting],
@@ -67,7 +69,6 @@ actor BackupArchiveService {
         )
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return try encoder.encode(package)
     }
 
@@ -81,11 +82,14 @@ actor BackupArchiveService {
         guard !meetings.isEmpty else { return nil }
         try ensureDirectory()
 
-        if !force,
-           let latest = try automaticBackups().first,
-           now.timeIntervalSince(latest.createdAt) < minimumAutomaticBackupInterval
-        {
-            return nil
+        if !force {
+            if !hasLoadedAutomaticBackupMetadata {
+                _ = try automaticBackups()
+            }
+            if let latest = cachedLatestAutomaticBackupAt,
+               now.timeIntervalSince(latest) < minimumAutomaticBackupInterval {
+                return nil
+            }
         }
 
         let data = try makeBackupData(
@@ -103,6 +107,8 @@ actor BackupArchiveService {
         )
 
         try pruneAutomaticBackups()
+        cachedLatestAutomaticBackupAt = now
+        hasLoadedAutomaticBackupMetadata = true
         return AutomaticBackupSnapshot(
             fileName: fileName,
             createdAt: now,
@@ -121,7 +127,7 @@ actor BackupArchiveService {
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return urls.compactMap { url in
+        let snapshots: [AutomaticBackupSnapshot] = urls.compactMap { url -> AutomaticBackupSnapshot? in
             guard url.pathExtension.lowercased() == "json",
                   url.lastPathComponent.hasPrefix("scribeflow-auto-"),
                   let data = try? Data(contentsOf: url),
@@ -136,6 +142,9 @@ actor BackupArchiveService {
             )
         }
         .sorted { $0.createdAt > $1.createdAt }
+        cachedLatestAutomaticBackupAt = snapshots.first?.createdAt
+        hasLoadedAutomaticBackupMetadata = true
+        return snapshots
     }
 
     func data(for snapshot: AutomaticBackupSnapshot) throws -> Data {
@@ -151,6 +160,8 @@ actor BackupArchiveService {
 
     func deleteAllAutomaticBackups() {
         try? FileManager.default.removeItem(at: directoryURL)
+        cachedLatestAutomaticBackupAt = nil
+        hasLoadedAutomaticBackupMetadata = true
     }
 
     private func pruneAutomaticBackups() throws {

@@ -1,10 +1,12 @@
 import SwiftUI
+import UIKit
 
 struct SettingsView: View {
     @Environment(AuthSessionStore.self) private var authSession
     @Environment(MeetingStore.self) private var meetingStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
     var showsDoneButton = true
 
     @AppStorage("hasCompletedLaunchOnboarding") private var hasCompletedLaunchOnboarding = false
@@ -12,6 +14,8 @@ struct SettingsView: View {
     @AppStorage("homeHeroStyle") private var heroStyleRaw = HeroStyle.briefing.rawValue
     @AppStorage("scribeflow.investorDemoMode") private var investorDemoMode = false
     @AppStorage("scribeflow.demoModePreparedAt") private var demoModePreparedAt = 0.0
+    @AppStorage(SpeechRecognitionSupport.localePreferenceKey) private var speechLocaleIdentifier = ""
+    @AppStorage("scribeflow.requireAppUnlock") private var requireAppUnlock = false
 
     @State private var hasAnimatedIn = false
     @State private var showingAudioDiagnostics = false
@@ -27,11 +31,13 @@ struct SettingsView: View {
     @State private var showingInvestorPresentation = false
     @State private var showingReplaceSamplesConfirm = false
     @State private var sampleDataMessage: String?
+    @State private var notificationPermission = ScribeflowNotificationPermission.notDetermined
+    @State private var notificationTestMessage: String?
     @Namespace private var appearanceNS
 
     private let supportEmail = "jaskaran.chana1302@gmail.com"
     private let privacyPolicyURL = URL(string: "https://jaskaranchana.github.io/meeting-notes/PRIVACY")!
-    private let termsURL = URL(string: "https://github.com/JaskaranChana/meeting-notes/blob/main/LICENSE")!
+    private let termsURL = URL(string: "https://jaskaranchana.github.io/meeting-notes/TERMS")!
     private let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
     private let buildNumber = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
 
@@ -58,12 +64,14 @@ struct SettingsView: View {
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
 
+                    #if DEBUG
                     settingsGroup(title: "Home hero") {
                         HeroStylePicker(selectionRaw: $heroStyleRaw)
                     }
                     .motionEntrance(step: 1, active: hasAnimatedIn)
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
+                    #endif
 
                     settingsGroup(title: "Audio") {
                         settingLinkRow(
@@ -74,8 +82,38 @@ struct SettingsView: View {
                         ) {
                             showingAudioDiagnostics = true
                         }
+
+                        Divider()
+                            .padding(.leading, 54)
+
+                        speechLanguageSettingsRow
                     }
                     .motionEntrance(step: 1, active: hasAnimatedIn)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 24)
+
+                    settingsGroup(title: "Notifications") {
+                        settingLinkRow(
+                            icon: notificationPermission.canSchedule ? "bell.badge.fill" : "bell.slash.fill",
+                            iconColor: notificationPermission.canSchedule ? AppPalette.accent : AppPalette.coral,
+                            title: "Ready alerts & reminders",
+                            subtitle: "\(notificationPermission.title) · \(notificationPermission.detail)"
+                        ) {
+                            manageNotifications()
+                        }
+
+                        if notificationPermission.canSchedule {
+                            settingLinkRow(
+                                icon: "bell.and.waves.left.and.right.fill",
+                                iconColor: AppPalette.gold,
+                                title: "Send test alert",
+                                subtitle: "Verify delivery on this device"
+                            ) {
+                                sendTestNotification()
+                            }
+                        }
+                    }
+                    .motionEntrance(step: 2, active: hasAnimatedIn)
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
 
@@ -85,9 +123,11 @@ struct SettingsView: View {
                             iconColor: AppPalette.accent,
                             title: "Recording privacy",
                             subtitle: "Storage, transcription, and call limits"
-                        ) {
-                            showingRecordingPrivacy = true
-                        }
+                          ) {
+                              showingRecordingPrivacy = true
+                          }
+
+                          appLockRow
 
                         settingLinkRow(
                             icon: "externaldrive.fill",
@@ -111,15 +151,22 @@ struct SettingsView: View {
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
 
-                    settingsGroup(title: "Account") {
-                        if let session = authSession.currentSession {
-                            settingInfoRow(
+                      settingsGroup(title: "Account") {
+                          if let session = authSession.currentSession {
+                              settingInfoRow(
                                 icon: "person.crop.circle.fill",
                                 iconColor: AppPalette.accent,
                                 title: "Signed in",
-                                value: session.accountLabel
-                            )
-                        }
+                                  value: session.accountLabel
+                              )
+                          } else {
+                              settingInfoRow(
+                                  icon: "iphone",
+                                  iconColor: AppPalette.accent,
+                                  title: "Local workspace",
+                                  value: "No account required"
+                              )
+                          }
 
                         settingLinkRow(
                             icon: "icloud.slash",
@@ -130,23 +177,25 @@ struct SettingsView: View {
                             showingAccountSync = true
                         }
 
-                        settingLinkRow(
-                            icon: "rectangle.portrait.and.arrow.right",
-                            iconColor: AppPalette.coral,
-                            title: "Log out",
-                            subtitle: "End this secure session on this device"
-                        ) {
-                            showingLogoutSheet = true
-                        }
+                          if authSession.currentSession != nil {
+                              settingLinkRow(
+                                  icon: "rectangle.portrait.and.arrow.right",
+                                  iconColor: AppPalette.coral,
+                                  title: "Log out",
+                                  subtitle: "End this secure session on this device"
+                              ) {
+                                  showingLogoutSheet = true
+                              }
 
-                        settingLinkRow(
-                            icon: "trash.fill",
-                            iconColor: AppPalette.coral,
-                            title: "Delete account",
-                            subtitle: "Permanently remove account and local data"
-                        ) {
-                            showingDeleteAccountConfirm = true
-                        }
+                              settingLinkRow(
+                                  icon: "trash.fill",
+                                  iconColor: AppPalette.coral,
+                                  title: "Delete account",
+                                  subtitle: "Permanently remove account and local data"
+                              ) {
+                                  showingDeleteAccountConfirm = true
+                              }
+                          }
                     }
                     .motionEntrance(step: 3, active: hasAnimatedIn)
                     .padding(.horizontal, 20)
@@ -156,9 +205,9 @@ struct SettingsView: View {
                         settingLinkRow(
                             icon: "link.circle.fill",
                             iconColor: AppPalette.accent,
-                            title: "Slack, Notion, Linear webhooks",
+                            title: "Secure webhooks",
                             subtitle: WebhookStore.shared.configs.isEmpty
-                                ? "Post recaps + action items to your tools"
+                                ? "Post recaps to an HTTPS endpoint"
                                 : "\(WebhookStore.shared.configs.count) configured"
                         ) {
                             showingIntegrations = true
@@ -168,26 +217,29 @@ struct SettingsView: View {
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
 
-                    settingsGroup(title: "Experience") {
-                        settingLinkRow(
-                            icon: "play.fill",
+                      settingsGroup(title: "Experience") {
+                          #if DEBUG
+                          settingLinkRow(
+                              icon: "play.fill",
                             iconColor: AppPalette.accent,
                             title: "Launch presentation",
                             subtitle: "A live walkthrough using the current workspace"
-                        ) {
-                            launchInvestorPresentation()
-                        }
+                          ) {
+                              launchInvestorPresentation()
+                          }
+                          #endif
 
-                        settingLinkRow(
+                          settingLinkRow(
                             icon: "chart.bar.xaxis",
                             iconColor: AppPalette.success,
                             title: "Usage impact",
                             subtitle: "Captures, follow-through, and source-backed outcomes"
-                        ) {
-                            showingUsageImpact = true
-                        }
+                          ) {
+                              showingUsageImpact = true
+                          }
 
-                        demoModeRow
+                          #if DEBUG
+                          demoModeRow
 
                         settingLinkRow(
                             icon: "shippingbox.fill",
@@ -203,9 +255,10 @@ struct SettingsView: View {
                             iconColor: AppPalette.gold,
                             title: "Reset demo workspace",
                             subtitle: demoModePreparedSubtitle
-                        ) {
-                            showingReplaceSamplesConfirm = true
-                        }
+                          ) {
+                              showingReplaceSamplesConfirm = true
+                          }
+                          #endif
 
                         settingLinkRow(
                             icon: "sparkles.rectangle.stack.fill",
@@ -320,6 +373,15 @@ struct SettingsView: View {
                 }
             }
             .onAppear { hasAnimatedIn = true }
+            .task {
+                notificationPermission = await ScribeflowNotificationAuthorization.shared.currentPermission()
+            }
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active else { return }
+                Task {
+                    notificationPermission = await ScribeflowNotificationAuthorization.shared.currentPermission()
+                }
+            }
             .sheet(isPresented: $showingAudioDiagnostics) {
                 AudioDiagnosticsView()
                     .presentationDragIndicator(.visible)
@@ -393,6 +455,14 @@ struct SettingsView: View {
             } message: {
                 Text(sampleDataMessage ?? "")
             }
+            .alert("Test notification", isPresented: Binding(
+                get: { notificationTestMessage != nil },
+                set: { if !$0 { notificationTestMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) { notificationTestMessage = nil }
+            } message: {
+                Text(notificationTestMessage ?? "")
+            }
         }
         .modifier(ScribeflowChrome())
     }
@@ -421,6 +491,28 @@ struct SettingsView: View {
                 }
                 Spacer()
             }
+        }
+    }
+
+    private func manageNotifications() {
+        Task {
+            if notificationPermission == .notDetermined {
+                notificationPermission = await ScribeflowNotificationAuthorization.shared.requestIfNeeded()
+                return
+            }
+            if let url = URL(string: UIApplication.openSettingsURLString) {
+                openURL(url)
+            }
+        }
+    }
+
+    private func sendTestNotification() {
+        Task {
+            let sent = await ScribeflowNotificationTester.send()
+            notificationPermission = await ScribeflowNotificationAuthorization.shared.currentPermission()
+            notificationTestMessage = sent
+                ? "A test alert will arrive in about two seconds. If delivery is quiet, check Notification Center or adjust alerts in iPhone Settings."
+                : "The test alert could not be scheduled. Enable notifications in iPhone Settings and try again."
         }
     }
 
@@ -606,6 +698,100 @@ struct SettingsView: View {
         .padding(.vertical, 13)
     }
 
+    private var appLockRow: some View {
+        HStack(spacing: 14) {
+            Image(systemName: requireAppUnlock ? "lock.fill" : "lock.open")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(requireAppUnlock ? AppPalette.accent : AppPalette.secondaryInk)
+                .frame(width: 24, height: 24)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Require app unlock")
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(AppPalette.ink)
+                Text("Ask for secure sign-in when Scribeflow opens")
+                    .font(.footnote)
+                    .foregroundStyle(AppPalette.tertiaryInk)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 8)
+
+            Toggle("", isOn: $requireAppUnlock)
+                .labelsHidden()
+                .tint(AppPalette.accent)
+                .accessibilityLabel("Require app unlock")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 13)
+    }
+
+    private var speechLanguageSettingsRow: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "globe")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(AppPalette.accent)
+                .frame(width: 24, height: 24)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Transcription language")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(AppPalette.ink)
+                Text(speechLanguageSubtitle)
+                    .font(.system(size: 12))
+                    .foregroundStyle(AppPalette.tertiaryInk)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+
+            Spacer(minLength: 8)
+
+            Menu {
+                Button {
+                    HapticEngine.tap(.light)
+                    speechLocaleIdentifier = ""
+                } label: {
+                    Label(
+                        "Automatic",
+                        systemImage: speechLocaleIdentifier.isEmpty ? "checkmark" : "globe"
+                    )
+                }
+
+                Divider()
+
+                ForEach(SpeechRecognitionSupport.availableLocales, id: \.identifier) { locale in
+                    Button {
+                        HapticEngine.tap(.light)
+                        speechLocaleIdentifier = locale.identifier
+                    } label: {
+                        Label(
+                            SpeechRecognitionSupport.displayName(for: locale),
+                            systemImage: speechLocaleIdentifier == locale.identifier
+                                ? "checkmark"
+                                : "waveform"
+                        )
+                    }
+                }
+            } label: {
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(AppPalette.secondaryInk)
+                    .frame(width: 44, height: 44)
+                    .background(AppPalette.highlight, in: Circle())
+            }
+            .accessibilityLabel("Choose transcription language")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 13)
+    }
+
+    private var speechLanguageSubtitle: String {
+        let identifier = speechLocaleIdentifier.isEmpty ? nil : speechLocaleIdentifier
+        let locale = SpeechRecognitionSupport.resolvedLocale(identifier: identifier)
+        let language = SpeechRecognitionSupport.displayName(for: locale)
+        return speechLocaleIdentifier.isEmpty ? "Automatic · \(language)" : language
+    }
+
     private var demoModePreparedSubtitle: String {
         guard demoModePreparedAt > 0 else {
             return "Load the investor-ready sample workspace"
@@ -763,8 +949,14 @@ private struct IntegrationsSheet: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                Section {
+              List {
+                  if let error = store.persistenceError {
+                      Section {
+                          Label(error, systemImage: "exclamationmark.shield.fill")
+                              .foregroundStyle(AppPalette.coral)
+                      }
+                  }
+                  Section {
                     if store.configs.isEmpty {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("No integrations yet")
@@ -787,8 +979,8 @@ private struct IntegrationsSheet: View {
                                     Text(config.label.isEmpty ? config.target.title : config.label)
                                         .font(.subheadline.weight(.semibold))
                                         .foregroundStyle(AppPalette.ink)
-                                    Text(config.url)
-                                        .font(.caption)
+                                      Text(config.displayLocation)
+                                          .font(.caption)
                                         .foregroundStyle(AppPalette.secondaryInk)
                                         .lineLimit(1)
                                         .truncationMode(.middle)
@@ -807,7 +999,7 @@ private struct IntegrationsSheet: View {
                 } header: {
                     Text("Configured")
                 } footer: {
-                    Text("Posts include the meeting title, action items, and a clean Markdown recap. Nothing is sent until you tap Send from a meeting.")
+                      Text("Webhook secrets are kept in Keychain. Nothing is sent until you tap Send from a meeting.")
                 }
             }
             .navigationTitle("Integrations")
@@ -842,7 +1034,7 @@ private struct AddWebhookSheet: View {
 
     private var isValidURL: Bool {
         guard let parsed = URL(string: url.trimmingCharacters(in: .whitespacesAndNewlines)) else { return false }
-        return (parsed.scheme == "https" || parsed.scheme == "http") && parsed.host != nil
+        return parsed.scheme?.lowercased() == "https" && parsed.host != nil
     }
 
     var body: some View {
@@ -856,12 +1048,15 @@ private struct AddWebhookSheet: View {
                     }
                     .pickerStyle(.menu)
                 }
-                Section("Webhook URL") {
-                    TextField("https://hooks.slack.com/…", text: $url)
+                  Section("Webhook URL") {
+                      TextField("https://hooks.slack.com/…", text: $url)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                        .keyboardType(.URL)
-                }
+                          .keyboardType(.URL)
+                      Text("Only HTTPS endpoints are accepted. The full URL is stored in Keychain.")
+                          .font(.caption)
+                          .foregroundStyle(AppPalette.secondaryInk)
+                  }
                 Section("Label (optional)") {
                     TextField("#design-syncs", text: $label)
                         .autocorrectionDisabled()

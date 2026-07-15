@@ -724,25 +724,18 @@ enum ReminderScheduler {
         guard fireDate > .now else { return .failure(.invalidDate) }
         do {
             let center = UNUserNotificationCenter.current()
-            let settings = await center.notificationSettings()
-            let granted: Bool
-            switch settings.authorizationStatus {
-            case .authorized, .provisional, .ephemeral:
-                granted = true
-            case .notDetermined:
-                granted = try await center.requestAuthorization(options: [.alert, .sound, .badge])
-            case .denied:
-                granted = false
-            @unknown default:
-                granted = false
-            }
-            guard granted else { return .failure(.permissionDenied) }
+            let permission = await ScribeflowNotificationAuthorization.shared.requestIfNeeded()
+            guard permission.canSchedule else { return .failure(.permissionDenied) }
 
             let content = UNMutableNotificationContent()
-            content.title = "Follow up: \(commitment.owner)"
+            content.title = commitment.owner == "Owner not named"
+                ? "Action reminder"
+                : "Follow up: \(commitment.owner)"
             content.body = commitment.statement
             content.subtitle = meetingTitle
             content.sound = .default
+            content.interruptionLevel = .active
+            content.relevanceScore = 1
             content.threadIdentifier = meetingID.uuidString
             content.userInfo = [
                 "meetingID": meetingID.uuidString,
@@ -753,6 +746,7 @@ enum ReminderScheduler {
             components.calendar = Calendar.current
             components.timeZone = TimeZone.current
             let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
+            guard trigger.nextTriggerDate() != nil else { return .failure(.invalidDate) }
             let identifier = notificationID(meetingID: meetingID, commitmentID: commitment.id)
             try await center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: trigger))
             return .success(identifier)
@@ -978,18 +972,26 @@ enum SpotlightIndex {
 
 // MARK: - Local RAG (TF-IDF ranker)
 
-/// On-device retrieval over the meeting library. Returns the top-N most
-/// relevant meetings + a citation snippet per result so the Ask tab can show
-/// answers grounded in the user's own notes without sending data anywhere.
-///
-/// Tokenization: lowercase, alphanumeric runs ≥3 chars, strip a small
-/// stopword set. Scoring: classic TF-IDF cosine over query vs. concatenated
-/// meeting text (title + objective + raw notes + summary bullets + transcript).
-struct RAGResult: Identifiable, Equatable {
-    let id: UUID
+/// A raw source chunk retrieved from the user's library. `sourceID` is scoped
+/// to one answer and is the only identifier the language model may cite.
+struct RAGResult: Identifiable, Equatable, Sendable {
+    let sourceID: String
+    let meetingID: UUID
     let meetingTitle: String
+    let kind: SourceReferenceKind
+    let speaker: String?
+    let lineIndex: Int?
     let snippet: String
     let score: Double
+
+    var id: String { "\(sourceID)|\(meetingID.uuidString)" }
+
+    var sourceLabel: String {
+        var components = [kind.title]
+        if let speaker, !speaker.isEmpty { components.append(speaker) }
+        if let lineIndex { components.append("line \(lineIndex + 1)") }
+        return components.joined(separator: " - ")
+    }
 }
 
 /// Turns a free-text due hint ("Friday", "tomorrow", "eod", "next week") into
@@ -1044,7 +1046,7 @@ enum DueDateParser {
 enum LocalRAG {
     private static let stopwords: Set<String> = [
         "the", "and", "for", "with", "you", "your", "this", "that", "from",
-        "have", "has", "are", "was", "were", "but", "not", "they", "them",
+        "have", "has", "are", "was", "were", "but", "they", "them",
         "their", "what", "when", "where", "which", "who", "how", "any",
         "all", "can", "will", "would", "could", "should", "about", "into",
         "than", "then", "also", "just", "out", "our", "ours"
@@ -1069,92 +1071,186 @@ enum LocalRAG {
         return tokens
     }
 
-    static func search(_ query: String, in meetings: [Meeting], limit: Int = 5) -> [RAGResult] {
-        let queryTokens = tokenize(query)
-        guard !queryTokens.isEmpty, !meetings.isEmpty else { return [] }
-
-        // Document texts + token counts.
-        struct Doc {
-            let meeting: Meeting
-            let tokens: [String]
-            let tokenFreq: [String: Int]
-            let length: Double
-            let fullText: String
-        }
-
-        let docs: [Doc] = meetings.map { meeting in
-            let parts = [
-                meeting.title,
-                meeting.objective,
-                meeting.rawNotes,
-                meeting.summaries.flatMap { $0.summary.sections.flatMap(\.bullets) }.joined(separator: "\n"),
-                meeting.transcript.map(\.text).joined(separator: "\n")
-            ]
-            let text = parts.joined(separator: "\n")
-            let tokens = tokenize(text)
-            var freq: [String: Int] = [:]
-            for token in tokens { freq[token, default: 0] += 1 }
-            return Doc(
-                meeting: meeting,
-                tokens: tokens,
-                tokenFreq: freq,
-                length: sqrt(Double(tokens.count)),
-                fullText: text
-            )
-        }
-
-        let querySet = Set(queryTokens)
-        var docFreq: [String: Int] = [:]
-        for doc in docs {
-            for token in querySet where doc.tokenFreq[token] != nil {
-                docFreq[token, default: 0] += 1
-            }
-        }
-        let totalDocs = Double(docs.count)
-
-        // Score each doc.
-        let scored: [RAGResult] = docs.compactMap { doc in
-            var score = 0.0
-            for token in queryTokens {
-                guard let tf = doc.tokenFreq[token] else { continue }
-                let df = max(1, docFreq[token] ?? 1)
-                let idf = log((totalDocs + 1) / Double(df))
-                score += Double(tf) * idf
-            }
-            guard score > 0 else { return nil }
-            let normalized = score / max(doc.length, 1)
-            let snippet = bestSnippet(for: queryTokens, in: doc.fullText)
-            return RAGResult(
-                id: doc.meeting.id,
-                meetingTitle: doc.meeting.title,
-                snippet: snippet,
-                score: normalized
-            )
-        }
-        return scored.sorted { $0.score > $1.score }.prefix(limit).map { $0 }
+    fileprivate struct SourceChunk: Sendable {
+        let meetingID: Meeting.ID
+        let meetingTitle: String
+        let kind: SourceReferenceKind
+        let speaker: String?
+        let lineIndex: Int?
+        let text: String
+        let searchText: String
+        let capturedAt: Date
     }
 
-    /// Pick the sentence with the highest query-token coverage as the citation
-    /// snippet. Falls back to the first 160 chars of the document.
-    private static func bestSnippet(for query: [String], in text: String) -> String {
-        let querySet = Set(query)
-        let sentences = text
-            .replacingOccurrences(of: "\n", with: ". ")
-            .components(separatedBy: ". ")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
+    fileprivate struct IndexedDocument: Sendable {
+        let chunk: SourceChunk
+        let frequencies: [String: Int]
+        let length: Double
+        let titleTokens: Set<String>
+    }
 
-        var best: (sentence: String, hits: Int) = ("", 0)
-        for sentence in sentences {
-            let hits = tokenize(sentence).filter { querySet.contains($0) }.count
-            if hits > best.hits {
-                best = (sentence, hits)
+    struct Index: Sendable {
+        fileprivate let documents: [IndexedDocument]
+        fileprivate let documentFrequency: [String: Int]
+    }
+
+    private struct ScoredChunk: Sendable {
+        let chunk: SourceChunk
+        let score: Double
+    }
+
+    /// Retrieves raw note and transcript chunks. Generated summaries are
+    /// deliberately excluded so an AI claim can never become evidence for a
+    /// later AI claim.
+    static func search(_ query: String, in meetings: [Meeting], limit: Int = 5) -> [RAGResult] {
+        search(query, in: makeIndex(from: meetings), limit: limit)
+    }
+
+    static func makeIndex(from meetings: [Meeting]) -> Index {
+        let documents = meetings.flatMap(makeSourceChunks).map { chunk -> IndexedDocument in
+            let tokens = tokenize(chunk.searchText)
+            var frequencies: [String: Int] = [:]
+            for token in tokens { frequencies[token, default: 0] += 1 }
+            let titleTokens = Set(tokenize(chunk.meetingTitle))
+            return IndexedDocument(
+                chunk: chunk,
+                frequencies: frequencies,
+                length: sqrt(Double(max(tokens.count, 1))),
+                titleTokens: titleTokens
+            )
+        }
+        var documentFrequency: [String: Int] = [:]
+        for document in documents {
+            for token in document.frequencies.keys {
+                documentFrequency[token, default: 0] += 1
             }
         }
-        if best.hits > 0 {
-            return String(best.sentence.prefix(220))
+        return Index(documents: documents, documentFrequency: documentFrequency)
+    }
+
+    static func search(
+        _ query: String,
+        in index: Index,
+        limit: Int = 5,
+        allowedMeetingIDs: Set<Meeting.ID>? = nil,
+        includeTranscripts: Bool = true
+    ) -> [RAGResult] {
+        let queryTokens = tokenize(query)
+        guard !queryTokens.isEmpty, !index.documents.isEmpty else { return [] }
+
+        let documents = index.documents.filter { document in
+            if let allowedMeetingIDs, !allowedMeetingIDs.contains(document.chunk.meetingID) {
+                return false
+            }
+            if !includeTranscripts,
+               document.chunk.kind == .transcript || document.chunk.kind == .audioTranscript {
+                return false
+            }
+            return true
         }
-        return String(text.prefix(160))
+        guard !documents.isEmpty else { return [] }
+
+        let querySet = Set(queryTokens)
+        let totalDocs = Double(index.documents.count)
+        let scored: [ScoredChunk] = documents.compactMap { document in
+            var score = 0.0
+            for token in queryTokens {
+                guard let tf = document.frequencies[token] else { continue }
+                let df = max(1, index.documentFrequency[token] ?? 1)
+                let idf = log((totalDocs + 1) / Double(df + 1)) + 1
+                score += (1 + log(Double(tf))) * idf
+            }
+            guard score > 0 else { return nil }
+            let titleMatches = document.titleTokens.intersection(querySet).count
+            let sourceBoost: Double = document.chunk.kind == .transcript ? 1.10 : 1.04
+            let titleBoost = 1 + min(Double(titleMatches) * 0.12, 0.36)
+            let ageDays = max(0, Date.now.timeIntervalSince(document.chunk.capturedAt) / 86_400)
+            let recencyBoost = 1 + (0.10 / (1 + ageDays / 30))
+            let normalized = (score / max(document.length, 1)) * sourceBoost * titleBoost * recencyBoost
+            return ScoredChunk(chunk: document.chunk, score: normalized)
+        }
+
+        var selected: [ScoredChunk] = []
+        var perMeetingCount: [Meeting.ID: Int] = [:]
+        var seenSourceText: Set<String> = []
+        for candidate in scored.sorted(by: { $0.score > $1.score }) {
+            guard selected.count < max(1, limit) else { break }
+            guard perMeetingCount[candidate.chunk.meetingID, default: 0] < 2 else { continue }
+            let fingerprint = sourceFingerprint(candidate.chunk.text)
+            guard !fingerprint.isEmpty, seenSourceText.insert(fingerprint).inserted else { continue }
+            selected.append(candidate)
+            perMeetingCount[candidate.chunk.meetingID, default: 0] += 1
+        }
+
+        return selected.enumerated().map { offset, result in
+            RAGResult(
+                sourceID: "S\(offset + 1)",
+                meetingID: result.chunk.meetingID,
+                meetingTitle: result.chunk.meetingTitle,
+                kind: result.chunk.kind,
+                speaker: result.chunk.speaker,
+                lineIndex: result.chunk.lineIndex,
+                snippet: String(result.chunk.text.prefix(420)),
+                score: result.score
+            )
+        }
+    }
+
+    private static func makeSourceChunks(for meeting: Meeting) -> [SourceChunk] {
+        var chunks: [SourceChunk] = []
+        let context = [meeting.title, meeting.objective]
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .joined(separator: " ")
+
+        let notes = meeting.rawNotes
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        for (index, note) in notes.enumerated() {
+            chunks.append(SourceChunk(
+                meetingID: meeting.id,
+                meetingTitle: meeting.title,
+                kind: .note,
+                speaker: nil,
+                lineIndex: index,
+                text: note,
+                searchText: context + " " + note,
+                capturedAt: meeting.when
+            ))
+        }
+
+        for (index, line) in meeting.transcript.enumerated() {
+            let text = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            chunks.append(SourceChunk(
+                meetingID: meeting.id,
+                meetingTitle: meeting.title,
+                kind: .transcript,
+                speaker: line.speaker.trimmingCharacters(in: .whitespacesAndNewlines),
+                lineIndex: index,
+                text: text,
+                searchText: context + " " + line.speaker + " " + text,
+                capturedAt: meeting.when
+            ))
+        }
+
+        if chunks.isEmpty, !context.isEmpty {
+            chunks.append(SourceChunk(
+                meetingID: meeting.id,
+                meetingTitle: meeting.title,
+                kind: meeting.calendarEventID == nil ? .meetingContext : .calendar,
+                speaker: nil,
+                lineIndex: nil,
+                text: context,
+                searchText: context,
+                capturedAt: meeting.when
+            ))
+        }
+        return chunks
+    }
+
+    private static func sourceFingerprint(_ text: String) -> String {
+        tokenize(text).joined(separator: "|")
     }
 }
 
@@ -1238,35 +1334,56 @@ struct WebhookConfig: Codable, Identifiable, Hashable {
         self.url = url
         self.label = label
     }
+
+    var displayLocation: String {
+        guard let parsed = URL(string: url), let host = parsed.host else {
+            return "Secure webhook"
+        }
+        return host
+    }
 }
 
 @MainActor
 final class WebhookStore: ObservableObject {
     static let shared = WebhookStore()
     @Published private(set) var configs: [WebhookConfig] = []
+    @Published private(set) var persistenceError: String?
     private let defaultsKey = "scribeflow.webhooks"
+    private let secretStore = KeychainSecretStore(service: "ai.scribeflow.app.webhooks")
 
     init() {
         load()
     }
 
     func add(_ config: WebhookConfig) {
+        guard Self.validatedHTTPSURL(config.url) != nil else { return }
+        do {
+            try storeSecret(for: config)
+        } catch {
+            persistenceError = "The webhook could not be saved securely."
+            return
+        }
         configs.append(config)
-        save()
+        saveMetadata()
     }
 
     func remove(_ id: UUID) {
         configs.removeAll { $0.id == id }
-        save()
+        try? secretStore.remove(account: secretAccount(for: id))
+        saveMetadata()
     }
 
     func clear() {
+        for config in configs {
+            try? secretStore.remove(account: secretAccount(for: config.id))
+        }
         configs.removeAll()
         UserDefaults.standard.removeObject(forKey: defaultsKey)
+        persistenceError = nil
     }
 
     func send(meetingTitle: String, body: String, to config: WebhookConfig) async throws {
-        guard let url = URL(string: config.url) else {
+        guard let url = Self.validatedHTTPSURL(config.url) else {
             throw URLError(.badURL)
         }
         var request = URLRequest(url: url)
@@ -1289,12 +1406,63 @@ final class WebhookStore: ObservableObject {
 
     private func load() {
         guard let data = UserDefaults.standard.data(forKey: defaultsKey) else { return }
-        configs = (try? JSONDecoder().decode([WebhookConfig].self, from: data)) ?? []
+        let persisted = (try? JSONDecoder().decode([WebhookConfig].self, from: data)) ?? []
+        var loaded: [WebhookConfig] = []
+        var migratedLegacySecrets = false
+        var migrationFailed = false
+        for var config in persisted {
+            if let data = try? secretStore.data(for: secretAccount(for: config.id)),
+               let secret = String(data: data, encoding: .utf8),
+               Self.validatedHTTPSURL(secret) != nil {
+                config.url = secret
+                loaded.append(config)
+                continue
+            }
+            if Self.validatedHTTPSURL(config.url) != nil {
+                do {
+                    try storeSecret(for: config)
+                    loaded.append(config)
+                    migratedLegacySecrets = true
+                } catch {
+                    loaded.append(config)
+                    migrationFailed = true
+                }
+            }
+        }
+        configs = loaded
+        if migratedLegacySecrets, !migrationFailed {
+            saveMetadata()
+        } else if migrationFailed {
+            persistenceError = "Move webhook secrets to Keychain by reopening Integrations."
+        }
     }
 
-    private func save() {
-        guard let data = try? JSONEncoder().encode(configs) else { return }
+    private func saveMetadata() {
+        let metadata = configs.map {
+            WebhookConfig(id: $0.id, target: $0.target, url: "", label: $0.label)
+        }
+        guard let data = try? JSONEncoder().encode(metadata) else { return }
         UserDefaults.standard.set(data, forKey: defaultsKey)
+    }
+
+    private func storeSecret(for config: WebhookConfig) throws {
+        guard let data = config.url.data(using: .utf8) else {
+            throw KeychainStoreError.encodeFailed
+        }
+        try secretStore.set(data, for: secretAccount(for: config.id))
+        persistenceError = nil
+    }
+
+    private func secretAccount(for id: UUID) -> String {
+        "webhook.\(id.uuidString)"
+    }
+
+    private static func validatedHTTPSURL(_ value: String) -> URL? {
+        guard let url = URL(string: value.trimmingCharacters(in: .whitespacesAndNewlines)),
+              url.scheme?.lowercased() == "https",
+              url.host != nil
+        else { return nil }
+        return url
     }
 }
 

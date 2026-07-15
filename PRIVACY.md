@@ -9,7 +9,7 @@ Scribeflow is local-first. This policy explains what the app stores, what it acc
 
 - Recordings, transcripts, notes, and action items are stored **locally on your device** by default.
 - Scribeflow **does not collect, sell, or share** your personal data, and **does not track** you across apps or websites.
-- Data leaves your device only when you export or share it, enable private iCloud backup, use Apple services, or explicitly enable a configured remote transcription service.
+- Data leaves your device only when you export or share it, enable private iCloud backup, use Apple services, send to a webhook you configured, or explicitly enable a configured remote transcription service.
 
 ## What Scribeflow stores (on your device)
 
@@ -39,6 +39,12 @@ Some builds may offer **Remote transcription** under Recording privacy. It is of
 ## Apple Intelligence
 
 When available, Scribeflow uses Apple's on-device foundation models to draft summaries and answer questions about your meetings. This processing happens on your device; Scribeflow does not send your content to any server for this.
+
+## User-directed backup, sharing, and webhooks
+
+Private iCloud backup stores a user-requested backup in the private CloudKit database associated with the user's Apple account. Manual export and system sharing send only the content and destination the user selects.
+
+Webhook integrations are off until the user adds an HTTPS endpoint. The full endpoint URL is stored in Keychain. Scribeflow sends a recap only after the user chooses that destination from a meeting. The receiving service then handles the sent content under its own terms and privacy policy.
 
 ## Analytics & tracking
 

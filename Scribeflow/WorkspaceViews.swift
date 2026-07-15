@@ -621,28 +621,19 @@ struct AskView: View {
         withAnimation(AppMotion.smooth) { turns.append(turn) }
         prompt = ""
 
-        let snapshotMeetings = store.meetings
         promptTask = Task {
-            async let response = store.answerAcrossMeetings(
+            let response = await store.groundedAnswerAcrossMeetings(
                 prompt: cleaned,
                 includeTranscripts: includeTranscripts,
                 modelSelection: modelSelection
             )
-            // Keyword search can scan many transcripts — run it off the main
-            // actor so the keyboard / UI never stalls while an answer resolves.
-            let rag = await Task.detached(priority: .userInitiated) {
-                LocalRAG.search(cleaned, in: snapshotMeetings, limit: 4)
-            }.value
-            let resolved = await response
             guard !Task.isCancelled else { return }
-            await MainActor.run {
-                if let idx = turns.firstIndex(where: { $0.id == id }) {
-                    turns[idx].answer = resolved
-                    turns[idx].citations = rag
-                    turns[idx].isRunning = false
-                }
-                AnalyticsLog.shared.log("ask.run", ["resultCount": "\(rag.count)"])
+            if let idx = turns.firstIndex(where: { $0.id == id }) {
+                turns[idx].answer = response.text
+                turns[idx].citations = response.citations
+                turns[idx].isRunning = false
             }
+            AnalyticsLog.shared.log("ask.run", ["resultCount": "\(response.citations.count)"])
         }
     }
 }
@@ -858,33 +849,38 @@ struct AskCitationsCard: View {
 
             VStack(spacing: 0) {
                 ForEach(Array(citations.enumerated()), id: \.element.id) { index, citation in
-                    Button {
-                        HapticEngine.tap(.light)
-                        onOpen(citation.id)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 8) {
-                                Text("\(index + 1)")
-                                    .font(.caption.weight(.bold))
-                                    .foregroundStyle(.white)
-                                    .frame(width: 22, height: 22)
-                                    .background(AppPalette.accent, in: Circle())
-                                Text(citation.meetingTitle)
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(AppPalette.ink)
+                      Button {
+                          HapticEngine.tap(.light)
+                          onOpen(citation.meetingID)
+                      } label: {
+                          VStack(alignment: .leading, spacing: 4) {
+                              HStack(spacing: 8) {
+                                  Text(citation.sourceID)
+                                      .font(.caption.weight(.bold))
+                                      .foregroundStyle(.white)
+                                      .frame(minWidth: 28, minHeight: 22)
+                                      .padding(.horizontal, 4)
+                                      .background(AppPalette.accent, in: Capsule())
+                                  Text(citation.meetingTitle)
+                                      .font(.subheadline.weight(.semibold))
+                                      .foregroundStyle(AppPalette.ink)
                                     .lineLimit(1)
                                 Spacer(minLength: 4)
                                 Image(systemName: "chevron.right")
                                     .font(.caption.weight(.bold))
                                     .foregroundStyle(AppPalette.secondaryInk.opacity(0.45))
                             }
-                            Text(citation.snippet)
-                                .font(.caption)
-                                .foregroundStyle(AppPalette.secondaryInk)
-                                .lineLimit(3)
-                                .multilineTextAlignment(.leading)
-                                .padding(.leading, 30)
-                        }
+                              Text(citation.snippet)
+                                  .font(.caption)
+                                  .foregroundStyle(AppPalette.secondaryInk)
+                                  .lineLimit(3)
+                                  .multilineTextAlignment(.leading)
+                                  .padding(.leading, 36)
+                              Text(citation.sourceLabel)
+                                  .font(.caption2.weight(.semibold))
+                                  .foregroundStyle(AppPalette.tertiaryInk)
+                                  .padding(.leading, 36)
+                          }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 10)
                         .frame(maxWidth: .infinity, alignment: .leading)

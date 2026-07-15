@@ -154,24 +154,36 @@ struct MicLevelMeter: View {
     var maxHeight: CGFloat = 56
 
     var body: some View {
-        HStack(spacing: 4) {
-            ForEach(0..<bars, id: \.self) { i in
-                let threshold = Double(i + 1) / Double(bars)
+        let safeBars = max(1, bars)
+        let barWidth: CGFloat = 4
+        let spacing: CGFloat = 4
+        let meterWidth = CGFloat(safeBars) * barWidth + CGFloat(safeBars - 1) * spacing
+
+        Canvas(opaque: false, colorMode: .linear, rendersAsynchronously: true) { context, size in
+            for i in 0..<safeBars {
+                let threshold = Double(i + 1) / Double(safeBars)
                 let isActive = level >= threshold * 0.65
-                Capsule()
-                    .fill(isActive ? color : color.opacity(0.16))
-                    .frame(width: 4, height: barHeight(for: i))
-                    .animation(.spring(response: 0.18, dampingFraction: 0.65), value: level)
+                let height = barHeight(for: i, barCount: safeBars)
+                let rect = CGRect(
+                    x: CGFloat(i) * (barWidth + spacing),
+                    y: (size.height - height) / 2,
+                    width: barWidth,
+                    height: height
+                )
+                var path = Path()
+                path.addRoundedRect(
+                    in: rect,
+                    cornerSize: CGSize(width: barWidth / 2, height: barWidth / 2)
+                )
+                context.fill(path, with: .color(isActive ? color : color.opacity(0.16)))
             }
         }
-        .frame(height: maxHeight)
-        // Composite the animating bars into one GPU layer so the level meter
-        // stays smooth while recording instead of laying out N capsules a frame.
-        .drawingGroup()
+        .frame(width: meterWidth, height: maxHeight)
+        .accessibilityHidden(true)
     }
 
-    private func barHeight(for i: Int) -> CGFloat {
-        let mid = Double(bars - 1) / 2
+    private func barHeight(for i: Int, barCount: Int) -> CGFloat {
+        let mid = max(1, Double(barCount - 1) / 2)
         let distFromCenter = abs(Double(i) - mid)
         let envelope = 1.0 - (distFromCenter / mid) * 0.55  // taller in middle
         let base = 6.0 + level * Double(maxHeight) * envelope

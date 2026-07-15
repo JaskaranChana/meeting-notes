@@ -7,15 +7,41 @@ import FoundationModels
 
 private let storeLog = Logger(subsystem: "ai.scribeflow.app", category: "MeetingStore")
 
+private struct EventPrepCacheKey: Hashable {
+    let event: CalendarEventSnapshot
+    let excludingMeetingID: Meeting.ID?
+}
+
+private struct SourceProofCacheKey: Hashable {
+    let meetingID: Meeting.ID
+    let claim: String
+}
+
+struct WorkspaceAnswer {
+    let text: String
+    let citations: [RAGResult]
+}
+
 private actor MeetingPersistenceWriter {
+    private var lastWrittenData: Data?
+
     /// Encodes and atomically writes the library. Throws on encode/write
     /// failure so the caller can surface data loss instead of swallowing it.
-    func saveMeetings(_ meetings: [Meeting], to url: URL) throws {
+    @discardableResult
+    func saveMeetings(_ meetings: [Meeting], to url: URL) throws -> Bool {
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(meetings)
+        if lastWrittenData == data { return false }
+        if lastWrittenData == nil,
+           let existing = try? Data(contentsOf: url),
+           existing == data {
+            lastWrittenData = data
+            return false
+        }
         try data.write(to: url, options: .atomic)
+        lastWrittenData = data
+        return true
     }
 
     /// Copies the live file to a known-good backup — but only after verifying it
@@ -45,6 +71,11 @@ final class MeetingStore {
             _pinnedMeetings = nil
             _openLoopsCache = nil
             _smartCollectionsCache = nil
+            _signalsCache.removeAll(keepingCapacity: true)
+            _prepBriefCache.removeAll(keepingCapacity: true)
+            _eventPrepCache.removeAll(keepingCapacity: true)
+            _intelligenceReportCache.removeAll(keepingCapacity: true)
+            _sourceProofCache.removeAll(keepingCapacity: true)
         }
     }
 
@@ -66,11 +97,19 @@ final class MeetingStore {
     /// Backups carry this so a newer file isn't silently mis-read by an older
     /// build.
     static let currentSchemaVersion = 1
+    private static let currentDerivedDataVersion = 2
 
     @ObservationIgnored private var _recentMeetings: [Meeting]? = nil
     @ObservationIgnored private var _pinnedMeetings: [Meeting]? = nil
     @ObservationIgnored private var _openLoopsCache: [OpenLoop]? = nil
     @ObservationIgnored private var _smartCollectionsCache: [SmartCollectionCard]? = nil
+    @ObservationIgnored private var _signalsCache: [Meeting.ID: MeetingSignals] = [:]
+    @ObservationIgnored private var _prepBriefCache: [Meeting.ID: PrepBrief] = [:]
+    @ObservationIgnored private var _eventPrepCache: [EventPrepCacheKey: EventPrepBrief] = [:]
+    @ObservationIgnored private var _intelligenceReportCache: [Meeting.ID: MeetingIntelligenceReport] = [:]
+    @ObservationIgnored private var _sourceProofCache: [SourceProofCacheKey: SourceProof] = [:]
+    @ObservationIgnored private var _recallIndex: LocalRAG.Index? = nil
+    @ObservationIgnored private var _recallIndexRevision = -1
 
     /// Dictionary index for O(1) `meeting(withID:)` lookup. Previously a
     /// linear `first(where:)` scan — measurable lag on libraries >100.
@@ -146,6 +185,9 @@ final class MeetingStore {
     private var regenTask: Task<Void, Never>?
 
     @ObservationIgnored
+    private var derivedMigrationTask: Task<Void, Never>?
+
+    @ObservationIgnored
     private var aiProcessingTasks: [Meeting.ID: Task<Void, Never>] = [:]
 
     @ObservationIgnored
@@ -199,12 +241,7 @@ final class MeetingStore {
             meetings = []
         }
 
-        isSeedLoad = shouldUseSeedData
-        for index in meetings.indices {
-            refreshSummariesIfNeeded(at: index, applySupersededCommitments: false)
-        }
         isSeedLoad = false
-        applySupersededCommitments()
 
         // `didSet` doesn't fire for assignments inside `init`, so build the
         // lookup index up front instead of waiting for the first mutation.
@@ -234,10 +271,57 @@ final class MeetingStore {
                 )
             }
         }
+
+        // Derived summaries and proof are persisted with each meeting. Repair
+        // legacy or incomplete rows after first paint so a large library never
+        // makes launch wait on note analysis.
+        let rowsNeedingMigration = meetings
+            .filter(Self.needsDerivedDataRefresh)
+            .map(\.id)
+        let authoredSeedIDs = shouldUseSeedData ? Set(meetings.map(\.id)) : []
+        scheduleDerivedDataMigration(
+            for: rowsNeedingMigration,
+            preservingAuthoredCommitmentsFor: authoredSeedIDs
+        )
     }
 
     deinit {
         saveTask?.cancel()
+        derivedMigrationTask?.cancel()
+    }
+
+    private static func needsDerivedDataRefresh(_ meeting: Meeting) -> Bool {
+        let hasSourceText = !meeting.rawNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !meeting.transcript.isEmpty
+        return meeting.derivedDataVersion < currentDerivedDataVersion
+            || meeting.summaries.isEmpty
+            || (hasSourceText && meeting.evidenceItems.isEmpty)
+    }
+
+    private func scheduleDerivedDataMigration(
+        for meetingIDs: [Meeting.ID],
+        preservingAuthoredCommitmentsFor authoredMeetingIDs: Set<Meeting.ID> = []
+    ) {
+        derivedMigrationTask?.cancel()
+        derivedMigrationTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, let self else { return }
+            for id in meetingIDs {
+                guard !Task.isCancelled,
+                      let index = self.meetings.firstIndex(where: { $0.id == id }),
+                      Self.needsDerivedDataRefresh(self.meetings[index])
+                else { continue }
+                self.refreshSummariesIfNeeded(
+                    at: index,
+                    applySupersededCommitments: false,
+                    preserveAuthoredCommitments: authoredMeetingIDs.contains(id)
+                )
+                await Task.yield()
+                try? await Task.sleep(for: .milliseconds(20))
+            }
+            guard !Task.isCancelled else { return }
+            self.applySupersededCommitments()
+        }
     }
 
     // MARK: - Load + recovery
@@ -456,6 +540,23 @@ final class MeetingStore {
 
     func sourceProof(for text: String, in meeting: Meeting) -> SourceProof {
         let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = SourceProofCacheKey(
+            meetingID: meeting.id,
+            claim: cleaned.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        )
+        if let cached = _sourceProofCache[key] {
+            return cached
+        }
+
+        let proof = makeSourceProof(for: cleaned, in: meeting)
+        if _sourceProofCache.count >= 128 {
+            _sourceProofCache.removeAll(keepingCapacity: true)
+        }
+        _sourceProofCache[key] = proof
+        return proof
+    }
+
+    private func makeSourceProof(for cleaned: String, in meeting: Meeting) -> SourceProof {
         guard !cleaned.isEmpty else {
             return SourceProof(
                 confidence: .needsReview,
@@ -560,6 +661,16 @@ final class MeetingStore {
     }
 
     func signals(for meeting: Meeting) -> MeetingSignals {
+        if let cached = _signalsCache[meeting.id] {
+            return cached
+        }
+
+        let result = makeSignals(for: meeting)
+        _signalsCache[meeting.id] = result
+        return result
+    }
+
+    private func makeSignals(for meeting: Meeting) -> MeetingSignals {
         if !meeting.allowsMeetingSignalExtraction {
             return MeetingSignals(decisions: [], actions: [], risks: [], questions: [])
         }
@@ -689,7 +800,46 @@ final class MeetingStore {
         )
     }
 
+    func eventPrepBrief(
+        for event: CalendarEventSnapshot,
+        excluding meetingID: Meeting.ID? = nil
+    ) -> EventPrepBrief {
+        let key = EventPrepCacheKey(event: event, excludingMeetingID: meetingID)
+        if let cached = _eventPrepCache[key] {
+            return cached
+        }
+
+        let brief = EventPrepEngine.make(for: event, meetings: recentMeetings, excluding: meetingID)
+        if _eventPrepCache.count >= 16 {
+            _eventPrepCache.removeAll(keepingCapacity: true)
+        }
+        _eventPrepCache[key] = brief
+        return brief
+    }
+
     func prepBrief(for meeting: Meeting) -> PrepBrief {
+        if let cached = _prepBriefCache[meeting.id] {
+            return cached
+        }
+
+        let brief = makePrepBrief(for: meeting)
+        if _prepBriefCache.count >= 16 {
+            _prepBriefCache.removeAll(keepingCapacity: true)
+        }
+        _prepBriefCache[meeting.id] = brief
+        return brief
+    }
+
+    private func makePrepBrief(for meeting: Meeting) -> PrepBrief {
+        if let event = CalendarEventSnapshot(preparedMeeting: meeting) {
+            let eventBrief = eventPrepBrief(for: event, excluding: meeting.id)
+            return PrepBrief(
+                headline: eventBrief.headline,
+                bullets: eventBrief.carryForward.map(\.text),
+                questions: eventBrief.questions.map(\.text)
+            )
+        }
+
         let workspacePeers = recentMeetings.filter {
             $0.workspace == meeting.workspace && $0.id != meeting.id
         }
@@ -733,6 +883,25 @@ final class MeetingStore {
             return match
         }
         return nil
+    }
+
+    func meeting(linkedTo event: CalendarEventSnapshot) -> Meeting? {
+        if let direct = meetings.first(where: { $0.calendarEventID == event.id }) {
+            return direct
+        }
+
+        let eventTitle = event.title.folding(
+            options: [.caseInsensitive, .diacriticInsensitive],
+            locale: .current
+        )
+        return meetings.first { meeting in
+            guard let startDate = meeting.calendarStartDate else { return false }
+            let meetingTitle = meeting.title.folding(
+                options: [.caseInsensitive, .diacriticInsensitive],
+                locale: .current
+            )
+            return meetingTitle == eventTitle && abs(startDate.timeIntervalSince(event.startDate)) < 120
+        }
     }
 
     func updateNotes(for id: Meeting.ID, notes: String) {
@@ -896,6 +1065,28 @@ final class MeetingStore {
         scheduleAIProcessing(for: id)
     }
 
+    func updatePurposeOverride(_ purpose: CapturePurposeKind?, for id: Meeting.ID) {
+        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        guard meetings[index].purposeOverride != purpose else { return }
+        meetings[index].purposeOverride = purpose
+
+        if !meetings[index].allowsAccountabilityExtraction {
+            for commitment in meetings[index].commitments {
+                ReminderScheduler.cancel(meetingID: id, commitmentID: commitment.id)
+            }
+            meetings[index].commitments = []
+            meetings[index].score = nil
+        }
+        if !meetings[index].allowsMeetingSignalExtraction {
+            meetings[index].aiBrief?.decisions = []
+            meetings[index].aiBrief?.actions = []
+            meetings[index].aiBrief?.risks = []
+        }
+
+        refreshSummariesIfNeeded(at: index)
+        scheduleAIProcessing(for: id)
+    }
+
     // MARK: - Meeting Score (Tier 2)
 
     func scoreAndSave(for id: Meeting.ID) {
@@ -947,7 +1138,16 @@ final class MeetingStore {
     // MARK: - Product Intelligence
 
     func intelligenceReport(for meeting: Meeting) -> MeetingIntelligenceReport {
-        MeetingIntelligenceEngine.report(for: meeting)
+        if let cached = _intelligenceReportCache[meeting.id] {
+            return cached
+        }
+
+        let report = MeetingIntelligenceEngine.report(for: meeting)
+        if _intelligenceReportCache.count >= 16 {
+            _intelligenceReportCache.removeAll(keepingCapacity: true)
+        }
+        _intelligenceReportCache[meeting.id] = report
+        return report
     }
 
     func speakerSegments(for meetingID: Meeting.ID) -> [SpeakerSegment] {
@@ -994,6 +1194,35 @@ final class MeetingStore {
         }
         meetings[index].stage = "Speaker labels reviewed"
         refreshSummariesIfNeeded(at: index)
+        scheduleAIProcessing(for: meetingID)
+    }
+
+    func reassignSpeaker(
+        for lineID: TranscriptLine.ID,
+        to newName: String,
+        in meetingID: Meeting.ID
+    ) {
+        let cleanedName = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanedName.isEmpty,
+              let meetingIndex = meetings.firstIndex(where: { $0.id == meetingID }),
+              let lineIndex = meetings[meetingIndex].transcript.firstIndex(where: { $0.id == lineID }),
+              meetings[meetingIndex].transcript[lineIndex].speaker
+                .caseInsensitiveCompare(cleanedName) != .orderedSame
+        else { return }
+
+        meetings[meetingIndex].transcript[lineIndex].speaker = cleanedName
+        if !meetings[meetingIndex].attendees.contains(where: {
+            $0.caseInsensitiveCompare(cleanedName) == .orderedSame
+        }) {
+            meetings[meetingIndex].attendees.append(cleanedName)
+            meetings[meetingIndex].attendees.sort()
+        }
+        // Contributions are generated against exact speaker-tagged line IDs.
+        // Remove the stale draft now; the scheduled pass rebuilds it from the
+        // corrected transcript rather than carrying a wrong identity forward.
+        meetings[meetingIndex].aiBrief?.speakerContributions = []
+        meetings[meetingIndex].stage = "Transcript speaker corrected"
+        refreshSummariesIfNeeded(at: meetingIndex)
         scheduleAIProcessing(for: meetingID)
     }
 
@@ -1201,7 +1430,6 @@ final class MeetingStore {
     private func encodedMeetings() throws -> Data {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return try encoder.encode(meetings)
     }
 
@@ -1335,6 +1563,7 @@ final class MeetingStore {
     }
 
     func deleteMeeting(_ id: Meeting.ID) {
+        MeetingProcessingCoordinator.shared.discard(id)
         aiProcessingTasks[id]?.cancel()
         aiProcessingTasks[id] = nil
         aiProcessingRunIDs[id] = nil
@@ -1353,6 +1582,7 @@ final class MeetingStore {
     /// the caller can offer Undo and put it back in place.
     func softDeleteMeeting(_ id: Meeting.ID) -> (Meeting, Int)? {
         guard let idx = meetings.firstIndex(where: { $0.id == id }) else { return nil }
+        MeetingProcessingCoordinator.shared.suspend(id)
         aiProcessingTasks[id]?.cancel()
         aiProcessingTasks[id] = nil
         aiProcessingRunIDs[id] = nil
@@ -1367,11 +1597,13 @@ final class MeetingStore {
     func restoreMeeting(_ meeting: Meeting, at index: Int) {
         let clamped = min(max(index, 0), meetings.count)
         meetings.insert(meeting, at: clamped)
+        MeetingProcessingCoordinator.shared.resume(meeting.id, using: self)
     }
 
     /// Permanently removes the on-disk audio files for a soft-deleted meeting.
     /// Called after the Undo window elapses.
     func finalizeDelete(_ meeting: Meeting) {
+        MeetingProcessingCoordinator.shared.discard(meeting.id)
         cancelReminders(for: meeting)
         for recording in meeting.audioRecordings {
             RecordingFileStore.deleteFile(named: recording.fileName)
@@ -1504,10 +1736,27 @@ final class MeetingStore {
         workspaceFilter: String? = nil,
         modelSelection: ChatModelSelection = .auto
     ) async -> String {
+        await groundedAnswerAcrossMeetings(
+            prompt: prompt,
+            includeTranscripts: includeTranscripts,
+            workspaceFilter: workspaceFilter,
+            modelSelection: modelSelection
+        ).text
+    }
+
+    func groundedAnswerAcrossMeetings(
+        prompt: String,
+        includeTranscripts: Bool,
+        workspaceFilter: String? = nil,
+        modelSelection: ChatModelSelection = .auto
+    ) async -> WorkspaceAnswer {
         let normalizedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !normalizedPrompt.isEmpty else {
-            return "Ask about decisions, follow-ups, blockers, or what changed across your recent meetings."
+            return WorkspaceAnswer(
+                text: "Ask about decisions, follow-ups, blockers, or what changed across your recent meetings.",
+                citations: []
+            )
         }
 
         let scopedPool = recentMeetings.filter { meeting in
@@ -1518,9 +1767,29 @@ final class MeetingStore {
 
         guard !scopedMeetings.isEmpty else {
             if let workspaceFilter, !workspaceFilter.isEmpty {
-                return "There aren’t any saved meetings in \(workspaceFilter) yet."
+                return WorkspaceAnswer(
+                    text: "There aren’t any saved meetings in \(workspaceFilter) yet.",
+                    citations: []
+                )
             }
-            return "There aren’t any saved meetings yet, so there’s nothing to search across."
+            return WorkspaceAnswer(
+                text: "There aren’t any saved meetings yet, so there’s nothing to search across.",
+                citations: []
+            )
+        }
+
+        let sources = await recallSources(
+            for: normalizedPrompt,
+            scopedMeetingIDs: Set(scopedMeetings.map(\.id)),
+            includeTranscripts: includeTranscripts,
+            limit: modelSelection == .deep ? 10 : 7
+        )
+
+        guard !sources.isEmpty else {
+            return WorkspaceAnswer(
+                text: "I couldn’t find a source in your saved notes that supports an answer to that yet.",
+                citations: []
+            )
         }
 
         #if canImport(FoundationModels)
@@ -1529,9 +1798,8 @@ final class MeetingStore {
             case .available:
                 do {
                     return try await AppleIntelligenceWorkspaceAssistant.answer(
-                        meetings: scopedMeetings,
+                        sources: sources,
                         prompt: normalizedPrompt,
-                        includeTranscripts: includeTranscripts,
                         modelSelection: modelSelection
                     )
                 } catch {
@@ -1543,11 +1811,49 @@ final class MeetingStore {
         }
         #endif
 
-        return fallbackWorkspaceAnswer(
-            for: scopedMeetings,
-            prompt: normalizedPrompt,
-            includeTranscripts: includeTranscripts,
-            modelSelection: modelSelection
+        return groundedFallbackAnswer(sources: sources)
+    }
+
+    private func recallSources(
+        for query: String,
+        scopedMeetingIDs: Set<Meeting.ID>,
+        includeTranscripts: Bool,
+        limit: Int
+    ) async -> [RAGResult] {
+        let expectedRevision = revision
+        let index: LocalRAG.Index
+        if let cached = _recallIndex, _recallIndexRevision == expectedRevision {
+            index = cached
+        } else {
+            let snapshot = meetings
+            index = await Task.detached(priority: .userInitiated) {
+                LocalRAG.makeIndex(from: snapshot)
+            }.value
+            if revision == expectedRevision {
+                _recallIndex = index
+                _recallIndexRevision = expectedRevision
+            }
+        }
+
+        return await Task.detached(priority: .userInitiated) {
+            LocalRAG.search(
+                query,
+                in: index,
+                limit: limit,
+                allowedMeetingIDs: scopedMeetingIDs,
+                includeTranscripts: includeTranscripts
+            )
+        }.value
+    }
+
+    private func groundedFallbackAnswer(sources: [RAGResult]) -> WorkspaceAnswer {
+        let usedSources = Array(sources.prefix(4))
+        let bullets = usedSources.map { source in
+            "- \(source.snippet) [source: \(source.sourceID)]"
+        }
+        return WorkspaceAnswer(
+            text: (["Here are the closest source-backed matches:"] + bullets).joined(separator: "\n"),
+            citations: usedSources
         )
     }
 
@@ -1585,7 +1891,7 @@ final class MeetingStore {
         case .all:
             return recentMeetings
         case .followUp:
-            return recentMeetings.filter { $0.status != .shared }
+            return recentMeetings.filter { $0.status != .shared && $0.status != .processing }
         case .calls:
             return recentMeetings.filter(\.isCallMeeting)
         case .pinned:
@@ -1621,6 +1927,7 @@ final class MeetingStore {
     }
 
     func addMeeting(
+        id: Meeting.ID = UUID(),
         title: String,
         workspace: String,
         attendees: [String],
@@ -1638,10 +1945,12 @@ final class MeetingStore {
         audioRecordings: [AudioRecordingAttachment] = [],
         calendarEventID: String? = nil,
         calendarStartDate: Date? = nil,
-        calendarEndDate: Date? = nil
+        calendarEndDate: Date? = nil,
+        shouldScheduleAIProcessing: Bool = true
     ) -> Meeting.ID {
         let normalizedAttendees = attendees.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         var meeting = Meeting(
+            id: id,
             title: title,
             workspace: workspace,
             when: when,
@@ -1667,17 +1976,23 @@ final class MeetingStore {
             calendarStartDate: calendarStartDate,
             calendarEndDate: calendarEndDate
         )
-        meeting.summaries = generatedSummaries(for: meeting)
-        meeting.evidenceItems = generatedEvidenceItems(for: meeting)
-        meeting.commitments = generatedCommitments(for: meeting)
-        meeting.sensitiveFlags = detectedSensitiveFlags(for: meeting)
+        if status != .processing {
+            meeting.summaries = generatedSummaries(for: meeting)
+            meeting.evidenceItems = generatedEvidenceItems(for: meeting)
+            meeting.commitments = generatedCommitments(for: meeting)
+            meeting.sensitiveFlags = detectedSensitiveFlags(for: meeting)
+        }
         meeting.selectedPromptID = meeting.prompts.first?.id
         meetings.insert(meeting, at: 0)
-        applySupersededCommitments()
+        if status != .processing {
+            applySupersededCommitments()
+        }
         // Upgrade to a model-processed brief in the background when available;
         // the heuristic above is shown instantly in the meantime.
         let newID = meeting.id
-        scheduleAIProcessing(for: newID)
+        if shouldScheduleAIProcessing, status != .processing {
+            scheduleAIProcessing(for: newID)
+        }
         return meeting.id
     }
 
@@ -1765,6 +2080,7 @@ final class MeetingStore {
         notes: String,
         moments: [String] = [],
         transcriptParagraphs: [String],
+        transcriptionSegments: [TranscriptionSegment] = [],
         meetingMode: MeetingMode = .privateNotes,
         consentState: ConsentState = .privateCapture,
         retentionPolicy: RetentionPolicy = .keepUntilDeleted,
@@ -1773,9 +2089,14 @@ final class MeetingStore {
         calendarEndDate: Date? = nil
     ) async -> Meeting.ID {
         let enhancedNotes = enhancedLiveNotes(notes: notes, transcriptParagraphs: transcriptParagraphs)
-        let transcriptLines = transcriptParagraphs.map {
-            TranscriptLine(speaker: "Meeting", role: "Live capture", text: $0)
-        }
+        let normalizedSegments = SpeakerIdentityResolver.normalizedSegments(transcriptionSegments)
+        let transcriptLines = normalizedSegments.isEmpty
+            ? transcriptParagraphs.map {
+                TranscriptLine(speaker: "Meeting", role: "Live capture", text: $0)
+            }
+            : normalizedSegments.map {
+                TranscriptLine(speaker: $0.speaker, role: "On-device capture", text: $0.text)
+            }
 
         let meetingID = addMeeting(
             title: title,
@@ -1795,9 +2116,211 @@ final class MeetingStore {
             calendarEndDate: calendarEndDate
         )
 
-        _ = await rewriteMeetingNotes(for: meetingID)
         appendMoments(to: meetingID, moments: moments)
         return meetingID
+    }
+
+    func addPendingLiveMeeting(
+        id: Meeting.ID = UUID(),
+        title: String,
+        workspace: String,
+        attendees: [String],
+        objective: String,
+        notes: String,
+        moments: [String] = [],
+        transcriptParagraphs: [String],
+        transcriptionSegments: [TranscriptionSegment] = [],
+        when: Date = .now,
+        durationMinutes: Int,
+        selectedTemplate: NoteTemplate,
+        meetingMode: MeetingMode,
+        consentState: ConsentState,
+        retentionPolicy: RetentionPolicy,
+        calendarEventID: String? = nil,
+        calendarStartDate: Date? = nil,
+        calendarEndDate: Date? = nil
+    ) -> (id: Meeting.ID, pendingNotes: String) {
+        let normalizedSegments = SpeakerIdentityResolver.normalizedSegments(transcriptionSegments)
+        let transcriptLines = normalizedSegments.isEmpty
+            ? transcriptParagraphs.map {
+                TranscriptLine(speaker: "Meeting", role: "Live capture", text: $0)
+            }
+            : normalizedSegments.map {
+                TranscriptLine(speaker: $0.speaker, role: "Live capture", text: $0.text)
+            }
+        let cleanedNotes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackNotes = transcriptParagraphs
+            .prefix(4)
+            .map { "- \($0)" }
+            .joined(separator: "\n")
+        let baseNotes = cleanedNotes.isEmpty
+            ? (fallbackNotes.isEmpty ? "Recording saved. The transcript is being refined." : fallbackNotes)
+            : cleanedNotes
+        let pendingNotes = mergedNotesWithMoments(baseNotes, moments: moments)
+
+        let meetingID = addMeeting(
+            id: id,
+            title: title,
+            workspace: workspace,
+            attendees: attendees,
+            objective: objective,
+            notes: pendingNotes,
+            transcript: transcriptLines,
+            when: when,
+            status: .processing,
+            stage: "Refining transcript and separating speakers",
+            durationMinutes: max(1, durationMinutes),
+            meetingMode: meetingMode,
+            consentState: consentState,
+            retentionPolicy: retentionPolicy,
+            calendarEventID: calendarEventID,
+            calendarStartDate: calendarStartDate,
+            calendarEndDate: calendarEndDate,
+            shouldScheduleAIProcessing: false
+        )
+        if let index = meetings.firstIndex(where: { $0.id == meetingID }) {
+            meetings[index].selectedTemplate = selectedTemplate
+        }
+        return (meetingID, pendingNotes)
+    }
+
+    @discardableResult
+    func restorePendingLiveMeeting(
+        id: Meeting.ID,
+        recovery: PendingMeetingRecoveryPayload,
+        capturedNotes: String,
+        pendingNotes: String,
+        moments: [String]
+    ) -> Bool {
+        if meeting(withID: id) != nil { return true }
+
+        _ = addPendingLiveMeeting(
+            id: id,
+            title: recovery.title,
+            workspace: recovery.workspace,
+            attendees: recovery.attendees,
+            objective: recovery.objective,
+            notes: capturedNotes,
+            moments: moments,
+            transcriptParagraphs: recovery.transcriptParagraphs,
+            when: recovery.capturedAt,
+            durationMinutes: recovery.durationMinutes,
+            selectedTemplate: recovery.selectedTemplate,
+            meetingMode: recovery.meetingMode,
+            consentState: recovery.consentState,
+            retentionPolicy: recovery.retentionPolicy,
+            calendarEventID: recovery.calendarEventID,
+            calendarStartDate: recovery.calendarStartDate,
+            calendarEndDate: recovery.calendarEndDate
+        )
+        if let index = meetings.firstIndex(where: { $0.id == id }),
+           !pendingNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            meetings[index].rawNotes = pendingNotes
+        }
+        return true
+    }
+
+    func updateMeetingProcessingStage(_ stage: String, for id: Meeting.ID) {
+        guard let index = meetings.firstIndex(where: { $0.id == id }),
+              meetings[index].status == .processing
+        else { return }
+        meetings[index].stage = stage
+    }
+
+    func completePendingLiveMeeting(
+        id: Meeting.ID,
+        result: TranscriptionResult,
+        capturedNotes: String,
+        pendingNotes: String,
+        moments: [String]
+    ) async -> Bool {
+        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return false }
+
+        let normalizedSegments = SpeakerIdentityResolver.normalizedSegments(result.segments)
+        let transcriptLines: [TranscriptLine]
+        if normalizedSegments.isEmpty {
+            let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            transcriptLines = text.isEmpty
+                ? meetings[index].transcript
+                : [TranscriptLine(speaker: "Meeting", role: result.provider.title, text: text)]
+        } else {
+            transcriptLines = normalizedSegments.map {
+                TranscriptLine(speaker: $0.speaker, role: result.provider.title, text: $0.text)
+            }
+        }
+
+        let transcriptParagraphs = transcriptLines.map(\.text)
+        let currentNotes = meetings[index].rawNotes
+        let userEditedWhileProcessing = currentNotes != pendingNotes
+        let noteSource = userEditedWhileProcessing ? currentNotes : capturedNotes
+        var refinedNotes = enhancedLiveNotes(
+            notes: noteSource,
+            transcriptParagraphs: transcriptParagraphs
+        )
+        if !userEditedWhileProcessing {
+            refinedNotes = mergedNotesWithMoments(refinedNotes, moments: moments)
+        }
+
+        meetings[index].transcript = transcriptLines
+        meetings[index].transcriptVisibilityEnabled = !transcriptLines.isEmpty
+        meetings[index].rawNotes = refinedNotes
+        meetings[index].stage = "Organizing the final meeting notes"
+        refreshSummariesIfNeeded(at: index)
+
+        _ = await rewriteMeetingNotes(for: id)
+        guard let finalIndex = meetings.firstIndex(where: { $0.id == id }) else { return false }
+
+        meetings[finalIndex].status = .ready
+        let speakerCount = result.diarizationAvailable
+            ? Set(normalizedSegments.map { SpeakerIdentityResolver.canonicalKey(for: $0.speaker) })
+                .filter { !$0.isEmpty }
+                .count
+            : 0
+        if speakerCount > 0 {
+            meetings[finalIndex].stage = "Enhanced transcript ready · \(speakerCount) speaker\(speakerCount == 1 ? "" : "s")"
+        } else {
+            meetings[finalIndex].stage = "Enhanced transcript ready"
+        }
+        scheduleAIProcessing(for: id)
+        return true
+    }
+
+    func finishPendingMeetingWithLiveTranscript(_ id: Meeting.ID, message: String) {
+        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        meetings[index].status = .ready
+        meetings[index].stage = message
+        refreshSummariesIfNeeded(at: index)
+        scheduleAIProcessing(for: id)
+    }
+
+    @discardableResult
+    func finishPendingMeetingPreservingAudio(
+        _ id: Meeting.ID,
+        recordingURL: URL,
+        recovery: PendingMeetingRecoveryPayload?,
+        message: String
+    ) -> Bool {
+        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return false }
+        let fileName = RecordingFileStore.fileName(for: recordingURL)
+        if !meetings[index].audioRecordings.contains(where: { $0.fileName == fileName }) {
+            meetings[index].audioRecordings.append(AudioRecordingAttachment(
+                title: "\(meetings[index].title) recording",
+                createdAt: recovery?.capturedAt ?? meetings[index].when,
+                durationSeconds: recovery?.durationSeconds
+                    ?? max(1, (recovery?.durationMinutes ?? meetings[index].durationMinutes) * 60),
+                fileName: fileName,
+                transcript: recovery?.liveTranscript
+                    ?? meetings[index].transcript.map(\.text).joined(separator: " "),
+                linkedNote: meetings[index].rawNotes,
+                source: .noteAttachment,
+                fileSizeBytes: RecordingFileStore.fileSize(at: recordingURL)
+            ))
+        }
+        meetings[index].status = .ready
+        meetings[index].stage = message
+        refreshSummariesIfNeeded(at: index)
+        scheduleAIProcessing(for: id)
+        return true
     }
 
     func addVoiceRecording(
@@ -1951,6 +2474,14 @@ final class MeetingStore {
 
         let cleaned = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return false }
+        let previousRecording = meetings[meetingIndex].audioRecordings[recordingIndex]
+        let previousRecordingFingerprints = Set(
+            transcriptLines(
+                from: previousRecording,
+                fallbackSpeaker: "Voice note",
+                fallbackRole: previousRecording.source.title
+            ).map { normalizedFingerprint($0.text) }
+        )
         meetings[meetingIndex].audioRecordings[recordingIndex].transcript = cleaned
         meetings[meetingIndex].audioRecordings[recordingIndex].transcriptionSegments =
             SpeakerIdentityResolver.normalizedSegments(result.segments)
@@ -1963,7 +2494,11 @@ final class MeetingStore {
                 from: cleaned,
                 speaker: "Voice note",
                 role: result.provider.title
-            )
+            ).map { line in
+                var sourced = line
+                sourced.sourceRecordingID = recordingID
+                return sourced
+            }
         } else {
             recoveredLines = SpeakerIdentityResolver.normalizedSegments(result.segments).compactMap { segment in
                 let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1971,11 +2506,16 @@ final class MeetingStore {
                 return TranscriptLine(
                     speaker: segment.speaker,
                     role: result.provider.title,
-                    text: text
+                    text: text,
+                    sourceRecordingID: recordingID
                 )
             }
         }
 
+        meetings[meetingIndex].transcript.removeAll { line in
+            line.sourceRecordingID == recordingID
+                || previousRecordingFingerprints.contains(normalizedFingerprint(line.text))
+        }
         let existing = Set(meetings[meetingIndex].transcript.map { normalizedFingerprint($0.text) })
         meetings[meetingIndex].transcript.append(contentsOf: recoveredLines.filter {
             !existing.contains(normalizedFingerprint($0.text))
@@ -2004,22 +2544,34 @@ final class MeetingStore {
             notes: meeting.rawNotes,
             transcriptParagraphs: meeting.transcript.map { "\($0.speaker): \($0.text)" },
             style: style,
-            isPersonalCapture: meeting.isPersonalCapture
+            purpose: meeting.purpose.kind
         )
+
+        guard let currentIndex = meetings.firstIndex(where: { $0.id == id }) else {
+            return "Meeting was removed before note polishing finished."
+        }
+        let current = meetings[currentIndex]
+        guard current.rawNotes == meeting.rawNotes,
+              current.transcript == meeting.transcript,
+              current.title == meeting.title,
+              current.objective == meeting.objective
+        else {
+            return "Kept your newer edits instead of replacing them."
+        }
 
         switch outcome {
         case let .appleIntelligence(rewrittenNotes, message):
-            meetings[index].rawNotes = mergedNotesWithMoments(rewrittenNotes, moments: preservedMoments)
-            meetings[index].stage = "Apple Intelligence polished notes"
-            refreshSummariesIfNeeded(at: index)
+            meetings[currentIndex].rawNotes = mergedNotesWithMoments(rewrittenNotes, moments: preservedMoments)
+            meetings[currentIndex].stage = "Apple Intelligence polished notes"
+            refreshSummariesIfNeeded(at: currentIndex)
             return message
         case let .heuristic(rewrittenNotes, message):
             if !rewrittenNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                meetings[index].rawNotes = mergedNotesWithMoments(rewrittenNotes, moments: preservedMoments)
-                refreshSummariesIfNeeded(at: index)
+                meetings[currentIndex].rawNotes = mergedNotesWithMoments(rewrittenNotes, moments: preservedMoments)
+                refreshSummariesIfNeeded(at: currentIndex)
             }
-            if meetings[index].transcript.isEmpty == false {
-                meetings[index].stage = "Auto-polished from transcript"
+            if meetings[currentIndex].transcript.isEmpty == false {
+                meetings[currentIndex].stage = "Auto-polished from transcript"
             }
             return message
         case let .unavailable(message):
@@ -2067,11 +2619,13 @@ final class MeetingStore {
                 guard aiProcessingRunIDs[id] == runID else { return }
                 guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
                 var brief = result.brief
-                if !meeting.allowsMeetingSignalExtraction {
+                let inferredPurpose = brief.capturePurpose
+                    ?? MeetingPurposeClassifier.standard.classify(meeting).kind
+                if !inferredPurpose.allowsMeetingSignals {
                     brief.decisions = []
-                    brief.actions = []
                     brief.risks = []
                 }
+                if !inferredPurpose.allowsAccountabilityExtraction { brief.actions = [] }
                 // Store real content OR an explicit "doesn't make sense" verdict;
                 // an empty-but-sensible result adds nothing over the heuristic.
                 guard !brief.isEmpty || !brief.makesSense else { return }
@@ -2107,52 +2661,67 @@ final class MeetingStore {
 
     private func save() {
         let snapshot = meetings
-        let url = saveURL
-        let writer = persistenceWriter
         saveTask?.cancel()
         saveTask = Task(priority: .utility) { [weak self] in
             try? await Task.sleep(for: .milliseconds(250))
-            guard !Task.isCancelled else { return }
-            do {
-                try await writer.saveMeetings(snapshot, to: url)
-                let defaults = UserDefaults.standard
-                let preferenceKey = "scribeflow.automaticBackupsEnabled"
-                let automaticBackupsEnabled = defaults.object(forKey: preferenceKey) == nil
-                    ? true
-                    : defaults.bool(forKey: preferenceKey)
-                if automaticBackupsEnabled {
-                    _ = try? await BackupArchiveService.shared.saveAutomaticBackup(
-                        meetings: snapshot,
-                        schemaVersion: Self.currentSchemaVersion
-                    )
-                }
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
-                    self.lastSaveFailed = false
-                }
-            } catch {
-                storeLog.error("Failed to persist meetings: \(error.localizedDescription, privacy: .public)")
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
-                    self.lastSaveFailed = true
-                }
-            }
+            guard !Task.isCancelled, let self else { return }
+            await self.persist(snapshot)
         }
     }
 
-    private func refreshSummariesIfNeeded(at index: Int, applySupersededCommitments shouldApplySupersededCommitments: Bool = true) {
+    /// Commits the latest snapshot immediately when iOS moves the app out of
+    /// the foreground. This closes the debounce window without doing JSON work
+    /// on the main actor.
+    func flushPersistence() async {
+        saveTask?.cancel()
+        saveTask = nil
+        await persist(meetings)
+    }
+
+    private func persist(_ snapshot: [Meeting]) async {
+        do {
+            let didWrite = try await persistenceWriter.saveMeetings(snapshot, to: saveURL)
+            let defaults = UserDefaults.standard
+            let preferenceKey = "scribeflow.automaticBackupsEnabled"
+            let automaticBackupsEnabled = defaults.object(forKey: preferenceKey) == nil
+                ? true
+                : defaults.bool(forKey: preferenceKey)
+            if didWrite, automaticBackupsEnabled {
+                _ = try? await BackupArchiveService.shared.saveAutomaticBackup(
+                    meetings: snapshot,
+                    schemaVersion: Self.currentSchemaVersion
+                )
+            }
+            lastSaveFailed = false
+        } catch {
+            storeLog.error("Failed to persist meetings: \(error.localizedDescription, privacy: .public)")
+            lastSaveFailed = true
+        }
+    }
+
+    private func refreshSummariesIfNeeded(
+        at index: Int,
+        applySupersededCommitments shouldApplySupersededCommitments: Bool = true,
+        preserveAuthoredCommitments: Bool = false
+    ) {
         guard meetings.indices.contains(index) else { return }
         var meeting = meetings[index]
+        if !meeting.allowsAccountabilityExtraction {
+            for commitment in meeting.commitments where commitment.reminderID != nil {
+                ReminderScheduler.cancel(meetingID: meeting.id, commitmentID: commitment.id)
+            }
+        }
         meeting.summaries = generatedSummaries(for: meeting)
         meeting.evidenceItems = generatedEvidenceItems(for: meeting)
         // Regeneration must never erase a user's done/skipped state, owner, or
         // edited due date. Seed data keeps its authored copy and gains proof.
-        if isSeedLoad && !meeting.commitments.isEmpty {
+        if (isSeedLoad || preserveAuthoredCommitments) && !meeting.commitments.isEmpty {
             meeting.commitments = commitmentsAddingSourceProof(in: meeting)
         } else {
             meeting.commitments = generatedCommitmentsPreservingUserState(for: meeting)
         }
         meeting.sensitiveFlags = detectedSensitiveFlags(for: meeting)
+        meeting.derivedDataVersion = Self.currentDerivedDataVersion
         meetings[index] = meeting
         if shouldApplySupersededCommitments {
             applySupersededCommitments()
@@ -2168,6 +2737,7 @@ final class MeetingStore {
             meeting.commitments = commitmentsAddingSourceProof(in: meeting)
         }
         meeting.sensitiveFlags = detectedSensitiveFlags(for: meeting)
+        meeting.derivedDataVersion = Self.currentDerivedDataVersion
     }
 
     private func generatedSummaries(for meeting: Meeting) -> [TemplateSummary] {
@@ -2177,10 +2747,10 @@ final class MeetingStore {
                 eyebrow: "Needs input",
                 title: "This does not make sense. Please clarify.",
                 sections: [SummarySection(title: "Try this", bullets: [
-                    "Add clear notes — what was decided, who is doing what, and any deadlines — and it will reprocess."
+                    "Add a little more context about what happened, what you are thinking, or what you want to remember."
                 ])]
             )
-            return [.discovery, .exec, .manager].map { TemplateSummary(template: $0, summary: clarify) }
+            return NoteTemplate.allCases.map { TemplateSummary(template: $0, summary: clarify) }
         }
 
         let noteLines = meeting.rawNotes
@@ -2209,6 +2779,47 @@ final class MeetingStore {
             keyPoints = MeetingIntelligenceEngine.keyPoints(for: meeting, limit: 5)
         }
 
+        let purpose = meeting.purpose
+        if !allowsMeetingSignals {
+            var purposeSections: [SummarySection] = []
+            if !keyPoints.isEmpty {
+                purposeSections.append(SummarySection(
+                    title: purpose.kind.insightTitle,
+                    bullets: keyPoints
+                ))
+            }
+            if let brief = meeting.aiBrief {
+                purposeSections.append(contentsOf: brief.sections.prefix(4).map {
+                    SummarySection(title: $0.heading, bullets: $0.items)
+                })
+                if !brief.openQuestions.isEmpty {
+                    purposeSections.append(SummarySection(
+                        title: "Questions to keep",
+                        bullets: brief.openQuestions
+                    ))
+                }
+            }
+            if purposeSections.isEmpty, !noteLines.isEmpty {
+                purposeSections.append(SummarySection(title: "Notes", bullets: Array(noteLines.prefix(5))))
+            }
+
+            let modelSummary = meeting.aiBrief?.summary.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let purposeTitle: String
+            if !modelSummary.isEmpty {
+                purposeTitle = modelSummary
+            } else if let topic = purpose.topic {
+                purposeTitle = "This capture is about \(topic.lowercased())."
+            } else {
+                purposeTitle = "Your \(purpose.displayTitle.lowercased()), organized clearly."
+            }
+            let summary = MeetingSummary(
+                eyebrow: purpose.displayTitle,
+                title: purposeTitle,
+                sections: purposeSections
+            )
+            return NoteTemplate.allCases.map { TemplateSummary(template: $0, summary: summary) }
+        }
+
         func sections(_ decisionsTitle: String, _ stepsTitle: String, _ pointsTitle: String) -> [SummarySection] {
             var out: [SummarySection] = []
             if !decisions.isEmpty { out.append(SummarySection(title: decisionsTitle, bullets: decisions)) }
@@ -2222,9 +2833,12 @@ final class MeetingStore {
             return out
         }
 
-        let title = meeting.objective.isEmpty
-            ? "Summary of \(meeting.title)."
-            : "This meeting is centered on \(meeting.objective.lowercased())."
+        let modelSummary = meeting.aiBrief?.summary.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let title = !modelSummary.isEmpty
+            ? modelSummary
+            : (meeting.objective.isEmpty
+                ? "Summary of \(meeting.title)."
+                : "This meeting is centered on \(meeting.objective.lowercased()).")
 
         return [
             TemplateSummary(template: .discovery, summary: MeetingSummary(
@@ -2559,7 +3173,7 @@ final class MeetingStore {
         guard meeting.allowsAccountabilityExtraction else { return [] }
         // Prefer the model's action items when it has processed this meeting.
         if let brief = meeting.aiBrief, !brief.actions.isEmpty {
-            return brief.actions.map { a in
+            let generated = brief.actions.map { a in
                 let lower = a.task.lowercased()
                 let status: CommitmentStatus = (lower.contains("risk") || lower.contains("block")
                     || lower.contains("stuck") || lower.contains("at risk")) ? .atRisk : .open
@@ -2574,12 +3188,13 @@ final class MeetingStore {
                     sourceReferences: sourceReferences(for: a.task, in: meeting)
                 )
             }
+            return deduplicatedCommitments(generated)
         }
         // Single source of truth: the same text-aware extractor that powers the
         // intelligence report, so persisted commitments match what the user
         // reads — real owners (You / Team / named), due hints, and de-noised
         // action lines instead of any line containing "will" or "by".
-        return MeetingIntelligenceEngine.structuredActions(for: meeting, limit: 6).map { action in
+        let generated = MeetingIntelligenceEngine.structuredActions(for: meeting, limit: 6).map { action in
             let lower = action.text.lowercased()
             let status: CommitmentStatus = (lower.contains("risk")
                 || lower.contains("block")
@@ -2595,6 +3210,44 @@ final class MeetingStore {
                 sourceReferences: sourceReferences(for: action.text, in: meeting)
             )
         }
+        return deduplicatedCommitments(generated)
+    }
+
+    private func deduplicatedCommitments(_ commitments: [Commitment]) -> [Commitment] {
+        var accepted: [(commitment: Commitment, tokens: Set<String>)] = []
+        for commitment in commitments {
+            let tokens = significantTokens(in: commitment.statement)
+            guard !tokens.isEmpty else { continue }
+            if let index = accepted.firstIndex(where: { candidate in
+                let ownersCompatible = candidate.commitment.owner == "Owner not named"
+                    || commitment.owner == "Owner not named"
+                    || candidate.commitment.owner.caseInsensitiveCompare(commitment.owner) == .orderedSame
+                let overlap = Double(candidate.tokens.intersection(tokens).count)
+                let union = Double(candidate.tokens.union(tokens).count)
+                return ownersCompatible && union > 0 && overlap / union >= 0.72
+            }) {
+                var merged = accepted[index].commitment
+                if merged.owner == "Owner not named" { merged.owner = commitment.owner }
+                if merged.dueHint == nil { merged.dueHint = commitment.dueHint }
+                if merged.priority == nil { merged.priority = commitment.priority }
+                if merged.rationale == nil { merged.rationale = commitment.rationale }
+                for reference in commitment.sourceReferences where !merged.sourceReferences.contains(where: {
+                    $0.kind == reference.kind
+                        && $0.transcriptLineID == reference.transcriptLineID
+                        && $0.lineIndex == reference.lineIndex
+                        && $0.snippet == reference.snippet
+                }) {
+                    merged.sourceReferences.append(reference)
+                }
+                if commitment.statement.count > merged.statement.count {
+                    merged.statement = commitment.statement
+                }
+                accepted[index] = (merged, significantTokens(in: merged.statement))
+            } else {
+                accepted.append((commitment, tokens))
+            }
+        }
+        return accepted.map { $0.commitment }
     }
 
     private func generatedCommitmentsPreservingUserState(for meeting: Meeting) -> [Commitment] {
@@ -2655,14 +3308,23 @@ final class MeetingStore {
         if !segments.isEmpty {
             let role = recording.transcriptionProvider?.title ?? fallbackRole
             return segments.map {
-                TranscriptLine(speaker: $0.speaker, role: role, text: $0.text)
+                TranscriptLine(
+                    speaker: $0.speaker,
+                    role: role,
+                    text: $0.text,
+                    sourceRecordingID: recording.id
+                )
             }
         }
         return transcriptLines(
             from: recording.transcript,
             speaker: fallbackSpeaker,
             role: fallbackRole
-        )
+        ).map { line in
+            var sourced = line
+            sourced.sourceRecordingID = recording.id
+            return sourced
+        }
     }
 
     private func detectedSensitiveFlags(for meeting: Meeting) -> [SensitiveFlag] {
@@ -2869,15 +3531,18 @@ final class MeetingStore {
     }
 
     private func sourceConfidence(for references: [SourceReference]) -> SourceProofConfidence {
-        if references.contains(where: { $0.kind == .transcript || $0.kind == .audioTranscript }) {
+        if references.contains(where: { $0.matchStrength == .exact }) {
             return .confirmed
         }
-        if references.contains(where: { $0.kind == .note || $0.kind == .calendar }) {
+        if references.contains(where: { $0.matchStrength == .partial }) {
             return .likely
         }
-        if references.contains(where: { $0.kind == .meetingContext }) {
+        if references.contains(where: { $0.matchStrength == .contextual }) {
             return .inferred
         }
+        // Older saved references have no strength metadata. Preserve their
+        // usefulness without silently upgrading them to confirmed.
+        if !references.isEmpty { return .likely }
         return .needsReview
     }
 
@@ -2904,7 +3569,7 @@ final class MeetingStore {
 
     private func matchingTranscriptReferences(for text: String, in meeting: Meeting) -> [SourceReference] {
         meeting.transcript.enumerated().compactMap { index, line in
-            guard sourceTextMatches(text, line.text) else { return nil }
+            guard let matchStrength = sourceTextMatchStrength(text, line.text) else { return nil }
             return SourceReference(
                 meetingID: meeting.id,
                 meetingTitle: meeting.title,
@@ -2912,7 +3577,8 @@ final class MeetingStore {
                 snippet: line.text,
                 speaker: line.speaker,
                 transcriptLineID: line.id,
-                lineIndex: index
+                lineIndex: index,
+                matchStrength: matchStrength
             )
         }
         .prefix(2)
@@ -2928,14 +3594,15 @@ final class MeetingStore {
 
             return paragraphs.enumerated().compactMap { entry -> SourceReference? in
                 let (index, paragraph) = entry
-                guard sourceTextMatches(text, paragraph) else { return nil }
+                guard let matchStrength = sourceTextMatchStrength(text, paragraph) else { return nil }
                 return SourceReference(
                     meetingID: meeting.id,
                     meetingTitle: meeting.title,
                     kind: .audioTranscript,
                     snippet: paragraph,
                     speaker: recording.title,
-                    lineIndex: index
+                    lineIndex: index,
+                    matchStrength: matchStrength
                 )
             }
         }
@@ -2945,13 +3612,14 @@ final class MeetingStore {
 
     private func matchingNoteReferences(for text: String, in meeting: Meeting) -> [SourceReference] {
         noteLinesWithIndex(from: meeting.rawNotes).compactMap { index, line in
-            guard sourceTextMatches(text, line) else { return nil }
+            guard let matchStrength = sourceTextMatchStrength(text, line) else { return nil }
             return SourceReference(
                 meetingID: meeting.id,
                 meetingTitle: meeting.title,
                 kind: .note,
                 snippet: polishedSignalLine(line),
-                lineIndex: index
+                lineIndex: index,
+                matchStrength: matchStrength
             )
         }
         .prefix(1)
@@ -2961,14 +3629,15 @@ final class MeetingStore {
     private func calendarReference(for text: String, in meeting: Meeting) -> SourceReference? {
         guard meeting.calendarEventID != nil else { return nil }
         let calendarText = "\(meeting.title) \(meeting.attendees.joined(separator: " ")) \(meeting.objective)"
-        guard sourceTextMatches(text, calendarText) else { return nil }
+        guard let matchStrength = sourceTextMatchStrength(text, calendarText) else { return nil }
 
         let end = meeting.calendarEndDate.map { " - \($0.formatted(date: .omitted, time: .shortened))" } ?? ""
         return SourceReference(
             meetingID: meeting.id,
             meetingTitle: meeting.title,
             kind: .calendar,
-            snippet: "\(meeting.when.formatted(date: .abbreviated, time: .shortened))\(end)"
+            snippet: "\(meeting.when.formatted(date: .abbreviated, time: .shortened))\(end)",
+            matchStrength: matchStrength == .exact ? .exact : .contextual
         )
     }
 
@@ -2981,23 +3650,42 @@ final class MeetingStore {
     }
 
     private func sourceTextMatches(_ claim: String, _ source: String) -> Bool {
+        sourceTextMatchStrength(claim, source) != nil
+    }
+
+    private func sourceTextMatchStrength(_ claim: String, _ source: String) -> SourceMatchStrength? {
         let cleanedClaim = sentenceBody(claim).lowercased()
         let cleanedSource = sentenceBody(source).lowercased()
-        guard !cleanedClaim.isEmpty, !cleanedSource.isEmpty else { return false }
+        guard !cleanedClaim.isEmpty, !cleanedSource.isEmpty else { return nil }
+
+        let claimPolarity = polarityMarkers(in: cleanedClaim)
+        let sourcePolarity = polarityMarkers(in: cleanedSource)
+        guard claimPolarity == sourcePolarity else { return nil }
+
+        if normalizedFingerprint(cleanedClaim) == normalizedFingerprint(cleanedSource) {
+            return .exact
+        }
 
         if cleanedClaim.count >= 8,
            cleanedSource.contains(cleanedClaim) || cleanedClaim.contains(cleanedSource)
         {
-            return true
+            return .partial
         }
 
         let claimTokens = significantTokens(in: cleanedClaim)
         let sourceTokens = significantTokens(in: cleanedSource)
-        guard claimTokens.count >= 2, sourceTokens.count >= 2 else { return false }
+        guard claimTokens.count >= 3, sourceTokens.count >= 3 else { return nil }
 
         let overlap = claimTokens.intersection(sourceTokens).count
-        let requiredOverlap = max(2, Int(ceil(Double(claimTokens.count) * 0.5)))
-        return overlap >= requiredOverlap
+        let requiredOverlap = max(3, Int(ceil(Double(claimTokens.count) * 0.7)))
+        return overlap >= requiredOverlap ? .partial : nil
+    }
+
+    private func polarityMarkers(in text: String) -> Set<String> {
+        let markers = ["not", "no", "never", "without", "cannot", "can't", "won't", "isn't", "wasn't"]
+        return Set(markers.filter { marker in
+            text.range(of: #"\b\#(NSRegularExpression.escapedPattern(for: marker))\b"#, options: .regularExpression) != nil
+        })
     }
 
     private func extractedSignalLines(
@@ -3305,7 +3993,7 @@ final class MeetingStore {
         notes: String,
         transcriptParagraphs: [String],
         style: NoteRewriteStyle,
-        isPersonalCapture: Bool
+        purpose: CapturePurposeKind
     ) async -> NotePolishOutcome {
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *) {
@@ -3318,7 +4006,7 @@ final class MeetingStore {
                         notes: notes,
                         transcriptParagraphs: transcriptParagraphs,
                         style: style,
-                        isPersonalCapture: isPersonalCapture
+                        purpose: purpose
                     )
 
                     if !rewritten.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -3340,7 +4028,7 @@ final class MeetingStore {
         #endif
 
         if !transcriptParagraphs.isEmpty {
-            let rewritten = isPersonalCapture
+            let rewritten = purpose.isPersonalCapture
                 ? enhancedPersonalNotes(notes: notes, transcriptParagraphs: transcriptParagraphs)
                 : enhancedLiveNotes(notes: notes, transcriptParagraphs: transcriptParagraphs)
             return .heuristic(rewritten, "Saved with transcript-based note enhancement in \(style.title.lowercased()) style.")
@@ -3369,7 +4057,7 @@ private enum AppleIntelligenceNoteTransformer {
         notes: String,
         transcriptParagraphs: [String],
         style: NoteRewriteStyle,
-        isPersonalCapture: Bool
+        purpose: CapturePurposeKind
     ) async throws -> String {
         let styleInstruction: String
         switch style {
@@ -3378,14 +4066,18 @@ private enum AppleIntelligenceNoteTransformer {
         case .detailed:
             styleInstruction = "Add a little more situational detail while staying clean and readable."
         case .executive:
-            styleInstruction = "Write for an executive reader, emphasizing business impact, decisions, and risks."
+            styleInstruction = purpose.allowsMeetingSignals
+                ? "Write for an executive reader, emphasizing supported business impact and outcomes."
+                : "Lead with the main point and remove secondary detail without making the note sound corporate."
         case .actionFocused:
-            styleInstruction = "Emphasize owners, commitments, next steps, and follow-through."
+            styleInstruction = purpose.allowsAccountabilityExtraction
+                ? "Emphasize explicitly supported owners, commitments, and follow-through."
+                : "Emphasize only intentions the speaker explicitly stated, without creating tasks, owners, or deadlines."
         }
 
-        let purposeInstruction = isPersonalCapture
-            ? "This is a personal note. Organize the person's ideas and facts without turning them into meeting decisions, risks, owners, or tasks."
-            : "This is a meeting note. Prioritize confirmed outcomes, context, owners, and next steps when supported."
+        let purposeInstruction = purpose.allowsMeetingSignals
+            ? "This is a structured professional capture. Prioritize confirmed outcomes, context, owners, and next steps only when supported."
+            : "This is a \(purpose.title.lowercased()). Organize its ideas and facts naturally without turning them into meeting decisions, risks, owners, or tasks."
         let session = LanguageModelSession(instructions: """
         You are an expert notes editor.
         Rewrite rough notes into polished, professional notes that remain faithful to the capture.
@@ -3398,12 +4090,15 @@ private enum AppleIntelligenceNoteTransformer {
         Do not invent facts that aren't supported by the notes or transcript.
         """)
 
-        let transcriptContext = transcriptParagraphs
-            .suffix(10)
+        let transcriptContext = representativeContext(
+            from: transcriptParagraphs,
+            limit: 24,
+            purpose: purpose
+        )
             .joined(separator: "\n")
 
         let prompt = """
-        Meeting title: \(title)
+        Capture title: \(title)
         Objective: \(objective)
 
         Rough notes:
@@ -3412,12 +4107,58 @@ private enum AppleIntelligenceNoteTransformer {
         Transcript context:
         \(transcriptContext.isEmpty ? "No transcript context was captured." : transcriptContext)
 
-        Rewrite this into polished meeting notes now.
+        Rewrite this into polished, purpose-appropriate notes now.
         Return only bullet points.
         """
 
         let response = try await session.respond(to: prompt)
         return normalizeBullets(response.content)
+    }
+
+    private static func representativeContext(
+        from lines: [String],
+        limit: Int,
+        purpose: CapturePurposeKind
+    ) -> [String] {
+        guard lines.count > limit, limit > 1 else { return lines }
+
+        let cues: [String]
+        switch purpose {
+        case .meeting, .call:
+            cues = [
+                "decided", "decision", "will", "owner", "deadline", "due",
+                "next step", "risk", "blocker", "question", "agreed", "need"
+            ]
+        case .appointment:
+            cues = ["important", "instruction", "follow up", "symptom", "treatment", "question", "remember"]
+        case .learning:
+            cues = ["means", "because", "example", "important", "learned", "question", "concept"]
+        case .reflection, .idea, .personalPlan, .conversation, .personalNote:
+            cues = ["i feel", "i think", "i realized", "idea", "important", "remember", "because", "want", "plan"]
+        }
+        var selected: Set<Int> = [0, lines.count - 1]
+
+        let signalIndices = lines.indices.sorted { left, right in
+            let leftText = lines[left].lowercased()
+            let rightText = lines[right].lowercased()
+            let leftScore = cues.reduce(0) { $0 + (leftText.contains($1) ? 1 : 0) }
+            let rightScore = cues.reduce(0) { $0 + (rightText.contains($1) ? 1 : 0) }
+            if leftScore == rightScore { return left < right }
+            return leftScore > rightScore
+        }
+        for index in signalIndices where selected.count < max(2, limit / 2) {
+            selected.insert(index)
+        }
+
+        let spacing = Double(lines.count - 1) / Double(limit - 1)
+        for slot in 0..<limit where selected.count < limit {
+            selected.insert(Int((Double(slot) * spacing).rounded()))
+        }
+
+        for index in lines.indices where selected.count < limit {
+            selected.insert(index)
+        }
+        return selected.sorted().prefix(limit).map { lines[$0] }
     }
 
     private static func normalizeBullets(_ text: String) -> String {
@@ -3489,9 +4230,17 @@ private struct GeneratedSpeakerContribution {
 private struct GeneratedBrief {
     @Guide(description: "true if the input is real, meaningful notes (even if rough or misspelled); false if it is random, unclear, or meaningless gibberish like 'asdf 123 jkl'.")
     var makesSense: Bool
+    @Guide(description: "Classify the actual content as exactly one of: personalNote, reflection, idea, personalPlan, conversation, appointment, learning, meeting, or call. Use meeting/call only for structured professional collaboration, never just because the UI title says meeting.")
+    var capturePurpose: String
+    @Guide(description: "A concrete 2 to 6 word topic describing what the capture is about. Base it on the content, not the template. Empty only when the input does not make sense.")
+    var captureTopic: String
+    @Guide(description: "Classify the subject area as exactly one of: Personal, Work, Health, Education, Legal, Finance, or General.")
+    var captureDomain: String
+    @Guide(description: "Confidence in the capture-purpose classification: high, medium, or low.")
+    var purposeConfidence: String
     @Guide(description: "Specific points that are genuinely ambiguous and need the user to clarify. Do NOT guess these. Empty when everything is clear.")
     var needsClarification: [String]
-    @Guide(description: "A one or two sentence professional summary of the meeting.")
+    @Guide(description: "A one or two sentence plain-language summary tailored to the detected capture purpose. Never call it a meeting unless capturePurpose is meeting or call.")
     var summary: String
     @Guide(description: "Decisions that were actually made. Empty if none were made.")
     var decisions: [String]
@@ -3509,9 +4258,9 @@ private struct GeneratedBrief {
     var speakerContributions: [GeneratedSpeakerContribution]
     @Guide(description: "For each point the user wrote, the original text as the anchor plus added context. Keep the user's structure and order.")
     var enhancedNotes: [GeneratedEnhancedNote]
-    @Guide(description: "Sections specific to this meeting type that are NOT already a decision, action, question, or risk. Standup: Done / In progress. Sales: Customer needs / Budget / Stakeholders. 1:1: Wins / Looking ahead. Empty for a general meeting.")
+    @Guide(description: "Purpose-specific sections that do not duplicate other fields. Examples: reflection: Realizations / Patterns; idea: Core idea / Possibilities; appointment: Guidance / Instructions; learning: Concepts / Examples; work meeting: Done / In progress or Customer needs. Use natural headings for the actual content.")
     var sections: [GeneratedSection]
-    @Guide(description: "Classify the meeting into exactly one lens: general, coaching, sales, legal, medical, founder, or product. Use 'general' when none clearly fits.")
+    @Guide(description: "Choose an optional domain lens: general, coaching, sales, legal, medical, founder, or product. Use general when none fits; this does not determine capturePurpose.")
     var detectedType: String
 }
 
@@ -3524,13 +4273,11 @@ private enum AppleIntelligenceBriefExtractor {
     }
 
     static func extract(meeting: Meeting) async throws -> (brief: AIBriefData, detectedType: String) {
-        let purposeInstruction = meeting.isPersonalCapture
-            ? "This is a personal capture. Organize ideas and facts, but do not create meeting decisions, risks, owners, or action items unless they are explicitly written."
-            : "This is a meeting capture. Separate confirmed outcomes, commitments, unresolved questions, and context."
         let session = LanguageModelSession(instructions: """
-        You are an expert meeting-notes editor inside a professional app. Turn
-        rough notes and transcripts into a calm brief that answers what the note
-        owner needs next. Follow these rules strictly:
+        You are an expert capture-understanding editor inside a private notes app.
+        First determine what the words are actually about, then turn rough notes
+        and transcripts into the most useful brief for that purpose. Follow these
+        rules strictly:
 
         1. NEVER invent anything. Use only what the input (and transcript) supports.
         2. If the input is random, unclear, or meaningless gibberish, set
@@ -3538,21 +4285,37 @@ private enum AppleIntelligenceBriefExtractor {
            meaning from nonsense.
         3. Preserve important details, but rank them instead of repeating them.
         4. Use short sentences, familiar words, and one idea per bullet.
-        5. Put each piece of information where it belongs: summary, decisions,
-           actions (with the responsible person and deadline when stated),
-           openQuestions, risks/problems, keyPoints, and type-specific sections.
-        6. Language: simple, sharp, professional.
-        7. Remove repetition, but keep every important meaning.
-        8. The summary is the bottom line. whatMatters is the smallest ranked set
+        5. Classify capturePurpose from the content itself. Titles, templates,
+           workspaces, and UI labels are weak hints and may be wrong.
+        6. Tailor the structure to capturePurpose:
+           - reflection: realizations, themes, and details worth remembering.
+           - idea: core concept, possibilities, constraints, and questions.
+           - personalPlan: priorities and personal planning details in sections.
+           - conversation: topics, viewpoints, and memorable details.
+           - appointment: facts, guidance, instructions, and questions to remember.
+           - learning: concepts, explanations, examples, and takeaways.
+           - meeting/call: decisions, actions, owners, risks, and follow-through.
+           - personalNote: clear facts and useful context without work structure.
+        7. For every purpose except meeting or call, decisions, actions, and risks
+           MUST be empty. Put supported information in keyPoints, whatMatters, or
+           purpose-specific sections instead. Never manufacture accountability.
+        8. Put each piece of information in one place. Do not repeat a point across
+           summary, keyPoints, whatMatters, and sections.
+        9. Language: simple, natural, and appropriate for the content. Do not make
+           personal speech sound corporate.
+        10. Remove repetition, but keep every important meaning.
+        11. The summary is the bottom line. whatMatters is the smallest ranked set
            of facts the owner needs to understand the note in seconds.
-        9. If a point is genuinely unclear, put it in needsClarification — do not
+        12. If a point is genuinely unclear, put it in needsClarification — do not
            guess it.
-        10. Correct spelling and grammar. Write tasks as short imperative phrases.
+        13. Correct spelling and grammar. Write tasks as short imperative phrases.
             If a category has nothing, return it empty.
-        11. Never merge speakers. For speakerContributions, use only the supplied
+        14. Never merge speakers. For speakerContributions, use only the supplied
             speaker label and cite one numbered transcript line that directly
             supports the sentence. If labels are not distinct, return none.
-        12. \(purposeInstruction)
+        15. An appointment may contain important instructions, and a personal plan
+            may contain intended steps. Keep those in descriptive sections; do not
+            turn them into work tasks, owners, risks, or commitments.
 
         For enhancedNotes, treat the user's own bullet points as the skeleton:
         keep each one VERBATIM as the anchor (in their order) and add a short
@@ -3560,7 +4323,7 @@ private enum AppleIntelligenceBriefExtractor {
         Never reword the anchor. Leave detail empty when there is nothing to add.
         """)
 
-        let transcriptEvidence = selectedTranscriptEvidence(from: meeting.transcript, limit: 18)
+        let transcriptEvidence = selectedTranscriptEvidence(from: meeting.transcript, limit: 24)
         let evidenceLineIndices = Set(transcriptEvidence.map { $0.0 })
         let transcriptContext = transcriptEvidence.map { lineIndex, line in
             let lineNumber = lineIndex + 1
@@ -3578,10 +4341,8 @@ private enum AppleIntelligenceBriefExtractor {
         )
         let prompt = """
         Capture title: \(meeting.title.isEmpty ? "(untitled)" : meeting.title)
-        Objective: \(meeting.objective.isEmpty ? "Understand and organize the capture." : meeting.objective)
-        Brief focus: \(meeting.selectedTemplate.title) — \(meeting.selectedTemplate.aiHint)
-        Domain lens: \(meeting.contextMode.title) — \(meeting.contextMode.aiHint)
-        Capture purpose: \(meeting.isPersonalCapture ? "Personal note" : "Meeting")
+        User objective: \(meeting.objective.isEmpty ? "Understand and organize the capture." : meeting.objective)
+        User-confirmed purpose: \(meeting.purposeOverride?.title ?? "Automatic — infer from the evidence")
         Distinct transcript labels: \(detectedSpeakers)
 
         Notes (may contain typos and shorthand):
@@ -3590,13 +4351,20 @@ private enum AppleIntelligenceBriefExtractor {
         Numbered transcript evidence:
         \(transcriptContext.isEmpty ? "(none)" : transcriptContext)
 
-        Produce the structured brief for the note owner now.
+        Infer the real purpose, topic, and domain from this evidence, then produce
+        the purpose-appropriate structured brief for the note owner.
         """
 
         let response = try await session.respond(to: prompt, generating: GeneratedBrief.self)
         let g = response.content
         let clean: (String) -> String = { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let detected = clean(g.detectedType).lowercased()
+        let fallbackPurpose = MeetingPurposeClassifier.standard.classify(meeting).kind
+        let capturePurpose = meeting.purposeOverride
+            ?? CapturePurposeKind(modelValue: clean(g.capturePurpose))
+            ?? fallbackPurpose
+        let allowsMeetingSignals = capturePurpose.allowsMeetingSignals
+        let allowsAccountability = capturePurpose.allowsAccountabilityExtraction
 
         // Nonsense input → a clear verdict, nothing manufactured (rule 2).
         guard g.makesSense else {
@@ -3632,39 +4400,160 @@ private enum AppleIntelligenceBriefExtractor {
                     snippet: sourceLine.text,
                     speaker: speaker,
                     transcriptLineID: sourceLine.id,
-                    lineIndex: lineIndex
+                    lineIndex: lineIndex,
+                    matchStrength: .exact
                 )]
             )
         }
 
+        let actions = deduplicatedActions(
+            g.actions
+                .map {
+                    AIActionItem(
+                        task: clean($0.task),
+                        owner: clean($0.owner),
+                        due: clean($0.due),
+                        priority: clean($0.priority).lowercased(),
+                        why: clean($0.why)
+                    )
+                }
+                .filter { !$0.task.isEmpty }
+        )
+
         let brief = AIBriefData(
+            capturePurpose: capturePurpose,
+            captureTopic: clean(g.captureTopic),
+            captureDomain: normalizedDomain(clean(g.captureDomain), for: capturePurpose),
+            purposeConfidence: normalizedPurposeConfidence(clean(g.purposeConfidence)),
             summary: clean(g.summary),
-            decisions: g.decisions.map(clean).filter { !$0.isEmpty },
-            actions: g.actions
-                .map { AIActionItem(task: clean($0.task), owner: clean($0.owner), due: clean($0.due),
-                                    priority: clean($0.priority).lowercased(), why: clean($0.why)) }
-                .filter { !$0.task.isEmpty },
-            openQuestions: g.openQuestions.map(clean).filter { !$0.isEmpty },
-            keyPoints: g.keyPoints.map(clean).filter { !$0.isEmpty },
-            risks: g.risks.map(clean).filter { !$0.isEmpty },
-            whatMatters: Array(g.whatMatters.map(clean).filter { !$0.isEmpty }.prefix(4)),
+            decisions: allowsMeetingSignals
+                ? deduplicatedStrings(g.decisions.map(clean))
+                : [],
+            actions: allowsAccountability ? actions : [],
+            openQuestions: deduplicatedStrings(g.openQuestions.map(clean)),
+            keyPoints: deduplicatedStrings(g.keyPoints.map(clean)),
+            risks: allowsMeetingSignals
+                ? deduplicatedStrings(g.risks.map(clean))
+                : [],
+            whatMatters: Array(deduplicatedStrings(g.whatMatters.map(clean)).prefix(4)),
             speakerContributions: Array(speakerContributions.prefix(6)),
             enhancedNotes: g.enhancedNotes
                 .map { EnhancedNoteData(anchor: clean($0.anchor), detail: clean($0.detail)) }
                 .filter { !$0.anchor.isEmpty },
-            sections: g.sections
-                .map { AIBriefSection(heading: clean($0.heading), items: $0.items.map(clean).filter { !$0.isEmpty }) }
-                .filter { !$0.heading.isEmpty && !$0.items.isEmpty },
+            sections: purposeAppropriateSections(g.sections, purpose: capturePurpose, clean: clean),
             makesSense: true,
-            needsClarification: g.needsClarification.map(clean).filter { !$0.isEmpty }
+            needsClarification: deduplicatedStrings(g.needsClarification.map(clean))
         )
         return (brief, detected)
+    }
+
+    private static func normalizedDomain(
+        _ value: String,
+        for purpose: CapturePurposeKind
+    ) -> String {
+        let allowed = ["personal", "work", "health", "education", "legal", "finance", "general"]
+        let normalized = value.lowercased()
+        if let match = allowed.first(where: { normalized == $0 }) {
+            return match.capitalized
+        }
+        if purpose == .learning { return "Education" }
+        return purpose.allowsMeetingSignals ? "Work" : "Personal"
+    }
+
+    private static func normalizedPurposeConfidence(_ value: String) -> String {
+        switch value.lowercased() {
+        case "high", "verified", "certain": return "high"
+        case "medium", "strong", "likely": return "medium"
+        default: return "low"
+        }
+    }
+
+    private static func purposeAppropriateSections(
+        _ sections: [GeneratedSection],
+        purpose: CapturePurposeKind,
+        clean: (String) -> String
+    ) -> [AIBriefSection] {
+        let forbiddenPersonalHeadings = [
+            "action", "commitment", "decision", "deliverable", "owner", "risk", "blocker"
+        ]
+
+        return sections.compactMap { section in
+            let heading = clean(section.heading)
+            let lowerHeading = heading.lowercased()
+            guard !heading.isEmpty else { return nil }
+            if !purpose.allowsMeetingSignals,
+               forbiddenPersonalHeadings.contains(where: lowerHeading.contains) {
+                return nil
+            }
+
+            let items = deduplicatedStrings(section.items.map(clean))
+            guard !items.isEmpty else { return nil }
+            return AIBriefSection(heading: heading, items: items)
+        }
+    }
+
+    private static func deduplicatedStrings(_ values: [String]) -> [String] {
+        var accepted: [(text: String, tokens: Set<String>)] = []
+        for value in values {
+            let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            let tokens = semanticTokens(in: text)
+            guard !text.isEmpty, !tokens.isEmpty else { continue }
+            guard !accepted.contains(where: {
+                $0.text.caseInsensitiveCompare(text) == .orderedSame
+                    || semanticSimilarity($0.tokens, tokens) >= 0.76
+            }) else { continue }
+            accepted.append((text, tokens))
+        }
+        return accepted.map { $0.text }
+    }
+
+    private static func deduplicatedActions(_ values: [AIActionItem]) -> [AIActionItem] {
+        var accepted: [(action: AIActionItem, tokens: Set<String>)] = []
+        for value in values {
+            let tokens = semanticTokens(in: value.task)
+            guard !tokens.isEmpty else { continue }
+            if let index = accepted.firstIndex(where: { candidate in
+                let ownersCompatible = candidate.action.owner.isEmpty
+                    || value.owner.isEmpty
+                    || candidate.action.owner.caseInsensitiveCompare(value.owner) == .orderedSame
+                return ownersCompatible && semanticSimilarity(candidate.tokens, tokens) >= 0.72
+            }) {
+                var merged = accepted[index].action
+                if merged.owner.isEmpty { merged.owner = value.owner }
+                if merged.due.isEmpty { merged.due = value.due }
+                if merged.priority.isEmpty { merged.priority = value.priority }
+                if merged.why.isEmpty { merged.why = value.why }
+                if value.task.count > merged.task.count { merged.task = value.task }
+                accepted[index] = (merged, semanticTokens(in: merged.task))
+            } else {
+                accepted.append((value, tokens))
+            }
+        }
+        return accepted.map { $0.action }
+    }
+
+    private static func semanticTokens(in text: String) -> Set<String> {
+        let ignored = Set([
+            "the", "and", "for", "with", "from", "that", "this", "then", "will",
+            "should", "could", "would", "please", "need", "needs", "task", "action"
+        ])
+        let tokens = text
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { $0.count > 2 && !ignored.contains($0) }
+        return Set(tokens)
+    }
+
+    private static func semanticSimilarity(_ lhs: Set<String>, _ rhs: Set<String>) -> Double {
+        guard !lhs.isEmpty, !rhs.isEmpty else { return 0 }
+        return Double(lhs.intersection(rhs).count) / Double(lhs.union(rhs).count)
     }
 
     private static func selectedTranscriptEvidence(
         from lines: [TranscriptLine],
         limit: Int
     ) -> [(Int, TranscriptLine)] {
+        guard limit > 1 else { return lines.first.map { [(0, $0)] } ?? [] }
         guard lines.count > limit else {
             return lines.enumerated().map { ($0.offset, $0.element) }
         }
@@ -3679,11 +4568,32 @@ private enum AppleIntelligenceBriefExtractor {
             if selectedIndices.count == limit { break }
         }
 
+        let cues = [
+            "decided", "decision", "will", "owner", "deadline", "due",
+            "next step", "risk", "blocker", "question", "agreed", "need"
+        ]
+        let signalIndices = lines.indices.sorted { left, right in
+            let leftText = lines[left].text.lowercased()
+            let rightText = lines[right].text.lowercased()
+            let leftScore = cues.reduce(0) { $0 + (leftText.contains($1) ? 1 : 0) }
+            let rightScore = cues.reduce(0) { $0 + (rightText.contains($1) ? 1 : 0) }
+            if leftScore == rightScore { return left < right }
+            return leftScore > rightScore
+        }
+        for index in signalIndices where selectedIndices.count < max(2, limit / 2) {
+            selectedIndices.insert(index)
+        }
+
+        let spacing = Double(lines.count - 1) / Double(limit - 1)
+        for slot in 0..<limit where selectedIndices.count < limit {
+            selectedIndices.insert(Int((Double(slot) * spacing).rounded()))
+        }
+
         for index in lines.indices.reversed() where selectedIndices.count < limit {
             selectedIndices.insert(index)
         }
 
-        return selectedIndices.sorted().map { ($0, lines[$0]) }
+        return selectedIndices.sorted().prefix(limit).map { ($0, lines[$0]) }
     }
 
     private static func bounded(_ text: String, maxCharacters: Int) -> String {
@@ -3731,13 +4641,33 @@ private enum AppleIntelligenceMeetingAssistant {
 }
 
 @available(iOS 26.0, *)
+@Generable
+private struct GeneratedGroundedWorkspaceBullet {
+    @Guide(description: "One concise claim that directly answers the user's question using only the supplied source excerpts.")
+    var text: String
+    @Guide(description: "One or more exact source IDs from the supplied evidence, such as S1 or S3. Never create an ID.")
+    var sourceIDs: [String]
+}
+
+@available(iOS 26.0, *)
+@Generable
+private struct GeneratedGroundedWorkspaceAnswer {
+    @Guide(description: "A concise ordered set of non-duplicated, source-supported answer bullets. Return an empty array when the evidence cannot answer the question.")
+    var bullets: [GeneratedGroundedWorkspaceBullet]
+}
+
+@available(iOS 26.0, *)
+private enum WorkspaceGroundingError: Error {
+    case noSupportedClaims
+}
+
+@available(iOS 26.0, *)
 private enum AppleIntelligenceWorkspaceAssistant {
     static func answer(
-        meetings: [Meeting],
+        sources: [RAGResult],
         prompt: String,
-        includeTranscripts: Bool,
         modelSelection: ChatModelSelection
-    ) async throws -> String {
+    ) async throws -> WorkspaceAnswer {
         let styleInstruction: String
         switch modelSelection {
         case .auto:
@@ -3750,45 +4680,74 @@ private enum AppleIntelligenceWorkspaceAssistant {
 
         let session = LanguageModelSession(instructions: """
         You are a precise workspace meeting assistant inside a professional note-taking app.
-        Answer using only the meetings provided.
+        Answer using only the source excerpts provided.
         Be concise, structured, and practical.
         Surface patterns, decisions, action items, blockers, and useful prep notes when relevant.
-        Include source references at the end of each bullet, like [source: Meeting title, transcript 3] or [source: Meeting title, note].
+        Every answer bullet must cite one or more exact source IDs supplied with the excerpts.
+        Omit any claim that the excerpts do not directly support.
+        Do not treat a generated summary or prior answer as evidence.
         \(styleInstruction)
-        Do not invent facts that are not grounded in the meeting content.
+        Do not invent facts, source IDs, owners, dates, decisions, or causal relationships.
         """)
 
-        let limitedMeetings = Array(meetings.prefix(includeTranscripts ? 25 : 40))
-        let context = limitedMeetings.map { meeting in
-            let notes = meeting.rawNotes.trimmingCharacters(in: .whitespacesAndNewlines)
-            let transcript = includeTranscripts
-                ? meeting.transcript.map { "[\($0.speaker)]: \($0.text)" }.suffix(6).joined(separator: "\n")
-                : "Transcripts not included for this query."
-
-            return """
-            Title: \(meeting.title)
-            Workspace: \(meeting.workspace)
-            When: \(meeting.when.formatted(date: .abbreviated, time: .shortened))
-            Objective: \(meeting.objective)
-            Notes:
-            \(notes.isEmpty ? "No saved notes." : notes)
-            Transcript excerpts:
-            \(transcript.isEmpty ? "No transcript excerpts." : transcript)
+        let context = sources.map { source in
+            """
+            \(source.sourceID)
+            Meeting: \(source.meetingTitle)
+            Source: \(source.sourceLabel)
+            Excerpt: \(source.snippet)
             """
         }.joined(separator: "\n\n---\n\n")
 
         let request = """
-        Scope: \(includeTranscripts ? "Recent meetings with transcript excerpts (up to 25 meetings)." : "Recent meetings using notes and summaries (up to 40 meetings).")
-
-        Meetings:
+        Allowed evidence:
         \(context)
 
-        Task:
+        User question:
         \(prompt)
         """
 
-        let response = try await session.respond(to: request)
-        return response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let response = try await session.respond(
+            to: request,
+            generating: GeneratedGroundedWorkspaceAnswer.self
+        )
+        let allowedIDs = Set(sources.map(\.sourceID))
+        var usedIDs: Set<String> = []
+        var seenClaims: [Set<String>] = []
+        let maximumBullets = modelSelection == .deep ? 8 : 5
+        var rendered: [String] = []
+
+        for bullet in response.content.bullets {
+            guard rendered.count < maximumBullets else { break }
+            let text = bullet.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let sourceIDs = bullet.sourceIDs
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() }
+                .filter { allowedIDs.contains($0) }
+            guard !text.isEmpty, !sourceIDs.isEmpty else { continue }
+
+            let tokens = semanticTokens(in: text)
+            guard !tokens.isEmpty else { continue }
+            guard !seenClaims.contains(where: { semanticSimilarity(tokens, $0) >= 0.78 }) else {
+                continue
+            }
+            seenClaims.append(tokens)
+            usedIDs.formUnion(sourceIDs)
+            rendered.append("- \(text) [source: \(sourceIDs.joined(separator: ", "))]")
+        }
+
+        guard !rendered.isEmpty else { throw WorkspaceGroundingError.noSupportedClaims }
+        let usedSources = sources.filter { usedIDs.contains($0.sourceID) }
+        guard !usedSources.isEmpty else { throw WorkspaceGroundingError.noSupportedClaims }
+        return WorkspaceAnswer(text: rendered.joined(separator: "\n"), citations: usedSources)
+    }
+
+    private static func semanticTokens(in text: String) -> Set<String> {
+        Set(LocalRAG.tokenize(text))
+    }
+
+    private static func semanticSimilarity(_ lhs: Set<String>, _ rhs: Set<String>) -> Double {
+        guard !lhs.isEmpty, !rhs.isEmpty else { return 0 }
+        return Double(lhs.intersection(rhs).count) / Double(lhs.union(rhs).count)
     }
 }
 #endif

@@ -2,11 +2,13 @@ import SwiftUI
 
 @main
 struct ScribeflowApp: App {
+    @UIApplicationDelegateAdaptor(ScribeflowAppDelegate.self) private var appDelegate
     @State private var store = MeetingStore()
     @State private var authSession = AuthSessionStore()
     @State private var showingSplash = true
     @AppStorage("hasCompletedLaunchOnboarding") private var hasCompletedLaunchOnboarding = false
     @AppStorage(AppearancePreference.storageKey) private var appearanceRaw = AppearancePreference.system.rawValue
+    @AppStorage("scribeflow.requireAppUnlock") private var requireAppUnlock = false
 
     init() {
         NotificationRouter.shared.configure()
@@ -21,12 +23,17 @@ struct ScribeflowApp: App {
                     #if DEBUG
                     ContentView()
                         .environment(store)
-                    #else
-                    if hasCompletedLaunchOnboarding {
-                        AuthGateView {
-                            ContentView()
-                                .environment(store)
-                        }
+                      #else
+                      if hasCompletedLaunchOnboarding {
+                          if requireAppUnlock {
+                              AuthGateView {
+                                  ContentView()
+                                      .environment(store)
+                              }
+                          } else {
+                              ContentView()
+                                  .environment(store)
+                          }
                     } else {
                         LaunchOnboardingView {
                             hasCompletedLaunchOnboarding = true
@@ -46,6 +53,10 @@ struct ScribeflowApp: App {
                         .transition(.opacity)
                         .zIndex(10)
                 }
+            }
+            .task {
+                MeetingProcessingCoordinator.shared.attach(store)
+                await MeetingProcessingCoordinator.shared.resume(using: store)
             }
         }
         .commands {

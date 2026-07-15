@@ -57,9 +57,10 @@ enum PeopleEngine {
     ]
 
     static func intelligence(for name: String, in meetings: [Meeting]) -> PersonIntelligence {
-        let firstName = name.components(separatedBy: " ").first?.lowercased() ?? name.lowercased()
         let personMeetings = meetings.filter { meeting in
-            meeting.attendees.contains { $0.lowercased().hasPrefix(firstName) }
+            MeetingIdentityResolver.people(in: meeting).contains {
+                MeetingIdentityResolver.likelySamePerson(name, $0)
+            }
         }.sorted { $0.when > $1.when }
 
         let open = personMeetings
@@ -96,17 +97,9 @@ enum PeopleEngine {
     }
 
     static func allPeople(from meetings: [Meeting]) -> [String] {
-        var seen = Set<String>()
-        var result: [String] = []
-        for meeting in meetings {
-            for attendee in meeting.attendees {
-                let name = attendee.trimmingCharacters(in: .whitespaces)
-                guard name.count >= 2, !seen.contains(name) else { continue }
-                seen.insert(name)
-                result.append(name)
-            }
-        }
-        return result.sorted()
+        MeetingIdentityResolver
+            .deduplicated(meetings.flatMap { MeetingIdentityResolver.people(in: $0) })
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 }
 

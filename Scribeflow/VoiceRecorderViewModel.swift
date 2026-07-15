@@ -91,7 +91,7 @@ final class VoiceRecorderViewModel {
         guard count > 0 else { return nil }
         return transcriptionResult.diarizationAvailable
             ? "\(count) voice\(count == 1 ? "" : "s") separated"
-            : "Single speaker track"
+            : "Speaker separation was not available"
     }
 
     var permissionTitle: String {
@@ -302,6 +302,11 @@ final class VoiceRecorderViewModel {
     }
 
     private func generateTranscript(for completed: CompletedVoiceRecording, retrying: Bool) async {
+        recorder.configureTranscriptionContext(
+            title: title,
+            workspace: workspace,
+            notes: noteText
+        )
         var job = transcriptionJob ?? TranscriptionRetryJob(
             recordingID: completed.id,
             fileName: RecordingFileStore.fileName(for: completed.fileURL)
@@ -331,7 +336,7 @@ final class VoiceRecorderViewModel {
             } else if result.diarizationAvailable, speakerCount > 0 {
                 statusMessage = "Transcript ready · \(speakerCount) voice\(speakerCount == 1 ? "" : "s") separated"
             } else {
-                statusMessage = "Transcript ready via \(result.provider.title) · single speaker track"
+                statusMessage = "Transcript ready via \(result.provider.title) · speaker separation unavailable"
             }
         } catch {
             job.markFailed(error.localizedDescription)
@@ -351,7 +356,10 @@ final class VoiceRecorderViewModel {
         meterTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                self.elapsedSeconds = Int(round(self.recorder.currentTime))
+                let elapsed = Int(round(self.recorder.currentTime))
+                if self.elapsedSeconds != elapsed {
+                    self.elapsedSeconds = elapsed
+                }
                 self.inputLevel = self.recorder.normalizedPower
                 try? await Task.sleep(for: .milliseconds(100))
             }

@@ -17,6 +17,7 @@ struct TodayView: View {
     @Environment(MeetingStore.self) private var store
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
+    let isActive: Bool
     @Binding var selectedMeetingID: Meeting.ID?
     /// Open the unified capture surface in either `.record` or `.type` mode.
     let onCapture: (CaptureView.Mode) -> Void
@@ -31,17 +32,26 @@ struct TodayView: View {
     @State private var showingPalette = false
     @State private var snapshotBuilder = TodaySnapshotBuilder()
     @State private var upcomingEvents: [UpcomingEvent] = []
+    @State private var savedPrepEvent: UpcomingEvent?
     @State private var calendarAccessState: CalendarAccessState = .notDetermined
     @State private var isRequestingCalendarAccess = false
     @State private var imminentEvent: UpcomingEvent?
     @State private var showingHowItWorks = false
     @State private var showingInvestorPresentation = false
     @State private var dismissedEventIDs: Set<String> = []
+    @State private var prepPresentation: EventPrepPresentation?
+    @State private var showsWorkspaceFeed = false
     @AppStorage("homeHeroStyle") private var heroStyleRaw = HeroStyle.briefing.rawValue
     @AppStorage("scribeflow.currentUserEmail") private var currentUserEmail = ""
     @AppStorage("scribeflow.investorDemoMode") private var investorDemoMode = false
 
-    private var heroStyle: HeroStyle { HeroStyle(rawValue: heroStyleRaw) ?? .briefing }
+    private var heroStyle: HeroStyle {
+        #if DEBUG
+        HeroStyle(rawValue: heroStyleRaw) ?? .briefing
+        #else
+        .briefing
+        #endif
+    }
 
     @State private var heroModelCache = HeroModel(today: 0, open: 0, streak: 0, attendees: [])
 
@@ -59,17 +69,18 @@ struct TodayView: View {
         var nextTitle: String?
         var nextMeta: String?
         var attendees: [String] = []
-        if let ev = upcomingEvents.first {
+        if let ev = upcomingEvents.first ?? savedPrepEvent {
             nextTitle = ev.title
             let mins = Int(ev.startDate.timeIntervalSinceNow / 60)
             let countdown = mins <= 0 ? "now" : (mins < 60 ? "in \(mins) min" : "in \(mins / 60)h")
             nextMeta = "\(countdown) · \(ev.isVideoCall ? "Video call" : (ev.location ?? "In person"))"
+            attendees = ev.attendees
         } else if let move = snap.nextMove {
             nextTitle = move.title
             nextMeta = move.subtitle
             attendees = snap.nextMoveAttendees
         }
-        if attendees.isEmpty { attendees = snap.recentHomeMeetings.first?.attendees ?? [] }
+        if attendees.isEmpty { attendees = snap.continueMeeting?.attendees ?? [] }
 
         return HeroModel(
             today: snap.todayCaptureCount,
@@ -84,7 +95,11 @@ struct TodayView: View {
     }
 
     private func heroPrep() {
-        if let ev = upcomingEvents.first { prepareNote(for: ev) } else { onCapture(.type) }
+        if let event = upcomingEvents.first ?? savedPrepEvent {
+            showPrep(for: event)
+        } else {
+            onCapture(.type)
+        }
     }
 
     @ViewBuilder
@@ -134,16 +149,23 @@ struct TodayView: View {
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
 
+                #if DEBUG
                 if investorDemoMode {
                     demoModeBanner
                         .motionEntrance(step: 0, active: hasAnimatedIn)
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
+                #endif
 
                 heroView
                     .id(heroStyle)
                     .motionEntrance(step: 0, active: hasAnimatedIn)
                     .animation(AppMotion.smooth, value: heroStyle)
+
+                if !snap.processingMeetings.isEmpty {
+                    HomeProcessingSection(meetings: snap.processingMeetings)
+                        .motionEntrance(step: 1, active: hasAnimatedIn)
+                }
 
                 if calendarAccessState == .notDetermined {
                     CalendarAccessPromptCard(isLoading: isRequestingCalendarAccess) {
@@ -159,10 +181,10 @@ struct TodayView: View {
                     .motionEntrance(step: 1, active: hasAnimatedIn)
                 }
 
-                if let event = upcomingEvents.first {
+                if let event = upcomingEvents.first ?? savedPrepEvent {
                     EditorialUpNext(
                         event: event,
-                        onPrep: { prepareNote(for: event) },
+                        onPrep: { showPrep(for: event) },
                         onCapture: { captureForEvent(event) }
                     )
                     .motionEntrance(step: 2, active: hasAnimatedIn)
@@ -188,31 +210,38 @@ struct TodayView: View {
                         .motionEntrance(step: 2, active: hasAnimatedIn)
                 }
 
-                if upcomingEvents.count > 1 {
-                    HomeAgendaSection(events: Array(upcomingEvents.dropFirst()),
-                                      onPrep: prepareNote(for:),
-                                      onCapture: captureForEvent(_:))
-                        .motionEntrance(step: 3, active: hasAnimatedIn)
-                }
+                if hasWorkspaceFeed {
+                    workspaceFeedToggle
 
-                if !pinnedMeetings.isEmpty {
-                    HomePinnedSection(meetings: pinnedMeetings, onSeeAll: onTasksTap)
-                        .motionEntrance(step: 3, active: hasAnimatedIn)
-                }
+                    if showsWorkspaceFeed {
+                        VStack(alignment: .leading, spacing: 22) {
+                            if upcomingEvents.count > 1 {
+                                HomeAgendaSection(
+                                    events: Array(upcomingEvents.dropFirst()),
+                                    onPrep: showPrep(for:),
+                                    onCapture: captureForEvent(_:)
+                                )
+                            }
 
-                if !snap.openLoops.isEmpty {
-                    EditorialInbox(
-                        loops: snap.openLoops,
-                        total: snap.totalOpenLoopsCount,
-                        onResolve: resolveOpenLoop(meetingID:),
-                        onSeeAll: onTasksTap
-                    )
-                    .motionEntrance(step: 4, active: hasAnimatedIn)
-                }
+                            if !pinnedMeetings.isEmpty {
+                                HomePinnedSection(meetings: pinnedMeetings, onSeeAll: onTasksTap)
+                            }
 
-                if !snap.recentHomeMeetings.isEmpty {
-                    EditorialRecent(meetings: snap.recentHomeMeetings, onSeeAll: onTasksTap)
-                        .motionEntrance(step: 5, active: hasAnimatedIn)
+                            if !snap.openLoops.isEmpty {
+                                EditorialInbox(
+                                    loops: snap.openLoops,
+                                    total: snap.totalOpenLoopsCount,
+                                    onResolve: resolveOpenLoop(meetingID:),
+                                    onSeeAll: onTasksTap
+                                )
+                            }
+
+                            if !snap.recentHomeMeetings.isEmpty {
+                                EditorialRecent(meetings: snap.recentHomeMeetings, onSeeAll: onTasksTap)
+                            }
+                        }
+                        .transition(.opacity)
+                    }
                 }
 
                 if isHomeEffectivelyEmpty {
@@ -302,6 +331,16 @@ struct TodayView: View {
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
         }
+        .sheet(item: $prepPresentation) { presentation in
+            EventPrepBriefSheet(
+                event: presentation.event,
+                brief: presentation.brief,
+                hasPreparedNote: presentation.hasPreparedNote,
+                onOpenNote: { prepareNote(for: presentation.event) },
+                onRecord: { captureForEvent(presentation.event) },
+                onOpenSource: openMeeting(_:)
+            )
+        }
         .fullScreenCover(isPresented: $showingInvestorPresentation) {
             InvestorPresentationView()
         }
@@ -311,18 +350,23 @@ struct TodayView: View {
         .onAppear {
             hasAnimatedIn = true
         }
-        .task(id: store.revision) {
+        .task(id: isActive ? store.revision : nil) {
+            guard isActive else { return }
+            try? await Task.sleep(for: .milliseconds(90))
+            guard !Task.isCancelled else { return }
             await refreshSnapshot(from: store.meetings)
         }
-        .task {
+        .task(id: isActive) {
+            guard isActive else { return }
             await refreshUpcoming()
             await runAutoRecordWatch()
         }
         .onChange(of: scenePhase) { _, phase in
-            guard phase == .active else { return }
+            guard isActive, phase == .active else { return }
             Task { await refreshUpcoming() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
+            guard isActive else { return }
             Task { await refreshUpcoming() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .scribeflowDockScrollToTop)) { note in
@@ -536,11 +580,6 @@ struct TodayView: View {
                     startPoint: .topLeading, endPoint: .center
                 )
             )
-            Circle()
-                .fill(RadialGradient(colors: [AppPalette.accent.opacity(0.16), .clear], center: .center, startRadius: 0, endRadius: 130))
-                .frame(width: 250, height: 250)
-                .offset(x: 110, y: -90)
-                .blur(radius: 16)
         }
         .clipShape(shape)
         .allowsHitTesting(false)
@@ -772,6 +811,7 @@ struct TodayView: View {
     /// because iOS will not let an app silently start recording the mic.
     private func runAutoRecordWatch() async {
         let clock = ContinuousClock()
+        var ticks = 0
         while !Task.isCancelled {
             do {
                 try await clock.sleep(for: .seconds(30))
@@ -779,7 +819,15 @@ struct TodayView: View {
                 return
             }
             guard !Task.isCancelled else { return }
-            await refreshUpcoming()
+            refreshImminent()
+            rebuildHeroModel()
+            ticks += 1
+            // EventKit change notifications handle normal edits. This fallback
+            // refresh catches provider-side changes without querying the event
+            // database every 30 seconds while Today is open.
+            if ticks.isMultiple(of: 10) {
+                await refreshUpcoming()
+            }
         }
     }
 
@@ -888,6 +936,60 @@ struct TodayView: View {
     //   5. homeActionInbox  — top 3 open follow-ups, single-tap done
     //   6. homeEmptyHint    — gentle onboarding card when there's literally nothing else
 
+    private var hasWorkspaceFeed: Bool {
+        upcomingEvents.count > 1
+            || !pinnedMeetings.isEmpty
+            || !snap.openLoops.isEmpty
+            || !snap.recentHomeMeetings.isEmpty
+    }
+
+    private var workspaceFeedSummary: String {
+        var parts: [String] = []
+        let laterCount = max(0, upcomingEvents.count - 1)
+        if laterCount > 0 { parts.append("\(laterCount) later") }
+        if snap.totalOpenLoopsCount > 0 { parts.append("\(snap.totalOpenLoopsCount) open") }
+        if !pinnedMeetings.isEmpty { parts.append("\(pinnedMeetings.count) pinned") }
+        if !snap.recentHomeMeetings.isEmpty { parts.append("\(snap.recentHomeMeetings.count) recent") }
+        return parts.joined(separator: " · ")
+    }
+
+    private var workspaceFeedToggle: some View {
+        Button {
+            HapticEngine.tap(.light)
+            withAnimation(.easeOut(duration: 0.16)) {
+                showsWorkspaceFeed.toggle()
+            }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "rectangle.stack")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(AppPalette.accent)
+                    .frame(width: 28, height: 28)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("More today")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(AppPalette.ink)
+                    if !workspaceFeedSummary.isEmpty {
+                        Text(workspaceFeedSummary)
+                            .font(.caption)
+                            .foregroundStyle(AppPalette.secondaryInk)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 8)
+                Image(systemName: showsWorkspaceFeed ? "chevron.up" : "chevron.down")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(AppPalette.tertiaryInk)
+            }
+            .padding(.vertical, 12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overlay(alignment: .top) { EditorialRule() }
+        .overlay(alignment: .bottom) { EditorialRule() }
+        .accessibilityLabel(showsWorkspaceFeed ? "Hide more from today" : "Show more from today")
+    }
+
     private var isHomeEffectivelyEmpty: Bool {
         upcomingEvents.isEmpty
             && snap.recentHomeMeetings.isEmpty
@@ -903,6 +1005,13 @@ struct TodayView: View {
     }
 
     private func prepareNote(for event: UpcomingEvent) {
+        if let existing = store.meeting(linkedTo: event) {
+            openMeeting(existing.id)
+            toast = ToastItem(message: "Opening your prepared note", icon: "doc.text.fill")
+            HapticEngine.tap(.light)
+            return
+        }
+
         let id = store.addMeeting(
             title: event.title,
             workspace: event.isVideoCall ? "Calls" : "Meetings",
@@ -917,9 +1026,23 @@ struct TodayView: View {
             calendarStartDate: event.startDate,
             calendarEndDate: event.endDate
         )
-        selectedMeetingID = id
+        openMeeting(id)
         toast = ToastItem(message: "Your prep note's ready", icon: "checkmark.circle.fill")
         HapticEngine.notify(.success)
+    }
+
+    private func showPrep(for event: UpcomingEvent) {
+        HapticEngine.tap(.light)
+        prepPresentation = EventPrepPresentation(
+            event: event,
+            brief: store.eventPrepBrief(for: event),
+            hasPreparedNote: store.meeting(linkedTo: event) != nil
+        )
+    }
+
+    private func openMeeting(_ id: Meeting.ID) {
+        selectedMeetingID = id
+        NotificationCenter.default.post(name: .scribeflowOpenMeeting, object: id)
     }
 
     private func captureForEvent(_ event: UpcomingEvent) {
@@ -1026,6 +1149,10 @@ struct TodayView: View {
         let nextSnapshot = await snapshotBuilder.make(from: meetings)
         guard !Task.isCancelled else { return }
         snap = nextSnapshot
+        savedPrepEvent = meetings
+            .compactMap(CalendarEventSnapshot.init(preparedMeeting:))
+            .filter { $0.endDate > .now }
+            .min { $0.startDate < $1.startDate }
         rebuildHeroModel()
     }
 }
@@ -1039,6 +1166,7 @@ private actor TodaySnapshotBuilder {
 }
 
 struct TodaySnapshot {
+    var processingMeetings: [Meeting] = []
     var recentHomeMeetings: [Meeting] = []
     var dashboardCollections: [SmartCollectionCard] = []
     var openLoops: [OpenLoop] = []
@@ -1063,14 +1191,18 @@ struct TodaySnapshot {
 
     init(meetings: [Meeting]) {
         let recentMeetings = meetings.sorted(by: Meeting.sortDescending)
-        let recent = Array(recentMeetings.prefix(5))
-        let allOpenLoops = Self.openLoops(from: recentMeetings)
+        processingMeetings = Array(recentMeetings.filter { $0.status == .processing }.prefix(4))
+        let readyMeetings = recentMeetings.filter { $0.status != .processing }
+        let recent = Array(readyMeetings.prefix(5))
+        let pinned = Array(readyMeetings.filter(\.isPinned).prefix(3))
+        let pinnedIDs = Set(pinned.map(\.id))
+        let allOpenLoops = Self.openLoops(from: readyMeetings)
         let windows = Self.rollingCaptureWindows(in: meetings)
-        recentHomeMeetings = recent
+        recentHomeMeetings = Array(readyMeetings.filter { !pinnedIDs.contains($0.id) }.prefix(4))
         dashboardCollections = Self.smartCollections(from: recentMeetings)
-        openLoops = Array(allOpenLoops.prefix(100))
-        dailyPlan = Self.dailyPlan(from: meetings)
-        pinnedMeetings = Array(recentMeetings.filter(\.isPinned).prefix(5))
+        openLoops = Array(allOpenLoops.prefix(3))
+        dailyPlan = Self.dailyPlan(from: readyMeetings)
+        pinnedMeetings = pinned
         totalOpenLoopsCount = allOpenLoops.count
         continueMeeting = recent.first
         trailingMeetings = Array(recent.dropFirst())
@@ -1087,7 +1219,7 @@ struct TodaySnapshot {
         let nonZeroDurations = meetings.map(\.durationMinutes).filter { $0 > 0 }
         avgDurationMinutes = nonZeroDurations.isEmpty ? 0 : nonZeroDurations.reduce(0, +) / nonZeroDurations.count
         nextMove = Self.nextMove(
-            from: recentMeetings,
+            from: readyMeetings,
             openLoops: allOpenLoops,
             todayCount: todayCaptureCount,
             streak: longestStreakDays
@@ -1290,7 +1422,7 @@ struct TodaySnapshot {
         case .all:
             meetings
         case .followUp:
-            meetings.filter { $0.status != .shared }
+            meetings.filter { $0.status != .shared && $0.status != .processing }
         case .calls:
             meetings.filter(\.isCallMeeting)
         case .pinned:
@@ -1356,6 +1488,104 @@ struct TodaySnapshot {
         return results
     }
 
+}
+
+private struct HomeProcessingSection: View {
+    @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
+    let meetings: [Meeting]
+    @State private var notificationPermission = ScribeflowNotificationPermission.notDetermined
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            EditorialSectionHead(title: "Processing")
+            VStack(spacing: 0) {
+                ForEach(Array(meetings.enumerated()), id: \.element.id) { index, meeting in
+                    NavigationLink(value: meeting.id) {
+                        HStack(spacing: 13) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(AppPalette.gold)
+                                .frame(width: 28, height: 28)
+
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(meeting.title.isEmpty ? "Meeting" : meeting.title)
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(AppPalette.ink)
+                                    .lineLimit(1)
+                                Text(meeting.stage)
+                                    .font(.caption)
+                                    .foregroundStyle(AppPalette.secondaryInk)
+                                    .lineLimit(1)
+                            }
+
+                            Spacer(minLength: 8)
+                            Image(systemName: "chevron.right")
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(AppPalette.tertiaryInk)
+                        }
+                        .padding(.vertical, 11)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    if index < meetings.count - 1 {
+                        EditorialRule()
+                    }
+                }
+            }
+
+            notificationFooter
+                .font(.caption2.weight(.medium))
+        }
+        .padding(.vertical, 4)
+        .task {
+            notificationPermission = await ScribeflowNotificationAuthorization.shared.currentPermission()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task {
+                notificationPermission = await ScribeflowNotificationAuthorization.shared.currentPermission()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var notificationFooter: some View {
+        switch notificationPermission {
+        case .enabled:
+            Label("Safe to leave · Scribeflow will alert you when ready", systemImage: "bell.badge.fill")
+                .foregroundStyle(AppPalette.tertiaryInk)
+        case .quiet:
+            Button { openNotificationSettings() } label: {
+                Label("Alerts are delivered quietly · Adjust in Settings", systemImage: "bell.slash")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(AppPalette.gold)
+        case .denied:
+            Button { openNotificationSettings() } label: {
+                Label("Notifications are off · Open Settings", systemImage: "bell.slash.fill")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(AppPalette.coral)
+        case .notDetermined:
+            Button {
+                Task {
+                    notificationPermission = await ScribeflowNotificationAuthorization.shared.requestIfNeeded()
+                }
+            } label: {
+                Label("Enable ready alerts", systemImage: "bell.badge")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(AppPalette.accent)
+        }
+    }
+
+    private func openNotificationSettings() {
+        if let url = URL(string: UIApplication.openSettingsURLString) {
+            openURL(url)
+        }
+    }
 }
 
 // MARK: - Next move

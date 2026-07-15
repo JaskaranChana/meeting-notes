@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MeetingsView: View {
     @Environment(MeetingStore.self) private var store
+    let isActive: Bool
     @Binding var selectedMeetingID: Meeting.ID?
     let onAskTap: () -> Void
     @Binding var toast: ToastItem?
@@ -26,7 +27,8 @@ struct MeetingsView: View {
             collection: .all,
             typeFilter: typeFilter,
             dateFilter: dateFilter,
-            sortMode: sortMode
+            sortMode: sortMode,
+            segment: segment
         )
     }
 
@@ -132,7 +134,8 @@ struct MeetingsView: View {
         .onAppear {
             hasAnimatedIn = true
         }
-        .task(id: snapshotKey) {
+        .task(id: isActive ? snapshotKey : nil) {
+            guard isActive else { return }
             await refreshSnapshot(for: snapshotKey)
         }
         .confirmationDialog(
@@ -195,10 +198,9 @@ struct MeetingsView: View {
     }
 
     private func refreshSnapshot(for key: LibrarySnapshotKey) async {
-        if key.hasSearchQuery {
-            try? await Task.sleep(for: .milliseconds(140))
-            guard !Task.isCancelled else { return }
-        }
+        let delay: Duration = key.hasSearchQuery ? .milliseconds(140) : .milliseconds(70)
+        try? await Task.sleep(for: delay)
+        guard !Task.isCancelled else { return }
 
         let meetings = store.meetings
         let nextSnapshot = await snapshotBuilder.snapshot(for: key, meetings: meetings)
@@ -229,7 +231,7 @@ struct MeetingsView: View {
         var month: [Meeting] = []
         var earlier: [Meeting] = []
 
-        for m in snapshot.libraryResults where segment.matches(m) {
+        for m in snapshot.libraryResults {
             if m.when >= startOfToday        { today.append(m) }
             else if m.when >= weekAgo        { week.append(m) }
             else if m.when >= monthAgo       { month.append(m) }
@@ -287,13 +289,7 @@ struct MeetingsView: View {
     }
 
     private var segmentCounts: [LibrarySegment: Int] {
-        var counts: [LibrarySegment: Int] = [:]
-        for meeting in snapshot.libraryResults {
-            for seg in LibrarySegment.allCases where seg.matches(meeting) {
-                counts[seg, default: 0] += 1
-            }
-        }
-        return counts
+        snapshot.segmentCounts
     }
 
     private var librarySkeletonRow: some View {

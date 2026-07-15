@@ -101,6 +101,8 @@ struct ContentView: View {
             }
             if phase == .active {
                 drainPendingCaptureIntents()
+            } else {
+                Task { await store.flushPersistence() }
             }
         }
         .onChange(of: store.lastSaveFailed) { _, failed in
@@ -162,6 +164,7 @@ struct ContentView: View {
         .task { drainPendingCaptureIntents() }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
+            await MeetingProcessingCoordinator.shared.resume(using: store)
             await TranscriptionRecoveryCoordinator.shared.processPending(using: store)
         }
         .sensoryFeedback(.success, trigger: toast?.id)
@@ -233,6 +236,7 @@ struct ContentView: View {
             TabView(selection: $selectedTab) {
                 NavigationStack {
                     TodayView(
+                        isActive: selectedTab == .home,
                         selectedMeetingID: $selectedMeetingID,
                         onCapture: { mode in captureMode = mode },
                         onSettingsTap: { showingSettings = true },
@@ -246,6 +250,7 @@ struct ContentView: View {
 
                 NavigationStack(path: $libraryPath) {
                     MeetingsView(
+                        isActive: selectedTab == .library,
                         selectedMeetingID: $selectedMeetingID,
                         onAskTap: { activateRootTab(.ask) },
                         toast: $toast
@@ -256,6 +261,7 @@ struct ContentView: View {
 
                 NavigationStack {
                     ActionItemsView(
+                        isActive: selectedTab == .tasks,
                         selectedMeetingID: $selectedMeetingID,
                         toast: $toast
                     )
@@ -265,6 +271,7 @@ struct ContentView: View {
 
                 NavigationStack {
                     MeetingCalendarView(
+                        isActive: selectedTab == .calendar,
                         selectedMeetingID: $selectedMeetingID,
                         onCapture: { mode in captureMode = mode },
                         toast: $toast

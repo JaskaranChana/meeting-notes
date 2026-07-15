@@ -3,6 +3,8 @@ import SwiftUI
 struct RecordingPrivacyView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(TranscriptionProviderFactory.remoteTranscriptionConsentKey) private var remoteTranscriptionEnabled = false
+    @AppStorage(EnhancedSpeechSettings.enabledKey) private var enhancedLocalTranscriptionEnabled = true
+    @AppStorage(LocalSpeakerDiarizationSettings.enabledKey) private var localSpeakerDiarizationEnabled = true
     @State private var hasAnimatedIn = false
     @State private var showingRemoteTranscriptionConfirmation = false
 
@@ -43,9 +45,19 @@ struct RecordingPrivacyView: View {
                         .padding(.trailing, 20)
                     }
 
+                    enhancedLocalTranscriptionControl
+                        .motionEntrance(step: 5, active: hasAnimatedIn)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 28)
+
+                    localSpeakerDiarizationControl
+                        .motionEntrance(step: 6, active: hasAnimatedIn)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 12)
+
                     if TranscriptionProviderFactory.isBackendConfigured {
                         remoteTranscriptionControl
-                            .motionEntrance(step: 5, active: hasAnimatedIn)
+                            .motionEntrance(step: 7, active: hasAnimatedIn)
                             .padding(.horizontal, 20)
                             .padding(.top, 28)
                     }
@@ -174,8 +186,8 @@ struct RecordingPrivacyView: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(AppPalette.ink)
                 Text(remoteTranscriptionEnabled
-                     ? "Enabled for future recordings. Turn it off anytime to use Apple Speech only."
-                     : "Off by default. Audio remains on device and uses Apple Speech.")
+                     ? "Enabled for future recordings. Turn it off anytime to keep transcription on device."
+                     : "Off by default. Audio remains on device and uses enhanced local speech with Apple fallback.")
                     .font(.caption)
                     .foregroundStyle(AppPalette.secondaryInk)
                     .fixedSize(horizontal: false, vertical: true)
@@ -197,6 +209,70 @@ struct RecordingPrivacyView: View {
             .tint(AppPalette.accent)
             .accessibilityLabel("Remote transcription")
             .accessibilityValue(remoteTranscriptionEnabled ? "Enabled" : "Disabled")
+        }
+        .padding(16)
+        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(AppPalette.border.opacity(0.4), lineWidth: 0.7))
+    }
+
+    private var localSpeakerDiarizationControl: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: "person.wave.2.fill")
+                .font(.body.weight(.semibold))
+                .foregroundStyle(localSpeakerDiarizationEnabled ? AppPalette.accent : AppPalette.secondaryInk)
+                .frame(width: 34, height: 34)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("On-device speaker separation")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(AppPalette.ink)
+                Text(localSpeakerDiarizationEnabled
+                     ? "Enabled. The speaker model is cached after its first use; meeting audio remains local."
+                     : "Off. Transcripts keep one shared speaker label unless a configured provider separates voices.")
+                    .font(.caption)
+                    .foregroundStyle(AppPalette.secondaryInk)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 8)
+
+            Toggle("", isOn: $localSpeakerDiarizationEnabled)
+                .labelsHidden()
+                .tint(AppPalette.accent)
+                .accessibilityLabel("On-device speaker separation")
+                .accessibilityValue(localSpeakerDiarizationEnabled ? "Enabled" : "Disabled")
+        }
+        .padding(16)
+        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(AppPalette.border.opacity(0.4), lineWidth: 0.7))
+    }
+
+    private var enhancedLocalTranscriptionControl: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: "waveform.badge.magnifyingglass")
+                .font(.body.weight(.semibold))
+                .foregroundStyle(enhancedLocalTranscriptionEnabled ? AppPalette.accent : AppPalette.secondaryInk)
+                .frame(width: 34, height: 34)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Enhanced on-device transcript")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(AppPalette.ink)
+                Text(enhancedLocalTranscriptionEnabled
+                     ? "Enabled for English meetings. A compact speech model is cached after first use and runs after Save."
+                     : "Off. Final transcripts use Apple Speech.")
+                    .font(.caption)
+                    .foregroundStyle(AppPalette.secondaryInk)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 8)
+
+            Toggle("", isOn: $enhancedLocalTranscriptionEnabled)
+                .labelsHidden()
+                .tint(AppPalette.accent)
+                .accessibilityLabel("Enhanced on-device transcript")
+                .accessibilityValue(enhancedLocalTranscriptionEnabled ? "Enabled" : "Disabled")
         }
         .padding(16)
         .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))

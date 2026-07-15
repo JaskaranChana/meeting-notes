@@ -2,6 +2,7 @@ import Foundation
 
 enum MeetingStatus: String, Codable, CaseIterable, Identifiable {
     case live
+    case processing
     case ready
     case shared
 
@@ -11,6 +12,8 @@ enum MeetingStatus: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .live:
             "Live"
+        case .processing:
+            "Processing"
         case .ready:
             "Ready"
         case .shared:
@@ -295,6 +298,7 @@ struct TranscriptLine: Codable, Hashable, Identifiable {
     var speaker: String
     var role: String
     var text: String
+    var sourceRecordingID: AudioRecordingAttachment.ID? = nil
 }
 
 struct AIResponse: Codable, Hashable, Identifiable {
@@ -827,6 +831,15 @@ enum SensitiveFlag: String, Codable, CaseIterable, Identifiable {
 /// on the meeting so the synchronous UI can read it; nil when the model wasn't
 /// available, in which case the heuristic engine is used instead.
 struct AIBriefData: Codable, Hashable {
+    /// What the capture actually is, inferred from its words rather than the
+    /// screen it came from. Nil for briefs saved before purpose understanding.
+    var capturePurpose: CapturePurposeKind? = nil
+    /// A short content-derived subject, such as "Sleep routine" or "Atlas launch".
+    var captureTopic: String = ""
+    /// Broad area such as Personal, Work, Health, Education, Legal, or Finance.
+    var captureDomain: String = ""
+    /// Model confidence: high, medium, or low. Kept as text for forward-compatible models.
+    var purposeConfidence: String = "low"
     var summary: String = ""
     var decisions: [String] = []
     var actions: [AIActionItem] = []
@@ -853,6 +866,10 @@ struct AIBriefData: Codable, Hashable {
     var needsClarification: [String] = []
 
     init(
+        capturePurpose: CapturePurposeKind? = nil,
+        captureTopic: String = "",
+        captureDomain: String = "",
+        purposeConfidence: String = "low",
         summary: String = "",
         decisions: [String] = [],
         actions: [AIActionItem] = [],
@@ -866,6 +883,10 @@ struct AIBriefData: Codable, Hashable {
         makesSense: Bool = true,
         needsClarification: [String] = []
     ) {
+        self.capturePurpose = capturePurpose
+        self.captureTopic = captureTopic
+        self.captureDomain = captureDomain
+        self.purposeConfidence = purposeConfidence
         self.summary = summary
         self.decisions = decisions
         self.actions = actions
@@ -881,6 +902,10 @@ struct AIBriefData: Codable, Hashable {
     }
 
     private enum CodingKeys: String, CodingKey {
+        case capturePurpose
+        case captureTopic
+        case captureDomain
+        case purposeConfidence
         case summary
         case decisions
         case actions
@@ -897,6 +922,10 @@ struct AIBriefData: Codable, Hashable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        capturePurpose = try container.decodeIfPresent(CapturePurposeKind.self, forKey: .capturePurpose)
+        captureTopic = try container.decodeIfPresent(String.self, forKey: .captureTopic) ?? ""
+        captureDomain = try container.decodeIfPresent(String.self, forKey: .captureDomain) ?? ""
+        purposeConfidence = try container.decodeIfPresent(String.self, forKey: .purposeConfidence) ?? "low"
         summary = try container.decodeIfPresent(String.self, forKey: .summary) ?? ""
         decisions = try container.decodeIfPresent([String].self, forKey: .decisions) ?? []
         actions = try container.decodeIfPresent([AIActionItem].self, forKey: .actions) ?? []
@@ -916,6 +945,10 @@ struct AIBriefData: Codable, Hashable {
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(capturePurpose, forKey: .capturePurpose)
+        try container.encode(captureTopic, forKey: .captureTopic)
+        try container.encode(captureDomain, forKey: .captureDomain)
+        try container.encode(purposeConfidence, forKey: .purposeConfidence)
         try container.encode(summary, forKey: .summary)
         try container.encode(decisions, forKey: .decisions)
         try container.encode(actions, forKey: .actions)
@@ -931,7 +964,8 @@ struct AIBriefData: Codable, Hashable {
     }
 
     var isEmpty: Bool {
-        summary.isEmpty && decisions.isEmpty && actions.isEmpty
+        capturePurpose == nil && captureTopic.isEmpty && captureDomain.isEmpty
+            && summary.isEmpty && decisions.isEmpty && actions.isEmpty
             && openQuestions.isEmpty && keyPoints.isEmpty && risks.isEmpty
             && whatMatters.isEmpty && speakerContributions.isEmpty
             && enhancedNotes.isEmpty && sections.isEmpty && needsClarification.isEmpty
@@ -995,9 +1029,13 @@ struct Meeting: Codable, Hashable, Identifiable {
     var score: MeetingScore? = nil
     var audioRecordings: [AudioRecordingAttachment] = []
     var aiBrief: AIBriefData? = nil
+    var purposeOverride: CapturePurposeKind? = nil
     var calendarEventID: String? = nil
     var calendarStartDate: Date? = nil
     var calendarEndDate: Date? = nil
+    /// Version of the deterministic summaries, evidence, and commitments
+    /// persisted on this row. Older rows migrate lazily after launch.
+    var derivedDataVersion: Int = 0
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -1028,9 +1066,11 @@ struct Meeting: Codable, Hashable, Identifiable {
         case score
         case audioRecordings
         case aiBrief
+        case purposeOverride
         case calendarEventID
         case calendarStartDate
         case calendarEndDate
+        case derivedDataVersion
     }
 
     init(
@@ -1062,9 +1102,11 @@ struct Meeting: Codable, Hashable, Identifiable {
         score: MeetingScore? = nil,
         audioRecordings: [AudioRecordingAttachment] = [],
         aiBrief: AIBriefData? = nil,
+        purposeOverride: CapturePurposeKind? = nil,
         calendarEventID: String? = nil,
         calendarStartDate: Date? = nil,
-        calendarEndDate: Date? = nil
+        calendarEndDate: Date? = nil,
+        derivedDataVersion: Int = 0
     ) {
         self.id = id
         self.title = title
@@ -1094,9 +1136,11 @@ struct Meeting: Codable, Hashable, Identifiable {
         self.score = score
         self.audioRecordings = audioRecordings
         self.aiBrief = aiBrief
+        self.purposeOverride = purposeOverride
         self.calendarEventID = calendarEventID
         self.calendarStartDate = calendarStartDate
         self.calendarEndDate = calendarEndDate
+        self.derivedDataVersion = derivedDataVersion
     }
 
     init(from decoder: Decoder) throws {
@@ -1132,9 +1176,11 @@ struct Meeting: Codable, Hashable, Identifiable {
         // decode, drop it (the heuristic takes over and it regenerates) rather
         // than failing the whole meeting load.
         aiBrief = (try? container.decodeIfPresent(AIBriefData.self, forKey: .aiBrief)) ?? nil
+        purposeOverride = try container.decodeIfPresent(CapturePurposeKind.self, forKey: .purposeOverride)
         calendarEventID = try container.decodeIfPresent(String.self, forKey: .calendarEventID)
         calendarStartDate = try container.decodeIfPresent(Date.self, forKey: .calendarStartDate)
         calendarEndDate = try container.decodeIfPresent(Date.self, forKey: .calendarEndDate)
+        derivedDataVersion = try container.decodeIfPresent(Int.self, forKey: .derivedDataVersion) ?? 0
     }
 
     func encode(to encoder: Encoder) throws {
@@ -1167,9 +1213,11 @@ struct Meeting: Codable, Hashable, Identifiable {
         try container.encodeIfPresent(score, forKey: .score)
         try container.encode(audioRecordings, forKey: .audioRecordings)
         try container.encodeIfPresent(aiBrief, forKey: .aiBrief)
+        try container.encodeIfPresent(purposeOverride, forKey: .purposeOverride)
         try container.encodeIfPresent(calendarEventID, forKey: .calendarEventID)
         try container.encodeIfPresent(calendarStartDate, forKey: .calendarStartDate)
         try container.encodeIfPresent(calendarEndDate, forKey: .calendarEndDate)
+        try container.encode(derivedDataVersion, forKey: .derivedDataVersion)
     }
 }
 
@@ -1774,6 +1822,74 @@ extension Meeting {
             selectedTemplate: .exec,
             selectedPromptID: nil,
             isPinned: true
+        ),
+        Meeting(
+            title: "Helio launch readiness",
+            workspace: "Product",
+            when: .now.addingTimeInterval(-6 * 86400),
+            durationMinutes: 42,
+            attendees: ["You", "Avery Chen", "Mina Patel", "Jordan Lee"],
+            status: .ready,
+            stage: "Captured and ready to review",
+            objective: "Confirm launch criteria, client-safe messaging, and support coverage before the final review.",
+            rawNotes: """
+            - Decision: Helio stays on the planned launch date if the final approval checklist is complete
+            - Avery will share the final launch criteria before the review
+            - Mina will confirm which wording is safe for the client recap
+            - Risk: support coverage for the launch window is still unconfirmed
+            - Can Jordan confirm the escalation owner before launch day?
+            """,
+            transcript: [
+                TranscriptLine(speaker: "Avery Chen", role: "Product", text: "I will share the final launch criteria before the review so the go or no-go decision is explicit."),
+                TranscriptLine(speaker: "Mina Patel", role: "Marketing", text: "I will confirm which wording can go into the client-safe recap."),
+                TranscriptLine(speaker: "Jordan Lee", role: "Operations", text: "Support coverage is the remaining risk. I still need the escalation owner."),
+                TranscriptLine(speaker: "You", role: "Lead", text: "We will keep the launch date if the checklist is complete at the review."),
+            ],
+            summaries: [
+                TemplateSummary(
+                    template: .exec,
+                    summary: MeetingSummary(
+                        eyebrow: "Launch readiness",
+                        title: "Helio can hold its launch date once criteria, recap wording, and support coverage are confirmed.",
+                        sections: [
+                            SummarySection(title: "Decision", bullets: [
+                                "Keep the launch date if the final approval checklist is complete.",
+                            ]),
+                            SummarySection(title: "Open before review", bullets: [
+                                "Finalize launch criteria and client-safe wording.",
+                                "Confirm support coverage and the escalation owner.",
+                            ]),
+                        ]
+                    )
+                ),
+            ],
+            prompts: [
+                AIResponse(prompt: "Prep the next review", answer: "Confirm the final launch criteria first, then settle client-safe wording, support coverage, and the escalation owner."),
+            ],
+            destinations: ["Launch brief", "Client recap"],
+            selectedTemplate: .exec,
+            selectedPromptID: nil,
+            isPinned: false,
+            commitments: [
+                Commitment(
+                    statement: "Share the final launch criteria before the review",
+                    owner: "Avery Chen",
+                    sourceSpeaker: "Avery Chen",
+                    dueHint: "before the review",
+                    status: .open,
+                    priority: "high",
+                    rationale: "The go or no-go decision depends on explicit criteria."
+                ),
+                Commitment(
+                    statement: "Confirm client-safe wording for the recap",
+                    owner: "Mina Patel",
+                    sourceSpeaker: "Mina Patel",
+                    dueHint: "before launch review",
+                    status: .open,
+                    priority: "medium",
+                    rationale: "The external recap should not expose internal launch risk."
+                ),
+            ]
         ),
         Meeting(
             title: "Calendar prep: Helio launch review",

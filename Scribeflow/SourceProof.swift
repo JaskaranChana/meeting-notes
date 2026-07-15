@@ -46,7 +46,7 @@ enum SourceProofConfidence: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-enum SourceReferenceKind: String, Codable, CaseIterable, Identifiable {
+enum SourceReferenceKind: String, Codable, CaseIterable, Identifiable, Sendable {
     case transcript
     case audioTranscript
     case note
@@ -76,6 +76,17 @@ enum SourceReferenceKind: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+enum SourceMatchStrength: String, Codable, Hashable, Sendable {
+    /// The claim is the same normalized text as the referenced source, or the
+    /// model selected the exact persisted source identifier during generation.
+    case exact
+    /// The source shares meaningful content with the claim but does not prove
+    /// that every part of the claim is true.
+    case partial
+    /// The reference provides surrounding context only.
+    case contextual
+}
+
 struct SourceReference: Codable, Hashable, Identifiable {
     var id = UUID()
     var meetingID: Meeting.ID
@@ -85,6 +96,9 @@ struct SourceReference: Codable, Hashable, Identifiable {
     var speaker: String? = nil
     var transcriptLineID: TranscriptLine.ID? = nil
     var lineIndex: Int? = nil
+    /// Optional for backward-compatible decoding of notes saved before source
+    /// strength was persisted. A missing value must never be treated as exact.
+    var matchStrength: SourceMatchStrength? = nil
 
     var title: String {
         guard let speaker, !speaker.isEmpty else { return kind.title }
