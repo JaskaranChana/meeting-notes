@@ -102,7 +102,6 @@ groups; physical file moves should be done in smaller follow-up refactors.
 - `INVESTOR_READINESS.md` - demo path, product proof, release checks, and next investor polish.
 - `SCRIBEFLOW_PHASE_EXECUTION.md` - completed phase record and external launch gates.
 - `PRODUCTION_CONFIGURATION.md` - backend, identity, CloudKit, privacy, and CI contracts.
-- `GRANOLA_COMPETITIVE_ANALYSIS.md` - current competitor benchmark, implemented differentiation, and next product gaps.
 
 ## Large Files To Split Later
 
