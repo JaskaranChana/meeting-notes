@@ -251,7 +251,10 @@ final class AuthSessionStore {
                 phase = .signedOut
                 errorMessage = "Your Apple authorization changed. Sign in again to continue."
             } else {
-                phase = .authenticated(session)
+                let requiresUnlock = UserDefaults.standard.bool(
+                    forKey: "scribeflow.requireAppUnlock"
+                )
+                phase = requiresUnlock ? .locked(session) : .authenticated(session)
             }
         } catch {
             phase = .signedOut

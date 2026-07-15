@@ -23,6 +23,7 @@ struct CaptureView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var selectedMeetingID: Meeting.ID?
     @Binding var toast: ToastItem?
 
@@ -36,8 +37,10 @@ struct CaptureView: View {
     @State private var recordingStartedAt: Date?
     @State private var markFlash = false
     @State private var calendarEvent: CalendarEventSnapshot?
-    @AppStorage("scribeflow.capture.template") private var lastTemplateRaw = NoteTemplate.discovery.rawValue
+    @AppStorage("scribeflow.capture.recordTemplate") private var lastRecordTemplateRaw = NoteTemplate.general.rawValue
+    @AppStorage("scribeflow.capture.typeTemplate") private var lastTypeTemplateRaw = NoteTemplate.general.rawValue
     @State private var minutePulse = false
+    @State private var showsCaptureDetails = false
     @Namespace private var templateNS
 
     init(
@@ -58,7 +61,11 @@ struct CaptureView: View {
                         .motionEntrance(step: 0, active: hasAnimatedIn)
                     titleBlock
                         .motionEntrance(step: 1, active: hasAnimatedIn)
-                    templateStrip
+                    if mode == .type {
+                        notesPanel
+                            .motionEntrance(step: 2, active: hasAnimatedIn)
+                    }
+                    captureDetails
                         .motionEntrance(step: 2, active: hasAnimatedIn)
                     if mode == .record {
                         recordPanel
@@ -77,8 +84,10 @@ struct CaptureView: View {
                         .motionEntrance(step: 4, active: hasAnimatedIn)
                         .transition(.opacity)
                     }
-                    notesPanel
-                        .motionEntrance(step: 4, active: hasAnimatedIn)
+                    if mode == .record {
+                        notesPanel
+                            .motionEntrance(step: 4, active: hasAnimatedIn)
+                    }
                     if mode == .record, !coordinator.transcriptParagraphs.isEmpty {
                         transcriptPanel
                             .motionEntrance(step: 5, active: hasAnimatedIn)
@@ -109,7 +118,7 @@ struct CaptureView: View {
                     .foregroundStyle(AppPalette.ink)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(coordinator.isFinalizingSpeech ? "Securing…" : (isSaving ? "Saving…" : "Save")) {
+                    Button(coordinator.isFinalizingSpeech ? "Finalizing…" : (isSaving ? "Saving…" : "Save")) {
                         saveAndClose()
                     }
                     .disabled(!canSave || isSaving || coordinator.isFinalizingSpeech)
@@ -140,7 +149,7 @@ struct CaptureView: View {
         .sensoryFeedback(.success, trigger: savedMeetingID)
         .task {
             clearDefaultsOnce()
-            coordinator.selectedTemplate = NoteTemplate(rawValue: lastTemplateRaw) ?? .discovery
+            restoreTemplate(for: mode)
             consumeUpcomingTitleIfNeeded()
             if mode == .record {
                 await coordinator.prepare()
@@ -176,6 +185,7 @@ struct CaptureView: View {
             coordinator.refreshRecognitionContext()
         }
         .onChange(of: mode) { _, newMode in
+            restoreTemplate(for: newMode)
             if newMode == .record {
                 Task { await coordinator.prepare() }
             } else if coordinator.isRecording {
@@ -285,7 +295,6 @@ struct CaptureView: View {
                 )
                 .font(.subheadline)
                 .foregroundStyle(AppPalette.secondaryInk)
-                .lineLimit(2)
                 .accessibilityIdentifier("capture.objectiveField")
 
                 if coordinator.title.isEmpty,
@@ -309,26 +318,60 @@ struct CaptureView: View {
                 }
             }
 
-            if mode == .record {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 7) {
-                        Image(systemName: "person.2")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(AppPalette.secondaryInk.opacity(0.7))
-                        TextField(
-                            "",
-                            text: $coordinator.attendees,
-                            prompt: Text("Who's here? (comma-separated — powers Copilot recall)")
-                                .foregroundStyle(AppPalette.secondaryInk.opacity(0.5))
-                        )
-                        .font(.subheadline)
-                        .foregroundStyle(AppPalette.secondaryInk)
-                        .accessibilityIdentifier("capture.attendeesField")
-                    }
+        }
+    }
 
-                    expectedSpeakerCountMenu
+    private var captureDetails: some View {
+        DisclosureGroup(isExpanded: $showsCaptureDetails) {
+            VStack(alignment: .leading, spacing: 16) {
+                templateStrip
+                if mode == .record {
+                    attendeeDetails
                 }
             }
+            .padding(.top, 12)
+        } label: {
+            HStack(spacing: 10) {
+                Label("Details", systemImage: "slider.horizontal.3")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(AppPalette.ink)
+                Spacer(minLength: 8)
+                Text(coordinator.selectedTemplate.title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(AppPalette.secondaryInk)
+            }
+            .frame(minHeight: 44)
+        }
+        .tint(AppPalette.accent)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous)
+                .strokeBorder(AppPalette.border.opacity(0.45), lineWidth: 0.7)
+        )
+        .accessibilityIdentifier("capture.details")
+    }
+
+    private var attendeeDetails: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("People and speakers", systemImage: "person.2")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(AppPalette.secondaryInk)
+            TextField(
+                "",
+                text: $coordinator.attendees,
+                prompt: Text("People in this capture")
+                    .foregroundStyle(AppPalette.secondaryInk.opacity(0.5))
+            )
+            .font(.subheadline)
+            .foregroundStyle(AppPalette.secondaryInk)
+            .padding(.horizontal, 12)
+            .frame(minHeight: 44)
+            .background(AppPalette.softSurface, in: RoundedRectangle(cornerRadius: AppRadius.sm, style: .continuous))
+            .accessibilityIdentifier("capture.attendeesField")
+
+            expectedSpeakerCountMenu
         }
     }
 
@@ -350,7 +393,7 @@ struct CaptureView: View {
     /// kept inside the brand family so it never reads as noise.
     private var stageTint: Color {
         switch coordinator.selectedTemplate {
-        case .discovery, .interview: return AppPalette.accent
+        case .general, .discovery, .interview: return AppPalette.accent
         case .exec, .brainstorm:     return AppPalette.gold
         case .manager:               return AppPalette.accentDeep
         case .standup:               return Self.captureGreen
@@ -441,7 +484,7 @@ struct CaptureView: View {
                     coordinator.selectExpectedSpeakerCount(count)
                 } label: {
                     Label(
-                        "\(count) voice\(count == 1 ? "" : "s")",
+                        "\(count) speaker\(count == 1 ? "" : "s")",
                         systemImage: coordinator.expectedSpeakerCount == count ? "checkmark" : "person.wave.2"
                     )
                 }
@@ -457,7 +500,7 @@ struct CaptureView: View {
         }
         .disabled(coordinator.isRecording || coordinator.isFinalizingSpeech)
         .opacity(coordinator.isRecording || coordinator.isFinalizingSpeech ? 0.55 : 1)
-        .accessibilityLabel("Expected voices, \(coordinator.expectedSpeakerCountTitle)")
+        .accessibilityLabel("Expected speakers, \(coordinator.expectedSpeakerCountTitle)")
         .accessibilityIdentifier("capture.expectedSpeakerCount")
     }
 
@@ -485,7 +528,6 @@ struct CaptureView: View {
             HStack(alignment: .center) {
                 Text("LIVE CAPTURE · \(coordinator.selectedTemplate.title.uppercased())")
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    .kerning(0.9)
                     .foregroundStyle(.white.opacity(0.45))
                     .lineLimit(1)
                 Spacer(minLength: 8)
@@ -494,9 +536,8 @@ struct CaptureView: View {
                         ProgressView()
                             .controlSize(.mini)
                             .tint(AppPalette.gold)
-                        Text("SECURING")
+                        Text("FINALIZING")
                             .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                            .kerning(0.9)
                             .foregroundStyle(AppPalette.gold)
                     }
                     .padding(.horizontal, 10)
@@ -517,7 +558,6 @@ struct CaptureView: View {
                         }
                         Text(paused ? "PAUSED" : "RECORDING")
                             .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                            .kerning(0.9)
                             .foregroundStyle(paused ? AppPalette.gold : AppPalette.coral)
                     }
                     .padding(.horizontal, 10)
@@ -526,7 +566,6 @@ struct CaptureView: View {
                 } else {
                     Text("READY")
                         .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                        .kerning(0.9)
                         .foregroundStyle(Self.captureGreen)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
@@ -543,17 +582,15 @@ struct CaptureView: View {
                     .contentTransition(.numericText())
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
-                    .scaleEffect(minutePulse ? 1.04 : 1.0, anchor: .leading)
-                    .animation(AppMotion.bounce, value: minutePulse)
+                    .scaleEffect(reduceMotion ? 1 : (minutePulse ? 1.04 : 1.0), anchor: .leading)
+                    .animation(reduceMotion ? nil : AppMotion.bounce, value: minutePulse)
                 HStack(spacing: 8) {
                     Text(stageStatus)
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .kerning(0.6)
                         .foregroundStyle(.white.opacity(0.4))
                     if let started = recordingStartedAt {
                         Text("· started \(started.formatted(date: .omitted, time: .shortened))")
                             .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .kerning(0.6)
                             .foregroundStyle(.white.opacity(0.28))
                     }
                 }
@@ -563,27 +600,34 @@ struct CaptureView: View {
             // words. Replacing and animating the whole text on every update made
             // the recording stage jump and compete with the audio meter.
             if coordinator.isRecording || coordinator.isFinalizingSpeech {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("DRAFT CAPTION")
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .kerning(0.8)
-                        .foregroundStyle(Self.captureGreen.opacity(0.7))
-                    Text(liveCaptionDisplayText)
-                        .font(.system(size: 18, weight: .medium, design: .serif))
-                        .foregroundStyle(.white.opacity(liveCaptionText == nil ? 0.48 : 0.92))
-                        .lineSpacing(3)
-                        .lineLimit(3)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(minHeight: 72, alignment: .topLeading)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 2)
-                .contentShape(Rectangle())
-                .onTapGesture {
+                Button {
                     guard liveCaptionText != nil else { return }
                     flashMark()
+                } label: {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("DRAFT CAPTION")
+                                .font(AppFont.mono(.caption2, weight: .medium))
+                                .foregroundStyle(Self.captureGreen.opacity(0.7))
+                            Spacer(minLength: 8)
+                            Label("Mark", systemImage: "bookmark.fill")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.white.opacity(liveCaptionText == nil ? 0.32 : 0.72))
+                        }
+                        Text(liveCaptionDisplayText)
+                            .font(AppFont.serif(.title3, weight: .medium))
+                            .foregroundStyle(.white.opacity(liveCaptionText == nil ? 0.48 : 0.92))
+                            .lineSpacing(3)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(minHeight: 72, alignment: .topLeading)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 2)
+                    .contentShape(Rectangle())
                 }
-                .accessibilityLabel(liveCaptionText == nil ? "Draft caption pending" : "Draft caption. Double tap to mark this moment")
+                .buttonStyle(.plain)
+                .disabled(liveCaptionText == nil)
+                .accessibilityLabel(liveCaptionText == nil ? "Draft caption pending" : "Mark this spoken moment")
             }
 
             // Waveform card
@@ -591,7 +635,6 @@ struct CaptureView: View {
                 HStack {
                     Text("INPUT · MIC")
                         .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                        .kerning(0.6)
                         .foregroundStyle(.white.opacity(0.45))
                     Spacer()
                     speechLanguageMenu
@@ -606,7 +649,6 @@ struct CaptureView: View {
                     systemImage: coordinator.speechFeedback.systemImage
                 )
                 .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                .kerning(0.4)
                 .foregroundStyle(speechFeedbackTint)
                 .lineLimit(1)
                 Text(coordinator.speechFeedback.detail)
@@ -809,7 +851,6 @@ struct CaptureView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("MARKED MOMENTS · \(coordinator.bookmarks.count)")
                 .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                .kerning(0.6)
                 .foregroundStyle(.white.opacity(0.45))
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
@@ -853,7 +894,6 @@ struct CaptureView: View {
                     .foregroundStyle(AppPalette.accent)
                 Text("CATCH ME UP")
                     .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                    .kerning(0.6)
                     .foregroundStyle(.white.opacity(0.55))
                 Spacer()
                 Button {
@@ -939,7 +979,7 @@ struct CaptureView: View {
                         .frame(width: 80, height: 80)
                         .scaleEffect(coordinator.isRecording ? 1.3 : 0.9)
                         .opacity(coordinator.isRecording ? 0 : 1)
-                        .animation(AppMotion.breathe, value: coordinator.isRecording)
+                        .animation(reduceMotion ? nil : AppMotion.breathe, value: coordinator.isRecording)
                         .allowsHitTesting(false)
                 }
                 Circle()
@@ -1026,7 +1066,6 @@ struct CaptureView: View {
                     .foregroundStyle(AppPalette.accent)
                 Text("NOTES")
                     .font(.caption2.weight(.heavy))
-                    .kerning(1.4)
                     .foregroundStyle(AppPalette.secondaryInk)
                 Spacer()
                 if !coordinator.manualNotes.isEmpty {
@@ -1113,7 +1152,6 @@ struct CaptureView: View {
             HStack(alignment: .center) {
                 Text("TRANSCRIPT PREVIEW")
                     .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                    .kerning(0.9)
                     .foregroundStyle(.white.opacity(0.45))
                 Spacer()
                 HStack(spacing: 5) {
@@ -1122,7 +1160,6 @@ struct CaptureView: View {
                         .foregroundStyle(Self.captureGreen)
                     Text("DRAFT")
                         .font(.system(size: 9.5, weight: .medium, design: .monospaced))
-                        .kerning(0.6)
                         .foregroundStyle(Self.captureGreen)
                 }
                 .padding(.horizontal, 8)
@@ -1141,7 +1178,7 @@ struct CaptureView: View {
                 }
             }
 
-            Label("Final wording and voice labels update after Save", systemImage: "person.wave.2")
+            Label("Final wording and speaker labels update after Save", systemImage: "person.wave.2")
                 .font(.system(size: 10.5, weight: .medium, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.42))
         }
@@ -1195,15 +1232,12 @@ struct CaptureView: View {
 
     // MARK: Template strip
 
-    /// Horizontal chip strip letting the user pick the meeting type up front.
-    /// Mirrors Granola's "what kind of meeting?" prompt so the AI scaffolding
-    /// matches the conversation (sales discovery vs. 1:1 coaching vs. standup).
-    /// Defaults to "Discovery" — overwriting on selection is one tap.
+    /// Optional structure for a capture. General stays neutral; specialized
+    /// templates are explicit choices for conversations that need them.
     private var templateStrip: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("TEMPLATE")
                 .font(.caption2.weight(.medium))
-                .kerning(0.6)
                 .foregroundStyle(AppPalette.tertiaryInk)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
@@ -1216,7 +1250,7 @@ struct CaptureView: View {
             Text(coordinator.selectedTemplate.description)
                 .font(.caption)
                 .foregroundStyle(AppPalette.tertiaryInk)
-                .lineLimit(1)
+                .fixedSize(horizontal: false, vertical: true)
                 .contentTransition(.opacity)
                 .animation(AppMotion.smooth, value: coordinator.selectedTemplate)
         }
@@ -1227,7 +1261,7 @@ struct CaptureView: View {
         return Button {
             HapticEngine.tap(.light)
             withAnimation(AppMotion.snappy) { coordinator.selectedTemplate = template }
-            lastTemplateRaw = template.rawValue
+            persistTemplate(template, for: mode)
         } label: {
             Text(template.title)
                 .font(.caption.weight(selected ? .semibold : .medium))
@@ -1248,6 +1282,19 @@ struct CaptureView: View {
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
+    private func restoreTemplate(for mode: Mode) {
+        let rawValue = mode == .record ? lastRecordTemplateRaw : lastTypeTemplateRaw
+        coordinator.selectedTemplate = NoteTemplate(rawValue: rawValue) ?? .general
+    }
+
+    private func persistTemplate(_ template: NoteTemplate, for mode: Mode) {
+        if mode == .record {
+            lastRecordTemplateRaw = template.rawValue
+        } else {
+            lastTypeTemplateRaw = template.rawValue
+        }
+    }
+
     /// A title taken from the note itself — its first non-empty line, stripped of
     /// bullet markers and clipped — so a quick note is never labeled "Untitled"
     /// or given prefilled boilerplate.
@@ -1264,44 +1311,40 @@ struct CaptureView: View {
         guard !isSaving, !coordinator.isFinalizingSpeech else { return }
         isSaving = true
 
-        Task {
-            if coordinator.isRecording {
-                await coordinator.finishCapture()
-            }
-
-            let hasAudio = !coordinator.transcriptParagraphs.isEmpty
-                || coordinator.hasPendingAudio
-                || mode == .record
-            let id: Meeting.ID
-            if hasAudio {
-                // Recorded path — preserve transcript + audio metadata.
-                id = await coordinator.saveMeeting(into: store, calendarEvent: calendarEvent)
-            } else {
-                // Text-only path — preserve exactly what the user typed. We do
-                // NOT auto-rewrite the note: that fabricates structure for thin
-                // or garbage input and discards the original. The title and
-                // objective are derived from the text (never prefilled), and
-                // every surfaced item (synopsis, actions, decisions) is extracted
-                // from the actual note. The user can Enhance on demand later.
-                let typed = coordinator.manualNotes
-                let typedTitle = coordinator.title.trimmingCharacters(in: .whitespacesAndNewlines)
-                id = store.addMeeting(
-                    title: typedTitle.isEmpty ? noteTitle(from: typed) : typedTitle,
-                    workspace: calendarEvent.map { $0.isVideoCall ? "Calls" : "Meetings" } ?? "Personal workspace",
-                    attendees: calendarEvent?.attendees ?? [],
-                    objective: coordinator.objective.trimmingCharacters(in: .whitespacesAndNewlines),
-                    notes: typed,
-                    when: calendarEvent?.startDate ?? .now,
-                    durationMinutes: calendarEvent?.durationMinutes ?? 25,
-                    calendarEventID: calendarEvent?.id,
-                    calendarStartDate: calendarEvent?.startDate,
-                    calendarEndDate: calendarEvent?.endDate
-                )
-            }
-
-            isSaving = false
-            savedMeetingID = id
+        let hasAudio = !coordinator.transcriptParagraphs.isEmpty
+            || coordinator.hasPendingAudio
+            || mode == .record
+        let id: Meeting.ID
+        if hasAudio {
+            // Create the pending row immediately. Speech/audio finalization and
+            // enhanced processing continue after this screen dismisses.
+            id = coordinator.saveMeeting(into: store, calendarEvent: calendarEvent)
+        } else {
+            // Text-only path — preserve exactly what the user typed. We do
+            // NOT auto-rewrite the note: that fabricates structure for thin
+            // or garbage input and discards the original. The title and
+            // objective are derived from the text (never prefilled), and
+            // every surfaced item (synopsis, actions, decisions) is extracted
+            // from the actual note. The user can Enhance on demand later.
+            let typed = coordinator.manualNotes
+            let typedTitle = coordinator.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            id = store.addMeeting(
+                title: typedTitle.isEmpty ? noteTitle(from: typed) : typedTitle,
+                workspace: calendarEvent.map { $0.isVideoCall ? "Calls" : "Meetings" } ?? "Personal workspace",
+                attendees: calendarEvent?.attendees ?? [],
+                objective: coordinator.objective.trimmingCharacters(in: .whitespacesAndNewlines),
+                notes: typed,
+                when: calendarEvent?.startDate ?? .now,
+                durationMinutes: calendarEvent?.durationMinutes ?? 0,
+                calendarEventID: calendarEvent?.id,
+                calendarStartDate: calendarEvent?.startDate,
+                calendarEndDate: calendarEvent?.endDate,
+                selectedTemplate: coordinator.selectedTemplate
+            )
         }
+
+        isSaving = false
+        savedMeetingID = id
     }
 
     // MARK: Copilot rail
@@ -1383,7 +1426,7 @@ struct SmartNotesPreview: View, Equatable {
             summaries: [],
             prompts: [],
             destinations: [],
-            selectedTemplate: .discovery,
+            selectedTemplate: .general,
             selectedPromptID: nil,
             isPinned: false
         )
@@ -1399,7 +1442,7 @@ struct SmartNotesPreview: View, Equatable {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 6) {
                     Image(systemName: "wand.and.stars").font(.caption2.weight(.bold))
-                    Text("SMART NOTES").font(.caption2.weight(.bold)).tracking(1.0)
+                    Text("SMART NOTES").font(.caption2.weight(.bold))
                     Spacer()
                     Text("on-device").font(.caption2.weight(.medium)).foregroundStyle(AppPalette.tertiaryInk)
                 }
@@ -1443,7 +1486,7 @@ struct SmartNotesPreview: View, Equatable {
     private func smartSection(icon: String, label: String, tint: Color) -> some View {
         HStack(spacing: 6) {
             Image(systemName: icon).font(.caption2.weight(.bold))
-            Text(label.uppercased()).font(.caption2.weight(.bold)).tracking(0.8)
+            Text(label.uppercased()).font(.caption2.weight(.bold))
         }
         .foregroundStyle(tint)
     }
@@ -1531,11 +1574,13 @@ private struct ReactiveHalo: View {
 /// Voice-reactive ring around the record button, isolated for the same reason.
 private struct ReactiveRing: View {
     let coordinator: LiveMeetingCoordinator
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         Circle()
             .stroke(CaptureView.captureGreen.opacity(0.45), lineWidth: 2.5)
             .frame(width: 72, height: 72)
-            .scaleEffect(1.0 + coordinator.inputLevel * 0.6)
+            .scaleEffect(reduceMotion ? 1 : 1.0 + coordinator.inputLevel * 0.6)
             .opacity(0.25 + coordinator.inputLevel * 0.55)
             .allowsHitTesting(false)
     }
@@ -1568,7 +1613,7 @@ private struct MeetingCopilotRail: View {
                     .foregroundStyle(AppPalette.accent)
                 Text("COPILOT")
                     .font(.caption2.weight(.bold))
-                    .tracking(1.4)
+
                     .foregroundStyle(AppPalette.accent)
                 Label(purpose.displayTitle, systemImage: purpose.kind.systemImage)
                     .font(.caption2.weight(.semibold))
@@ -1638,7 +1683,7 @@ private struct MeetingCopilotRail: View {
                         .font(.caption2.weight(.bold))
                     Text(label)
                         .font(.caption2.weight(.bold))
-                        .tracking(1.2)
+
                 }
                 .foregroundStyle(tint)
 

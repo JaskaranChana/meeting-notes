@@ -3,9 +3,10 @@ import SwiftUI
 @main
 struct ScribeflowApp: App {
     @UIApplicationDelegateAdaptor(ScribeflowAppDelegate.self) private var appDelegate
+    @Environment(\.scenePhase) private var scenePhase
     @State private var store = MeetingStore()
     @State private var authSession = AuthSessionStore()
-    @State private var showingSplash = true
+    @State private var showingSplash = !UserDefaults.standard.bool(forKey: "hasCompletedLaunchOnboarding")
     @AppStorage("hasCompletedLaunchOnboarding") private var hasCompletedLaunchOnboarding = false
     @AppStorage(AppearancePreference.storageKey) private var appearanceRaw = AppearancePreference.system.rawValue
     @AppStorage("scribeflow.requireAppUnlock") private var requireAppUnlock = false
@@ -15,7 +16,7 @@ struct ScribeflowApp: App {
         MetricsSubscriber.shared.start()
         AnalyticsLog.shared.log("app.launch")
     }
- 
+
     var body: some Scene {
         WindowGroup {
             ZStack {
@@ -57,6 +58,14 @@ struct ScribeflowApp: App {
             .task {
                 MeetingProcessingCoordinator.shared.attach(store)
                 await MeetingProcessingCoordinator.shared.resume(using: store)
+                store.enforceRetentionPolicies()
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .background, requireAppUnlock {
+                    authSession.lock()
+                } else if phase == .active {
+                    store.enforceRetentionPolicies()
+                }
             }
         }
         .commands {
@@ -97,23 +106,23 @@ private struct LaunchOnboardingView: View {
 
     private let pages: [LaunchOnboardingPage] = [
         LaunchOnboardingPage(
-            eyebrow: "MEETING MEMORY",
-            title: "Talk it through.\nKeep it all.",
-            subtitle: "Hit record and talk. Scribeflow turns it into clean notes, decisions, and follow-ups — so nothing slips between meetings.",
+            eyebrow: "CAPTURE",
+            title: "Capture anything.",
+            subtitle: "Start with a meeting, voice note, or quick thought. Scribeflow keeps the original source and organizes it after you save.",
             systemImage: "sparkles.rectangle.stack.fill",
             tint: AppPalette.accent
         ),
         LaunchOnboardingPage(
-            eyebrow: "THE FLOW",
-            title: "One path, three moves.",
-            subtitle: "Capture the rough version, review the digest, then ask or share from the polished record.",
-            systemImage: "arrow.triangle.branch",
+            eyebrow: "REVIEW",
+            title: "Understand with sources.",
+            subtitle: "Summaries, decisions, and follow-ups stay connected to the note or transcript that supports them.",
+            systemImage: "checkmark.seal.fill",
             tint: AppPalette.gold
         ),
         LaunchOnboardingPage(
-            eyebrow: "PRIVATE BY DESIGN",
-            title: "Record clearly.\nKnow the limits.",
-            subtitle: "Voice notes stay protected on device. Scribeflow cannot record cellular, FaceTime, WhatsApp, or audio from other apps.",
+            eyebrow: "CONTROL",
+            title: "You choose what leaves.",
+            subtitle: "Your workspace is local-first. You control recording, sharing, export, backup, reminders, and deletion.",
             systemImage: "lock.shield.fill",
             tint: AppPalette.coral
         )
@@ -126,13 +135,9 @@ private struct LaunchOnboardingView: View {
 
             VStack(spacing: 0) {
                 HStack {
-                    Image(decorative: "BrandMark")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 34, height: 34)
+                    ScribeflowBrandMark(size: 34)
                     Text("SCRIBEFLOW")
                         .font(.caption.weight(.bold))
-                        .kerning(2.0)
                         .foregroundStyle(AppPalette.secondaryInk)
                     Spacer()
                     Button("Skip") {
@@ -202,43 +207,37 @@ private struct LaunchOnboardingView: View {
     private func launchPage(_ page: LaunchOnboardingPage, index: Int) -> some View {
         ScrollView(showsIndicators: false) {
             VStack(alignment: .leading, spacing: 24) {
-                PremiumPanel(cornerRadius: 34, contentPadding: 24) {
-                    ZStack(alignment: .topTrailing) {
-                        VStack(alignment: .leading, spacing: 22) {
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                                    .fill(page.tint.opacity(0.12))
-                                Image(systemName: page.systemImage)
-                                    .font(.system(size: 34, weight: .bold))
-                                    .foregroundStyle(page.tint)
-                            }
-                            .frame(width: 74, height: 74)
-
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text(page.eyebrow)
-                                    .font(.system(.caption2, design: .monospaced).weight(.medium))
-                                    .kerning(0.9)
-                                    .foregroundStyle(page.tint)
-                                Text(page.title)
-                                    .font(.system(size: 34, weight: .medium, design: .serif))
-                                    .foregroundStyle(AppPalette.ink)
-                                    .lineSpacing(2)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                Text(page.subtitle)
-                                    .font(.body)
-                                    .foregroundStyle(AppPalette.secondaryInk)
-                                    .lineSpacing(3)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
+                ZStack(alignment: .topTrailing) {
+                    VStack(alignment: .leading, spacing: 22) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
+                                .fill(page.tint.opacity(0.12))
+                            Image(systemName: page.systemImage)
+                                .font(.system(size: 30, weight: .bold))
+                                .foregroundStyle(page.tint)
                         }
+                        .frame(width: 68, height: 68)
 
-                        Text("0\(index + 1)")
-                            .font(.caption.weight(.bold))
-                            .foregroundStyle(AppPalette.secondaryInk.opacity(0.55))
-                            .padding(.horizontal, 11)
-                            .padding(.vertical, 8)
-                            .background(AppPalette.softSurface.opacity(0.8), in: Capsule())
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text(page.eyebrow)
+                                .font(AppFont.mono(.caption2, weight: .medium))
+                                .foregroundStyle(page.tint)
+                            Text(page.title)
+                                .font(AppFont.serif(.largeTitle, weight: .medium))
+                                .foregroundStyle(AppPalette.ink)
+                                .lineSpacing(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(page.subtitle)
+                                .font(.body)
+                                .foregroundStyle(AppPalette.secondaryInk)
+                                .lineSpacing(3)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
+
+                    Text("0\(index + 1)")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(AppPalette.secondaryInk.opacity(0.55))
                 }
 
                 if index == 1 {
@@ -253,15 +252,15 @@ private struct LaunchOnboardingView: View {
                     PremiumPanel(cornerRadius: 28, contentPadding: 20) {
                         WorkflowRailStep(index: 1, title: "Voice notes", detail: "Record, transcribe, attach, and play back from Library.", systemImage: "waveform.badge.mic", tint: AppPalette.accent)
                         Divider()
-                        WorkflowRailStep(index: 2, title: "Call limits", detail: "Use call notes or a compliant provider flow. No private APIs.", systemImage: "phone.badge.waveform", tint: AppPalette.gold)
+                        WorkflowRailStep(index: 2, title: "Call limits", detail: "Use typed call notes. Scribeflow cannot capture audio from another app.", systemImage: "phone.badge.waveform", tint: AppPalette.gold)
                         Divider()
                         WorkflowRailStep(index: 3, title: "Control", detail: "Delete recordings locally or export only when you choose.", systemImage: "lock.shield.fill", tint: AppPalette.coral)
                     }
                 } else {
-                    HStack(spacing: 12) {
-                        ProductMetric(value: "4", label: "Capture modes", tint: AppPalette.accent)
-                        ProductMetric(value: "1", label: "Memory library", tint: AppPalette.gold)
-                    }
+                    Label("Private by default. No account required for local use.", systemImage: "lock.shield.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(AppPalette.secondaryInk)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(.horizontal, 24)
@@ -279,78 +278,39 @@ private struct LaunchOnboardingPage {
     let tint: Color
 }
 
-/// Launch splash. A deep brand-gradient stage with a glowing brand disc that
-/// springs in, wordmark + tagline that rise behind it, then the whole thing
-/// fades out to reveal the app. Self-times its own dismissal via `onComplete`.
+/// First-run bridge between the native launch frame and onboarding. Returning
+/// users skip it so launch never waits on decorative animation.
 private struct SplashView: View {
     var onComplete: () -> Void = {}
 
     @State private var markIn = false
     @State private var ringExpand = false
     @State private var textIn = false
-    @State private var halo = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    private let stage = Color(red: 0.039, green: 0.055, blue: 0.071)        // near-black
-    private let captureGreen = Color(red: 0.490, green: 0.820, blue: 0.639) // #7DD1A3
 
     var body: some View {
         ZStack {
-            // Deep cinematic brand gradient.
-            LinearGradient(
-                colors: [
-                    Color(red: 0.043, green: 0.063, blue: 0.078),
-                    Color(red: 0.047, green: 0.184, blue: 0.196),
-                    Color(red: 0.082, green: 0.345, blue: 0.353)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
+            AppPalette.background.ignoresSafeArea()
 
-            // Soft drifting halo for depth.
-            Circle()
-                .fill(RadialGradient(
-                    colors: [captureGreen.opacity(0.22), .clear],
-                    center: .center, startRadius: 0, endRadius: 260))
-                .frame(width: 520, height: 520)
-                .scaleEffect(halo ? 1.08 : 0.9)
-                .opacity(halo ? 0.9 : 0.55)
-                .blur(radius: 20)
-                .offset(y: -40)
-                .allowsHitTesting(false)
-
-            VStack(spacing: 22) {
-                // Brand disc — concentric ring + glass mark.
+            VStack(spacing: 18) {
                 ZStack {
                     Circle()
-                        .strokeBorder(captureGreen.opacity(0.35), lineWidth: 1.2)
-                        .frame(width: 140, height: 140)
-                        .scaleEffect(ringExpand ? 1 : 0.6)
+                        .strokeBorder(AppPalette.accent.opacity(0.20), lineWidth: 1)
+                        .frame(width: 112, height: 112)
+                        .scaleEffect(ringExpand ? 1 : 0.78)
                         .opacity(ringExpand ? 1 : 0)
-
-                    Circle()
-                        .fill(.ultraThinMaterial)
-                        .overlay(Circle().fill(captureGreen.opacity(0.16)))
-                        .overlay(Circle().strokeBorder(.white.opacity(0.14), lineWidth: 1))
-                        .frame(width: 104, height: 104)
-                        .shadow(color: .black.opacity(0.35), radius: 24, y: 14)
-
-                    Image(decorative: "BrandMark")
-                        .resizable().scaledToFit()
-                        .frame(width: 50, height: 50)
+                    ScribeflowBrandMark(size: 72)
                 }
                 .scaleEffect(markIn ? 1 : 0.82)
                 .opacity(markIn ? 1 : 0)
 
-                VStack(spacing: 10) {
+                VStack(spacing: 7) {
                     Text("Scribeflow")
-                        .font(.system(size: 34, weight: .semibold, design: .serif))
-                        .foregroundStyle(.white)
-                    Text("MEETINGS, REMEMBERED")
-                        .font(.system(.caption2, design: .monospaced).weight(.medium))
-                        .kerning(2.2)
-                        .foregroundStyle(captureGreen.opacity(0.85))
+                        .font(AppFont.serif(.largeTitle, weight: .semibold))
+                        .foregroundStyle(AppPalette.ink)
+                    Text("CAPTURE. UNDERSTAND. REMEMBER.")
+                        .font(AppFont.mono(.caption2, weight: .semibold))
+                        .foregroundStyle(AppPalette.accent)
                 }
                 .opacity(textIn ? 1 : 0)
                 .offset(y: textIn ? 0 : 12)
@@ -363,13 +323,12 @@ private struct SplashView: View {
     private func run() {
         if reduceMotion {
             markIn = true; ringExpand = true; textIn = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { onComplete() }
+            DispatchQueue.main.async { onComplete() }
             return
         }
-        withAnimation(.spring(response: 0.6, dampingFraction: 0.7)) { markIn = true }
-        withAnimation(.easeOut(duration: 0.9)) { ringExpand = true }
-        withAnimation(.easeInOut(duration: 2.4).repeatForever(autoreverses: true)) { halo = true }
-        withAnimation(.easeOut(duration: 0.6).delay(0.28)) { textIn = true }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.7) { onComplete() }
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) { markIn = true }
+        withAnimation(.easeOut(duration: 0.45)) { ringExpand = true }
+        withAnimation(.easeOut(duration: 0.32).delay(0.12)) { textIn = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.72) { onComplete() }
     }
 }

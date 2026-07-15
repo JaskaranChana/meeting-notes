@@ -206,7 +206,6 @@ struct AudioRouteBadge: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(label.uppercased())
                     .font(.caption2.weight(.bold))
-                    .kerning(0.8)
                     .foregroundStyle(AppPalette.secondaryInk)
                 Text(routeName)
                     .font(.caption.weight(.semibold))
@@ -314,7 +313,6 @@ struct AudioDiagnosticsView: View {
             HStack {
                 Text("MIC TEST")
                     .font(.caption2.weight(.medium))
-                    .kerning(0.6)
                     .foregroundStyle(AppPalette.tertiaryInk)
                 Spacer()
                 phaseBadge
@@ -471,7 +469,6 @@ struct AudioDiagnosticsView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("PERMISSIONS")
                 .font(.caption.weight(.bold))
-                .kerning(1.3)
                 .foregroundStyle(AppPalette.secondaryInk)
 
             permRow(icon: "mic.fill", label: "Microphone",
@@ -530,7 +527,6 @@ struct AudioDiagnosticsView: View {
             HStack {
                 Text("AUDIO ROUTE")
                     .font(.caption.weight(.bold))
-                    .kerning(1.3)
                     .foregroundStyle(AppPalette.secondaryInk)
                 Spacer()
                 AudioRouteBadge(route: route, usingBluetooth: usingBT)
@@ -548,7 +544,6 @@ struct AudioDiagnosticsView: View {
         HStack(alignment: .top, spacing: 14) {
             Text(label.uppercased())
                 .font(.caption2.weight(.bold))
-                .kerning(0.9)
                 .foregroundStyle(AppPalette.secondaryInk)
                 .frame(width: 50, alignment: .leading)
             Text(values.isEmpty ? "—" : values.joined(separator: ", "))
@@ -567,7 +562,6 @@ struct AudioDiagnosticsView: View {
                     .foregroundStyle(AppPalette.gold)
                 Text("ABOUT FACETIME & PHONE CALLS")
                     .font(.caption.weight(.bold))
-                    .kerning(1.3)
                     .foregroundStyle(AppPalette.secondaryInk)
             }
 

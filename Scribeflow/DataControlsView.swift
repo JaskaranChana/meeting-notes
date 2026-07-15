@@ -91,7 +91,9 @@ struct DataControlsView: View {
                     storageOverview
                     backupCard
                     automaticBackupCard
-                    cloudBackupCard
+                    if ScribeflowCloudBackupService.isConfigured {
+                        cloudBackupCard
+                    }
                     cleanupCard
                     recordingsCard
                     dangerZone
@@ -182,7 +184,9 @@ struct DataControlsView: View {
         }
         .modifier(ScribeflowChrome())
         .task {
-            await refreshCloudAccountState()
+            if ScribeflowCloudBackupService.isConfigured {
+                await refreshCloudAccountState()
+            }
             await refreshAutomaticBackups()
         }
         .onChange(of: automaticBackupsEnabled) { _, isEnabled in
@@ -190,6 +194,7 @@ struct DataControlsView: View {
             createAutomaticBackup()
         }
         .onReceive(NotificationCenter.default.publisher(for: .CKAccountChanged)) { _ in
+            guard ScribeflowCloudBackupService.isConfigured else { return }
             Task { await refreshCloudAccountState() }
         }
     }
@@ -348,14 +353,14 @@ struct DataControlsView: View {
     private var backupCard: some View {
         SurfaceCard(title: "Backup", subtitle: "Export a copy you control, then restore it later if needed.") {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Backups include notes, transcripts, metadata, and optional recording files. Store exported files somewhere private, such as iCloud Drive or an encrypted folder.")
+                Text("Notes-only backup is the safest choice for large libraries. A full copy can include up to 64 MB of recordings in the same protected export.")
                     .font(.footnote)
                     .foregroundStyle(AppPalette.secondaryInk)
                     .fixedSize(horizontal: false, vertical: true)
 
                 HStack(spacing: 10) {
-                    backupAction("Full copy", icon: "externaldrive.fill", action: { exportBackup(includeAudio: true) })
                     backupAction("Notes only", icon: "doc.text", action: { exportBackup(includeAudio: false) })
+                    backupAction("Full copy", icon: "externaldrive.fill", action: { exportBackup(includeAudio: true) })
                     backupAction("Restore", icon: "arrow.counterclockwise", action: { showingImporter = true })
                 }
             }
@@ -468,7 +473,7 @@ struct DataControlsView: View {
                     value: cloudAccountState.isAvailable ? "Private" : "Check"
                 )
 
-                Text("This saves one private Scribeflow backup package to the user's iCloud account. The app still works fully without iCloud.")
+                Text("This saves one notes-only Scribeflow backup to the user's private iCloud account. Recordings stay on this device unless exported separately.")
                     .font(.footnote)
                     .foregroundStyle(AppPalette.secondaryInk)
                     .fixedSize(horizontal: false, vertical: true)
@@ -486,7 +491,7 @@ struct DataControlsView: View {
                         icon: "icloud.and.arrow.up",
                         isDisabled: cloudActionsDisabled
                     ) {
-                        saveCloudBackup(includeAudio: true)
+                        saveCloudBackup(includeAudio: false)
                     }
                     cloudAction(
                         title: "Restore",
@@ -569,7 +574,6 @@ struct DataControlsView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Danger zone")
                 .font(.caption2.weight(.medium))
-                .kerning(0.6)
                 .foregroundStyle(AppPalette.coral)
                 .padding(.leading, 4)
 

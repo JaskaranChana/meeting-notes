@@ -69,7 +69,6 @@ struct MeetingSavedSheet: View {
 
                 Text("SAVED")
                     .font(.caption2.weight(.medium))
-                    .kerning(0.8)
                     .foregroundStyle(AppPalette.tertiaryInk)
                     .opacity(revealedSteps >= 1 ? 1 : 0)
                     .offset(y: revealedSteps >= 1 ? 0 : 10)
@@ -159,7 +158,6 @@ struct MeetingSavedSheet: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(h.label.uppercased())
                 .font(.caption2.weight(.semibold))
-                .kerning(1.2)
                 .foregroundStyle(highlightColor(for: h.label))
 
             Text(h.text)

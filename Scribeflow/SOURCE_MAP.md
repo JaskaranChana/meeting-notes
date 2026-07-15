@@ -13,7 +13,7 @@ groups; physical file moves should be done in smaller follow-up refactors.
 
 - `Models.swift` - meeting, transcript, action, auth, and product domain models.
 - `MeetingPurpose.swift` - purpose classification and conservative extraction policy.
-- `MeetingStore.swift` - local persistence, sample data, meeting mutations, export.
+- `MeetingStore.swift` - protected persistence/recovery, retention enforcement, meeting mutations, grounded intelligence, and export.
 - `AppCore.swift` - shared app services, calendar/reminder helpers, Spotlight, utilities.
 - `ProductionServices.swift` - runtime backend configuration, streamed transcription, and durable retries.
 - `ReleaseOperations.swift` - readiness checks, bounded MetricKit archive, and support export.
@@ -44,7 +44,7 @@ groups; physical file moves should be done in smaller follow-up refactors.
 - `SourceProof.swift` - claim confidence, source references, and proof inspector UI.
 - `MeetingSavedSheet.swift` - post-save confirmation.
 - `LiveMeetingCoordinator.swift` - live meeting capture context and in-call intelligence.
-- `MeetingProcessingCoordinator.swift` - durable post-save queue, enhanced transcription, background resume, and ready notifications.
+- `MeetingProcessingCoordinator.swift` - durable post-save queue, resource-aware enhanced transcription, background resume, and ready notifications.
 
 ## Capture And Audio
 
@@ -55,7 +55,7 @@ groups; physical file moves should be done in smaller follow-up refactors.
 - `VoiceRecordingService.swift` - audio recording service.
 - `SpeechRecognitionPipeline.swift` - live SpeechTranscriber/legacy Speech pipeline and contextual vocabulary.
 - `LocalSpeakerDiarization.swift` - temporary audio writer, constrained on-device speaker separation, and transcript alignment.
-- `VoiceRecordingModels.swift` - recording models plus persisted provider and diarization metadata.
+- `VoiceRecordingModels.swift` - recording models, protected file storage, and off-main audio import preflight.
 - `AudioPlaybackControls.swift` - playback UI.
 - `AudioSessionManager.swift` - AVAudioSession setup.
 - `RecordingCompliance.swift` - recording limitation and compliance text.
@@ -74,7 +74,7 @@ groups; physical file moves should be done in smaller follow-up refactors.
 
 - `SettingsView.swift` - app preferences, investor demo mode, demo data, diagnostics links.
 - `DataControlsView.swift` - data export, backup, iCloud backup, restore preview, recording cleanup controls.
-- `BackupArchiveService.swift` - off-main backup encoding, protected snapshots, and restore staging.
+- `BackupArchiveService.swift` - off-main backup encoding, bounded full exports, protected snapshots, and restore staging.
 - `DataManagementModels.swift` - storage/backup models and CloudKit backup foundation.
 - `ProductCapabilityModels.swift` - capability/status models.
 - `AudioDiagnostics.swift` - microphone/audio diagnostics.

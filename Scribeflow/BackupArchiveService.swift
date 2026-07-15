@@ -19,6 +19,7 @@ struct AutomaticBackupSnapshot: Identifiable, Hashable, Sendable {
 enum BackupArchiveError: LocalizedError {
     case noData
     case missingAudio(String)
+    case embeddedAudioTooLarge(Int64)
     case invalidSnapshot
 
     var errorDescription: String? {
@@ -27,6 +28,8 @@ enum BackupArchiveError: LocalizedError {
             "There is no Scribeflow data to back up yet."
         case .missingAudio(let fileName):
             "The full backup could not include \(fileName). Use Notes only or remove the missing recording."
+        case .embeddedAudioTooLarge(let byteCount):
+            "The recordings total \(ByteCountFormatter.string(fromByteCount: byteCount, countStyle: .file)), which is too large for a single backup file. Export Notes only and share recordings separately."
         case .invalidSnapshot:
             "That automatic backup is unavailable or damaged."
         }
@@ -36,6 +39,10 @@ enum BackupArchiveError: LocalizedError {
 actor BackupArchiveService {
     static let shared = BackupArchiveService()
 
+    /// The legacy JSON package embeds audio as Base64, which temporarily needs
+    /// substantially more memory than the source files. Keep this bounded until
+    /// a streaming archive format replaces it.
+    private let maximumEmbeddedAudioBytes: Int64 = 64 * 1_024 * 1_024
     private let maximumAutomaticBackups = 7
     private let minimumAutomaticBackupInterval: TimeInterval = 6 * 60 * 60
     private var cachedLatestAutomaticBackupAt: Date?
@@ -50,9 +57,21 @@ actor BackupArchiveService {
         let audioFiles: [ScribeflowBackupAudioFile]
         if includeAudio {
             let fileNames = Set(meetings.flatMap { $0.audioRecordings.map(\.fileName) })
-            audioFiles = try fileNames.sorted().map { fileName in
+            let sources = try fileNames.sorted().map { fileName -> (String, URL, Int64) in
                 let url = RecordingFileStore.url(for: fileName)
-                guard let data = try? Data(contentsOf: url), !data.isEmpty else {
+                guard let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
+                      let fileSize = values.fileSize,
+                      fileSize > 0 else {
+                    throw BackupArchiveError.missingAudio(fileName)
+                }
+                return (fileName, url, Int64(fileSize))
+            }
+            let totalAudioBytes = sources.reduce(Int64(0)) { $0 + $1.2 }
+            guard totalAudioBytes <= maximumEmbeddedAudioBytes else {
+                throw BackupArchiveError.embeddedAudioTooLarge(totalAudioBytes)
+            }
+            audioFiles = try sources.map { fileName, url, _ in
+                guard let data = try? Data(contentsOf: url, options: .mappedIfSafe), !data.isEmpty else {
                     throw BackupArchiveError.missingAudio(fileName)
                 }
                 return ScribeflowBackupAudioFile(fileName: fileName, data: data)

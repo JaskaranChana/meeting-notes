@@ -7,6 +7,7 @@ import SwiftUI
 /// the caller wraps in NavigationStack.
 struct AskView: View {
     @Environment(MeetingStore.self) private var store
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     @State private var prompt = ""
     @FocusState private var composerFocused: Bool
@@ -91,7 +92,7 @@ struct AskView: View {
         }
         .background(AppPalette.background.ignoresSafeArea())
         .accessibilityIdentifier("ask.view")
-        .navigationTitle("Ask")
+        .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
@@ -144,20 +145,34 @@ struct AskView: View {
 
     private var contextHeader: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                EditorialEyebrow(text: "Across your library")
-                Spacer(minLength: 8)
-                AIModeBadge()
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 8) {
+                        askTitle
+                        AIModeBadge()
+                    }
+                } else {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        askTitle
+                        Spacer(minLength: 8)
+                        AIModeBadge()
+                    }
+                }
             }
             Text(cachedScope.isEmpty ? scopeSummary : cachedScope)
                 .font(.subheadline)
                 .foregroundStyle(AppPalette.secondaryInk)
-                .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
+    }
+
+    private var askTitle: some View {
+        Text("Ask")
+            .font(AppFont.serif(.title2, weight: .medium))
+            .foregroundStyle(AppPalette.ink)
     }
 
     private var scopeSummary: String {
@@ -196,9 +211,8 @@ struct AskView: View {
     private var emptyPrompt: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 6) {
-                EditorialEyebrow(text: "Ask your library", tint: AppPalette.accent)
                 Text("What do you want to know?")
-                    .scaledFont(size: 28, weight: .medium, design: .serif, relativeTo: .title)
+                    .font(AppFont.serif(.title, weight: .medium))
                     .foregroundStyle(AppPalette.ink)
                 Text("Tap a suggestion — or type your own. Answers cite the meetings they came from.")
                     .font(.system(size: 13))
@@ -491,7 +505,7 @@ struct AskView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("FOLLOW UP")
                     .font(.caption2.weight(.bold))
-                    .tracking(1.2)
+
                     .foregroundStyle(AppPalette.tertiaryInk)
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
@@ -695,7 +709,7 @@ private struct AnswerHighlights: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
                     Image(systemName: "sparkles").font(.caption2.weight(.bold))
-                    Text("KEY POINTS").font(.caption2.weight(.bold)).tracking(1.0)
+                    Text("KEY POINTS").font(.caption2.weight(.bold))
                 }
                 .foregroundStyle(AppPalette.accent)
                 ForEach(points, id: \.self) { point in
@@ -844,7 +858,6 @@ struct AskCitationsCard: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Sources".uppercased())
                 .font(.caption2.weight(.bold))
-                .kerning(1.4)
                 .foregroundStyle(AppPalette.secondaryInk)
 
             VStack(spacing: 0) {

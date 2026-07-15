@@ -1,4 +1,107 @@
+import AVFoundation
 import Foundation
+
+enum AudioPCMBufferCopy {
+    static func make(from source: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard let destination = AVAudioPCMBuffer(
+            pcmFormat: source.format,
+            frameCapacity: source.frameLength
+        ) else { return nil }
+        destination.frameLength = source.frameLength
+
+        let sourceBuffers = UnsafeMutableAudioBufferListPointer(source.mutableAudioBufferList)
+        let destinationBuffers = UnsafeMutableAudioBufferListPointer(destination.mutableAudioBufferList)
+        guard sourceBuffers.count == destinationBuffers.count else { return nil }
+
+        for index in sourceBuffers.indices {
+            guard let sourceData = sourceBuffers[index].mData,
+                  let destinationData = destinationBuffers[index].mData
+            else { continue }
+            let byteCount = min(
+                Int(sourceBuffers[index].mDataByteSize),
+                Int(destinationBuffers[index].mDataByteSize)
+            )
+            memcpy(destinationData, sourceData, byteCount)
+            destinationBuffers[index].mDataByteSize = UInt32(byteCount)
+        }
+        return destination
+    }
+}
+
+struct ImportedAudioFile: Sendable {
+    let recordingID: UUID
+    let fileName: String
+    let fileSizeBytes: Int
+    let durationSeconds: Int
+}
+
+enum AudioImportError: LocalizedError {
+    case emptyFile
+    case unsupportedFormat
+    case insufficientStorage
+
+    var errorDescription: String? {
+        switch self {
+        case .emptyFile:
+            "The selected audio file is empty."
+        case .unsupportedFormat:
+            "Choose an M4A, MP3, WAV, AIFF, CAF, MP4, or MOV audio file."
+        case .insufficientStorage:
+            "There is not enough free space to import this audio safely."
+        }
+    }
+}
+
+actor AudioImportService {
+    static let shared = AudioImportService()
+
+    private let supportedExtensions: Set<String> = [
+        "m4a", "mp3", "wav", "wave", "aif", "aiff", "caf", "mp4", "mov"
+    ]
+
+    func importFile(from sourceURL: URL) async throws -> ImportedAudioFile {
+        let values = try sourceURL.resourceValues(forKeys: [.fileSizeKey])
+        let fileSize = values.fileSize ?? 0
+        guard fileSize > 0 else { throw AudioImportError.emptyFile }
+
+        let pathExtension = sourceURL.pathExtension.lowercased()
+        guard supportedExtensions.contains(pathExtension) else {
+            throw AudioImportError.unsupportedFormat
+        }
+
+        try RecordingFileStore.ensureDirectory()
+        let available = try? RecordingFileStore.directoryURL.resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+        ).volumeAvailableCapacityForImportantUsage
+        let requiredBytes = Int64(fileSize) + 64 * 1_024 * 1_024
+        if let available, available < requiredBytes {
+            throw AudioImportError.insufficientStorage
+        }
+
+        let recordingID = UUID()
+        let destination = try RecordingFileStore.makeRecordingURL(
+            id: recordingID,
+            pathExtension: pathExtension
+        )
+        do {
+            try FileManager.default.copyItem(at: sourceURL, to: destination)
+            RecordingFileStore.protectFile(at: destination)
+
+            let asset = AVURLAsset(url: destination)
+            let duration = try? await asset.load(.duration)
+            let seconds = duration.map { CMTimeGetSeconds($0) } ?? 0
+            return ImportedAudioFile(
+                recordingID: recordingID,
+                fileName: RecordingFileStore.fileName(for: destination),
+                fileSizeBytes: RecordingFileStore.fileSize(at: destination),
+                durationSeconds: seconds.isFinite ? max(0, Int(seconds.rounded())) : 0
+            )
+        } catch {
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
+    }
+}
 
 enum AudioRecordingSource: String, Codable, CaseIterable, Identifiable {
     case voiceNote
@@ -247,9 +350,17 @@ enum RecordingFileStore {
         try? mutableURL.setResourceValues(resourceValues)
     }
 
-    static func makeRecordingURL(id: UUID = UUID()) throws -> URL {
+    static func makeRecordingURL(
+        id: UUID = UUID(),
+        pathExtension: String = "m4a"
+    ) throws -> URL {
         try ensureDirectory()
-        return directoryURL.appendingPathComponent("\(id.uuidString).m4a", isDirectory: false)
+        let safeExtension = pathExtension
+            .lowercased()
+            .filter { $0.isLetter || $0.isNumber }
+        return directoryURL
+            .appendingPathComponent(id.uuidString, isDirectory: false)
+            .appendingPathExtension(safeExtension.isEmpty ? "m4a" : safeExtension)
     }
 
     static func adoptFile(at sourceURL: URL) throws -> URL {
@@ -281,7 +392,7 @@ enum RecordingFileStore {
 
     static func protectFile(at url: URL) {
         try? FileManager.default.setAttributes(
-            [.protectionKey: FileProtectionType.complete],
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
             ofItemAtPath: url.path
         )
     }

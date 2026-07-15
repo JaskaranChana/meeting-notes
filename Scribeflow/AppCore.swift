@@ -82,19 +82,19 @@ enum AppPalette {
         (0.420, 0.435, 0.478), (0.545, 0.557, 0.588),                               // #6B6F7A / #8B8E96
         lightHC: (0.310, 0.325, 0.365), darkHC: (0.667, 0.678, 0.706)               // #4F535D / #AAACB4
     )
-    /// Faintest ink tier. Base ~4:1 on paper; Increase-Contrast pushes to AA.
+    /// Faintest ink tier. Maintains AA contrast on paper in both appearances.
     static let tertiaryInk  = dyn(
-        (0.494, 0.510, 0.553), (0.451, 0.463, 0.498),                               // #7E828D / #737682
-        lightHC: (0.420, 0.435, 0.478), darkHC: (0.545, 0.557, 0.588)               // #6B6F7A / #8B8E96
+        (0.365, 0.380, 0.420), (0.635, 0.647, 0.678),                               // #5D616B / #A2A5AD
+        lightHC: (0.278, 0.294, 0.333), darkHC: (0.753, 0.765, 0.792)               // #474B55 / #C0C3CA
     )
 
     // MARK: Brand accents — teal signature, brighter in dark for legibility.
     /// Signature teal.
     static let accent  = dyn((0.082, 0.345, 0.353), (0.310, 0.639, 0.647))   // #15585A / #4FA3A5
     /// Amber.
-    static let gold    = dyn((0.710, 0.525, 0.173), (0.878, 0.784, 0.482))   // #B5862C / #E0C87B
+    static let gold    = dyn((0.545, 0.392, 0.082), (0.878, 0.784, 0.482))   // #8B6415 / #E0C87B
     /// Burnt-orange warning.
-    static let coral   = dyn((0.722, 0.361, 0.180), (0.878, 0.482, 0.302))   // #B85C2E / #E07B4D
+    static let coral   = dyn((0.616, 0.263, 0.106), (0.878, 0.482, 0.302))   // #9D431B / #E07B4D
     /// Success green.
     static let success = dyn((0.290, 0.478, 0.243), (0.490, 0.820, 0.639))   // #4A7A3E / #7DD1A3
 
@@ -1472,8 +1472,8 @@ final class WebhookStore: ObservableObject {
 /// notes saved, action items resolved) so the user can see what the app has
 /// recorded about them under Settings → Privacy → Activity log. We do not
 /// upload anything; this is purely local insight. Logging is gated by an
-/// `analyticsOptIn` flag stored in UserDefaults, defaulted on but toggleable.
-struct AnalyticsEvent: Codable, Identifiable {
+/// `analyticsOptIn` flag stored in UserDefaults and disabled until the user opts in.
+struct AnalyticsEvent: Codable, Identifiable, Sendable {
     let id: UUID
     let timestamp: Date
     let name: String
@@ -1494,6 +1494,7 @@ final class AnalyticsLog {
     private let fileURL: URL
     private let optInKey = "analyticsOptIn"
     private(set) var events: [AnalyticsEvent] = []
+    private var saveTask: Task<Void, Never>?
 
     init() {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -1504,7 +1505,7 @@ final class AnalyticsLog {
         self.fileURL = folder.appendingPathComponent("analytics.json")
         load()
         if UserDefaults.standard.object(forKey: optInKey) == nil {
-            UserDefaults.standard.set(true, forKey: optInKey)
+            UserDefaults.standard.set(false, forKey: optInKey)
         }
     }
 
@@ -1526,6 +1527,8 @@ final class AnalyticsLog {
     }
 
     func clear() {
+        saveTask?.cancel()
+        saveTask = nil
         events.removeAll()
         try? FileManager.default.removeItem(at: fileURL)
     }
@@ -1538,10 +1541,21 @@ final class AnalyticsLog {
     }
 
     private func save() {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        guard let data = try? encoder.encode(events) else { return }
-        try? data.write(to: fileURL, options: .atomic)
+        saveTask?.cancel()
+        let snapshot = events
+        let destination = fileURL
+        saveTask = Task.detached(priority: .utility) {
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            guard let data = try? encoder.encode(snapshot) else { return }
+            try? data.write(to: destination, options: .atomic)
+            try? FileManager.default.setAttributes(
+                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                ofItemAtPath: destination.path
+            )
+        }
     }
 }
 

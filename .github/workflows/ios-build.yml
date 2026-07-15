@@ -14,7 +14,7 @@ jobs:
   build:
     name: Compile Scribeflow
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Check out repository
@@ -23,7 +23,7 @@ jobs:
       - name: Show toolchain
         run: xcodebuild -version
 
-      - name: Build app target
+      - name: Build debug app
         run: |
           set -o pipefail
           xcodebuild \
@@ -32,5 +32,29 @@ jobs:
             -configuration Debug \
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath "$RUNNER_TEMP/ScribeflowDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Run core tests
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Scribeflow.xcodeproj \
+            -scheme Scribeflow \
+            -configuration Debug \
+            -destination 'platform=iOS Simulator,name=iPhone 16 Pro,OS=latest' \
+            -derivedDataPath "$RUNNER_TEMP/ScribeflowDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            test
+
+      - name: Build release app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Scribeflow.xcodeproj \
+            -scheme Scribeflow \
+            -configuration Release \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/ScribeflowReleaseDerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             build

@@ -29,7 +29,7 @@ struct SpeakerDetectionSummary: Equatable {
 
     var badge: String {
         switch method {
-        case .diarized: "Diarized"
+        case .diarized: "Separated"
         case .partiallyDiarized: "Mixed sources"
         case .labeledTranscript: "Labeled"
         case .mixedTrack: "Mixed audio"
@@ -221,7 +221,7 @@ enum MeetingIntelligenceEngine {
         let corpus = source.map(\.text)
         let allowsMeetingSignals = meeting.allowsMeetingSignalExtraction
         let decisions = allowsMeetingSignals
-            ? extract(from: corpus, keywords: decisionCues, limit: 4, transform: distilledDecision)
+            ? extractDecisions(from: corpus, limit: 4)
             : []
         let structuredActions = meeting.allowsAccountabilityExtraction
             ? extractStructuredActions(from: source, attendees: meeting.attendees, limit: 5)
@@ -263,7 +263,7 @@ enum MeetingIntelligenceEngine {
     /// Decisions detected in a meeting's notes/transcript.
     static func decisions(for meeting: Meeting, limit: Int = 4) -> [String] {
         guard meeting.allowsMeetingSignalExtraction else { return [] }
-        return extract(from: sourceLines(for: meeting).map(\.text), keywords: decisionCues, limit: limit, transform: distilledDecision)
+        return extractDecisions(from: sourceLines(for: meeting).map(\.text), limit: limit)
     }
 
     /// Open/unresolved questions raised in the notes or transcript — the
@@ -326,10 +326,22 @@ enum MeetingIntelligenceEngine {
 
     /// Distilled decision text for a single line, or nil if it isn't a decision.
     static func decision(from line: String) -> String? {
-        let lower = line.lowercased()
-        guard decisionCues.contains(where: lower.contains) else { return nil }
+        guard containsAffirmedDecisionCue(in: line) else { return nil }
         let text = distilledDecision(line)
         return text.count >= 3 ? text : nil
+    }
+
+    static func hasAffirmedRiskSignal(in line: String) -> Bool {
+        let normalized = polarityNormalized(line)
+        let negatedPatterns = [
+            "no risk", "not a risk", "without risk", "risk is not", "risk was not",
+            "no concern", "not a concern", "without concern",
+            "no issue", "not an issue", "without issue",
+            "no problem", "not a problem", "without a problem",
+            "no blocker", "not blocked", "is not blocked", "was not blocked"
+        ]
+        guard !negatedPatterns.contains(where: normalized.contains) else { return false }
+        return riskCues.contains(where: { containsWordBounded($0, in: normalized) })
     }
 
     private struct IntelligenceSourceLine {
@@ -378,6 +390,20 @@ enum MeetingIntelligenceEngine {
         return Array(results.prefix(limit))
     }
 
+    private static func extractDecisions(from corpus: [String], limit: Int) -> [String] {
+        var seen: Set<String> = []
+        var results: [String] = []
+
+        for line in corpus where containsAffirmedDecisionCue(in: line) {
+            let decision = distilledDecision(line)
+            let key = fingerprint(decision)
+            guard !decision.isEmpty, seen.insert(key).inserted else { continue }
+            results.append(decision)
+            if results.count == limit { break }
+        }
+        return results
+    }
+
     private static func extractQuestions(from corpus: [String], limit: Int) -> [String] {
         var seen: Set<String> = []
         var results: [String] = []
@@ -410,9 +436,14 @@ enum MeetingIntelligenceEngine {
 
     /// Cues that signal a decision was made.
     static let decisionCues = [
-        "decided", "decision", "we agreed", "agreed to", "approved",
+        "decided", "decision:", "the decision is", "decision was", "made a decision",
+        "final decision", "we agreed", "agreed to", "approved",
         "greenlit", "go with", "going with", "go ahead with", "locked in",
         "final call", "chose", "settled on", "moving forward with", "we will go"
+    ]
+
+    private static let riskCues = [
+        "risk", "concern", "issue", "problem", "blocker", "blocked", "delay", "unsafe"
     ]
 
     /// A line is a real action only if it carries a commitment signal: an owner
@@ -423,11 +454,76 @@ enum MeetingIntelligenceEngine {
     private static func looksActionable(_ line: String) -> Bool {
         let lower = line.lowercased()
         guard !lower.hasSuffix("?") else { return false }
+        guard !containsNegatedCommitment(in: line) else { return false }
         if explicitOwner(in: line) != nil { return true }
         if leadingNamedOwner(in: line) != nil { return true }
         let body = strippedSpeaker(cleanLine(line))
         if earliestPreambleEnd(in: body, preambles: actionPreambles) != nil { return true }
         return opensWithImperative(body)
+    }
+
+    private static func containsAffirmedDecisionCue(in line: String) -> Bool {
+        let normalized = polarityNormalized(line)
+        let negatedPatterns = [
+            "no decision", "not decided", "never decided", "did not decide",
+            "have not decided", "has not decided", "had not decided",
+            "not agreed", "never agreed", "did not agree", "have not agreed",
+            "no agreement", "not approved", "never approved", "approval is pending",
+            "decision was not made", "decision is not final", "decision remains open",
+            "decision remains pending", "not settled", "not greenlit"
+        ]
+        guard !negatedPatterns.contains(where: normalized.contains) else { return false }
+        return decisionCues.contains(where: { containsWordBounded($0, in: normalized) })
+    }
+
+    private static func containsNegatedCommitment(in line: String) -> Bool {
+        let normalized = polarityNormalized(line)
+        if normalized.contains("not only") { return false }
+        let patterns = [
+            "will not", "do not need to", "does not need to", "did not need to",
+            "no need to", "not going to", "cannot", "can not", "should not",
+            "do not plan to", "does not plan to", "did not plan to",
+            "not responsible for", "not in charge of"
+        ]
+        return patterns.contains(where: normalized.contains)
+    }
+
+    private static func polarityNormalized(_ text: String) -> String {
+        text.lowercased()
+            .replacingOccurrences(of: "’", with: "'")
+            .replacingOccurrences(of: "won't", with: "will not")
+            .replacingOccurrences(of: "can't", with: "cannot")
+            .replacingOccurrences(of: "don't", with: "do not")
+            .replacingOccurrences(of: "doesn't", with: "does not")
+            .replacingOccurrences(of: "didn't", with: "did not")
+            .replacingOccurrences(of: "haven't", with: "have not")
+            .replacingOccurrences(of: "hasn't", with: "has not")
+            .replacingOccurrences(of: "hadn't", with: "had not")
+            .replacingOccurrences(of: "isn't", with: "is not")
+            .replacingOccurrences(of: "wasn't", with: "was not")
+            .replacingOccurrences(of: "weren't", with: "were not")
+            .replacingOccurrences(of: "aren't", with: "are not")
+            .replacingOccurrences(of: "shouldn't", with: "should not")
+            .replacingOccurrences(of: "wouldn't", with: "would not")
+            .replacingOccurrences(of: "couldn't", with: "could not")
+    }
+
+    private static func containsWordBounded(_ cue: String, in text: String) -> Bool {
+        var searchStart = text.startIndex
+        while searchStart < text.endIndex,
+              let range = text.range(
+                  of: cue,
+                  options: [.caseInsensitive],
+                  range: searchStart..<text.endIndex
+              ) {
+            let beforeIsBoundary = range.lowerBound == text.startIndex
+                || !text[text.index(before: range.lowerBound)].isLetter
+            let afterIsBoundary = range.upperBound == text.endIndex
+                || !text[range.upperBound].isLetter
+            if beforeIsBoundary && afterIsBoundary { return true }
+            searchStart = range.upperBound
+        }
+        return false
     }
 
     /// Base-form verbs that, when a line opens with one, signal an imperative task.
@@ -660,7 +756,7 @@ enum MeetingIntelligenceEngine {
 
     private static func confidenceLabel(corpusCount: Int, speakerCount: Int) -> String {
         if corpusCount >= 10 && speakerCount > 1 { return "Strong local read" }
-        if corpusCount >= 5 { return "Good local read" }
+        if corpusCount >= 5 { return "High confidence · On device" }
         return "Needs more context"
     }
 
@@ -688,7 +784,7 @@ enum MeetingIntelligenceEngine {
                 detectedCount: 0,
                 expectedCount: expectedPeople,
                 method: .none,
-                title: "No voices identified",
+                title: "No speakers identified",
                 detail: expectedPeople > 0
                     ? "\(expectedPeople) people are listed, but there is no speaker-labeled transcript yet."
                     : "Add a transcript to identify and review speakers."
@@ -701,7 +797,7 @@ enum MeetingIntelligenceEngine {
                 expectedCount: expectedPeople,
                 method: .diarized,
                 title: "\(detected) voice\(detected == 1 ? "" : "s") separated",
-                detail: "The transcription provider separated the audio by voice. Review names before sharing."
+                detail: "The transcription service separated the speakers. Review names before sharing."
             )
         }
 
@@ -710,8 +806,8 @@ enum MeetingIntelligenceEngine {
                 detectedCount: detected,
                 expectedCount: expectedPeople,
                 method: .partiallyDiarized,
-                title: "\(detected) labels · \(diarizedSpeakerKeys.count) diarized",
-                detail: "Some voices came from provider diarization and others came from saved transcript labels. Review the combined speaker list before sharing."
+                title: "\(detected) labels · \(diarizedSpeakerKeys.count) separated",
+                detail: "Some speakers were separated automatically and others came from saved transcript labels. Review the combined list before sharing."
             )
         }
 
@@ -731,7 +827,7 @@ enum MeetingIntelligenceEngine {
                 expectedCount: expectedPeople,
                 method: .mixedTrack,
                 title: "1 mixed speaker track",
-                detail: "\(expectedPeople) people are listed, but this transcript has one shared label. Enable a diarization-capable provider or split labels manually."
+                detail: "\(expectedPeople) people are listed, but this transcript has one shared label. Enable speaker separation or edit the labels manually."
             )
         }
 

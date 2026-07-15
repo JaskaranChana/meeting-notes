@@ -1,94 +1,45 @@
 import Accelerate
-import ActivityKit
 import AVFoundation
 import Foundation
-import MediaPlayer
 import Observation
 import Speech
+import UIKit
 #if canImport(FoundationModels)
 import FoundationModels
 #endif
 
-// MARK: - Live Activity
+private final class LiveAudioLevelSampler: @unchecked Sendable {
+    private var bufferCount = 0
 
-/// Attributes for the meeting-recording Live Activity. The widget extension
-/// (when present) provides the `ActivityConfiguration` view that consumes
-/// these values. The main app only starts / updates / ends activities.
-///
-/// **Setup note:** Live Activity UI requires a Widget Extension target with
-/// an `ActivityConfiguration<MeetingRecordingAttributes>` view. Add via
-/// File ▸ New ▸ Target ▸ Widget Extension, include both this app target's
-/// shared types, and check "Include Live Activity" when prompted.
-struct MeetingRecordingAttributes: ActivityAttributes {
-    public struct ContentState: Codable, Hashable {
-        /// Wall-clock time when recording started; the widget formats elapsed
-        /// from this rather than receiving a tick so it stays accurate while
-        /// the app is backgrounded.
-        var startedAt: Date
-        /// 0…1 normalized recent input level for the waveform indicator.
-        var inputLevel: Double
-        /// True when the user has paused capture — widget switches icon.
-        var isPaused: Bool
+    /// Called only by AVAudioEngine's serial tap callback.
+    func sample(_ buffer: AVAudioPCMBuffer) -> Double? {
+        bufferCount &+= 1
+        guard bufferCount >= 4 else { return nil }
+        bufferCount = 0
+
+        guard let data = buffer.floatChannelData else { return nil }
+        let frames = Int(buffer.frameLength)
+        guard frames > 0 else { return nil }
+        var rms: Float = 0
+        vDSP_rmsqv(data[0], 1, &rms, vDSP_Length(frames))
+        return min(max(Double(rms) * 12, 0), 1)
     }
-
-    /// Title shown in the Live Activity / Dynamic Island. Captured at start
-    /// so changes to the meeting title during recording don't ripple through
-    /// the activity payload.
-    var title: String
 }
 
-/// Thin wrapper around `Activity<MeetingRecordingAttributes>`. Silently no-ops
-/// on devices where Live Activities are unsupported or disabled. Holds a
-/// single active activity at a time.
 @MainActor
-final class MeetingRecordingLiveActivity {
-    static let shared = MeetingRecordingLiveActivity()
+private final class CaptureBackgroundTaskLease {
+    private var identifier = UIBackgroundTaskIdentifier.invalid
 
-    private var current: Activity<MeetingRecordingAttributes>?
-
-    /// Begin a new activity. Returns silently if Live Activities are disabled
-    /// in user settings or no widget extension is installed.
-    func start(title: String) {
-        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
-        end() // ensure only one at a time
-        let attrs = MeetingRecordingAttributes(title: title.isEmpty ? "Recording" : title)
-        let state = MeetingRecordingAttributes.ContentState(
-            startedAt: .now,
-            inputLevel: 0,
-            isPaused: false
-        )
-        do {
-            current = try Activity.request(
-                attributes: attrs,
-                content: .init(state: state, staleDate: nil)
-            )
-        } catch {
-            current = nil
+    init(name: String) {
+        identifier = UIApplication.shared.beginBackgroundTask(withName: name) { [weak self] in
+            Task { @MainActor in self?.end() }
         }
     }
 
-    /// Push a fresh content update — input level + paused state.
-    func update(inputLevel: Double, isPaused: Bool) {
-        guard let current else { return }
-        Task {
-            let startedAt = current.content.state.startedAt
-            await current.update(
-                ActivityContent(
-                    state: .init(startedAt: startedAt, inputLevel: inputLevel, isPaused: isPaused),
-                    staleDate: nil
-                )
-            )
-        }
-    }
-
-    /// End the activity immediately. Safe to call when no activity is active.
     func end() {
-        guard let current else { return }
-        let final = current
-        Task {
-            await final.end(nil, dismissalPolicy: .immediate)
-        }
-        self.current = nil
+        guard identifier != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(identifier)
+        identifier = .invalid
     }
 }
 
@@ -147,7 +98,7 @@ enum LiveSpeechFeedback: Equatable {
         case .paused: "Audio and captions are paused"
         case .captionsUnavailable: "Live captions unavailable · transcript rebuilds after Save"
         case .finalizing: "Keeping the final buffered phrase"
-        case .captured: "Ready to Save · wording and voice labels refine in background"
+        case .captured: "Ready to Save · wording and speaker labels refine in background"
         }
     }
 
@@ -192,7 +143,7 @@ final class LiveMeetingCoordinator {
     var objective = "" { didSet { schedulePurposeRefresh() } }
     var attendees = "" { didSet { schedulePurposeRefresh() } }
     var manualNotes = "" { didSet { schedulePurposeRefresh() } }
-    var selectedTemplate: NoteTemplate = .discovery
+    var selectedTemplate: NoteTemplate = .general
     var transcriptText = ""
     var transcriptParagraphs: [String] = []
     var transcriptSegments: [TranscriptionSegment] = []
@@ -260,15 +211,8 @@ final class LiveMeetingCoordinator {
     @ObservationIgnored
     private var lastAudibleInputAt: Date?
 
-    /// Audio-thread-readable mirror of `isPaused`. Plain flag so the mic tap
-    /// (which runs off the main actor) can check it without hopping actors.
     @ObservationIgnored
-    nonisolated(unsafe) private var audioPaused = false
-
-    /// The render callback is serial. Sampling every second 2,048-frame buffer
-    /// keeps the visual meter near 10 Hz without flooding the main actor.
-    @ObservationIgnored
-    nonisolated(unsafe) private var audioMeterBufferCount = 0
+    private var audioLevelSampler: LiveAudioLevelSampler?
 
     var elapsedLabel: String {
         let minutes = elapsedSeconds / 60
@@ -298,7 +242,7 @@ final class LiveMeetingCoordinator {
     }
 
     var expectedSpeakerCountTitle: String {
-        expectedSpeakerCount.map { "\($0) voice\($0 == 1 ? "" : "s")" } ?? "Auto voices"
+        expectedSpeakerCount.map { "\($0) speaker\($0 == 1 ? "" : "s")" } ?? "Detect speakers"
     }
 
     var speechFeedback: LiveSpeechFeedback {
@@ -436,10 +380,8 @@ final class LiveMeetingCoordinator {
         speechActivity = .listening
         liveCaptionsAvailable = false
         lastAudibleInputAt = nil
-        audioMeterBufferCount = 0
         errorMessage = nil
         isPaused = false
-        audioPaused = false
         acceptedFingerprints.removeAll()
         dismissedFingerprints.removeAll()
 
@@ -490,23 +432,13 @@ final class LiveMeetingCoordinator {
             let audioSink = session?.audioSink
 
             inputNode.removeTap(onBus: 0)
-            inputNode.installTap(onBus: 0, bufferSize: 2048, format: format) { [weak self, audioSink, audioWriter] buffer, _ in
-                guard let self else { return }
-                // While soft-paused, drop audio so the transcript and level
-                // freeze without tearing down the engine (instant resume).
-                guard !self.audioPaused else { return }
-                audioSink?.append(buffer)
-                audioWriter.append(buffer)
-                self.computeAndPublishLevel(buffer)
-            }
+            installAudioTap(format: format, audioSink: audioSink, audioWriter: audioWriter)
 
             audioEngine.prepare()
             try audioEngine.start()
 
             isRecording = true
             startTimer()
-            updateNowPlaying(isLive: true)
-            MeetingRecordingLiveActivity.shared.start(title: title)
         } catch {
             errorMessage = "Unable to start live capture: \(error.localizedDescription)"
             stopCapture()
@@ -518,21 +450,23 @@ final class LiveMeetingCoordinator {
     func pauseCapture() {
         guard isRecording, !isPaused else { return }
         isPaused = true
-        audioPaused = true
+        audioEngine.pause()
         inputLevel = 0
         speechActivity = .idle
         lastAudibleInputAt = nil
-        updateNowPlaying(isLive: false)
-        MeetingRecordingLiveActivity.shared.update(inputLevel: 0, isPaused: true)
     }
 
     func resumeCapture() {
         guard isRecording, isPaused else { return }
-        isPaused = false
-        audioPaused = false
-        speechActivity = .listening
-        lastAudibleInputAt = nil
-        updateNowPlaying(isLive: true)
+        do {
+            audioEngine.prepare()
+            try audioEngine.start()
+            isPaused = false
+            speechActivity = .listening
+            lastAudibleInputAt = nil
+        } catch {
+            errorMessage = "Unable to resume capture: \(error.localizedDescription)"
+        }
     }
 
     func stopCapture() {
@@ -582,7 +516,7 @@ final class LiveMeetingCoordinator {
         }
         do {
             pendingAudioFileName = try PendingMeetingAudioStore.adopt(temporaryURL)
-            speakerStatus = "Recording secured · Save to refine wording and voice labels"
+            speakerStatus = "Recording secured · Save to refine wording and speaker labels"
         } catch {
             try? FileManager.default.removeItem(at: temporaryURL)
             speakerStatus = "The live transcript is ready, but enhanced processing is unavailable."
@@ -604,14 +538,11 @@ final class LiveMeetingCoordinator {
         captureGeneration &+= 1
         isRecording = false
         isPaused = false
-        audioPaused = false
-        audioMeterBufferCount = 0
+        audioLevelSampler = nil
         inputLevel = 0
         speechActivity = .idle
         liveCaptionsAvailable = false
         lastAudibleInputAt = nil
-        clearNowPlaying()
-        MeetingRecordingLiveActivity.shared.end()
         timer?.invalidate()
         timer = nil
         pendingTranscriptUpdateTask?.cancel()
@@ -707,7 +638,7 @@ final class LiveMeetingCoordinator {
         refreshPurposeUnderstanding()
     }
 
-    func saveMeeting(into store: MeetingStore, calendarEvent: CalendarEventSnapshot? = nil) async -> Meeting.ID {
+    func saveMeeting(into store: MeetingStore, calendarEvent: CalendarEventSnapshot? = nil) -> Meeting.ID {
         let normalizedAttendees = attendees
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -723,78 +654,171 @@ final class LiveMeetingCoordinator {
             ? "Understand and organize what matters."
             : objective
 
-        if let fileName = pendingAudioFileName {
-            let durationMinutes = max(1, Int(ceil(Double(elapsedSeconds) / 60.0)))
-            let capturedAt = Date.now.addingTimeInterval(-Double(elapsedSeconds))
+        let capturedDurationSeconds = max(1, elapsedSeconds)
+        let durationMinutes = max(1, Int(ceil(Double(capturedDurationSeconds) / 60.0)))
+        let capturedAt = Date.now.addingTimeInterval(-Double(elapsedSeconds))
+        let capturedNotes = manualNotes
+        let capturedMoments = bookmarks.map(\.text)
+        let capturedParagraphs = transcriptParagraphs
+        let capturedSegments = transcriptSegments
+        let capturedTemplate = selectedTemplate
+        let capturedMeetingMode = meetingMode
+        let capturedConsentState = consentState
+        let capturedRetentionPolicy = retentionPolicy
+        let context = recognitionContext(includeLiveVocabulary: true)
+        let existingPendingFileName = pendingAudioFileName
+        let writer = audioWriter
+        let session = speechSession
+        let hasCaptureResources = existingPendingFileName != nil || writer != nil || session != nil || isRecording
+
+        if hasCaptureResources {
+            pendingAudioFileName = nil
+            audioWriter = nil
+            speechSession = nil
+            stopAudioInput()
+            beginStoppingCapture()
+            deactivateAudioSession()
+            isFinalizingSpeech = false
+
             let pending = store.addPendingLiveMeeting(
                 title: resolvedTitle,
                 workspace: resolvedWorkspace,
                 attendees: mergedAttendees,
                 objective: resolvedObjective,
-                notes: manualNotes,
-                moments: bookmarks.map(\.text),
-                transcriptParagraphs: transcriptParagraphs,
-                transcriptionSegments: transcriptSegments,
+                notes: capturedNotes,
+                moments: capturedMoments,
+                transcriptParagraphs: capturedParagraphs,
+                transcriptionSegments: capturedSegments,
                 when: capturedAt,
                 durationMinutes: durationMinutes,
-                selectedTemplate: selectedTemplate,
-                meetingMode: meetingMode,
-                consentState: consentState,
-                retentionPolicy: retentionPolicy,
+                selectedTemplate: capturedTemplate,
+                meetingMode: capturedMeetingMode,
+                consentState: capturedConsentState,
+                retentionPolicy: capturedRetentionPolicy,
                 calendarEventID: calendarEvent?.id,
                 calendarStartDate: calendarEvent?.startDate,
                 calendarEndDate: calendarEvent?.endDate
             )
-            let job = PendingMeetingProcessingJob(
-                meetingID: pending.id,
-                fileName: fileName,
-                context: recognitionContext(includeLiveVocabulary: true),
-                capturedNotes: manualNotes,
-                pendingNotes: pending.pendingNotes,
-                moments: bookmarks.map(\.text),
-                liveWordCount: transcriptParagraphs.reduce(0) {
-                    $0 + $1.split(whereSeparator: \.isWhitespace).count
-                },
-                recovery: PendingMeetingRecoveryPayload(
+            let backgroundTaskLease = CaptureBackgroundTaskLease(
+                name: "Secure Scribeflow capture"
+            )
+
+            Task { @MainActor in
+                defer { backgroundTaskLease.end() }
+
+                let audioFinalization = Task<URL?, Never> {
+                    guard let writer else { return nil }
+                    return await writer.finish()
+                }
+                let speechFinalization = Task<String, Never> {
+                    await session?.finish() ?? ""
+                }
+                let liveTranscript = capturedParagraphs.joined(separator: "\n")
+                store.updatePendingLiveTranscript(pending.id, transcript: liveTranscript)
+                let temporaryAudioURL = await audioFinalization.value
+
+                let fileName: String
+                if let existingPendingFileName {
+                    fileName = existingPendingFileName
+                } else if let temporaryAudioURL {
+                    do {
+                        fileName = try await PendingMeetingFileTransfer.shared
+                            .adoptForProcessing(temporaryAudioURL)
+                    } catch {
+                        if let preservedURL = try? await PendingMeetingFileTransfer.shared
+                            .preserveAsRecording(temporaryAudioURL) {
+                            _ = store.finishPendingMeetingPreservingAudio(
+                                pending.id,
+                                recordingURL: preservedURL,
+                                recovery: nil,
+                                message: "Saved with original audio and the live transcript"
+                            )
+                        } else {
+                            store.finishPendingMeetingWithLiveTranscript(
+                                pending.id,
+                                message: "Saved with the live transcript"
+                            )
+                        }
+                        return
+                    }
+                } else {
+                    store.finishPendingMeetingWithLiveTranscript(
+                        pending.id,
+                        message: "Saved with the live transcript"
+                    )
+                    return
+                }
+
+                let recovery = PendingMeetingRecoveryPayload(
                     title: resolvedTitle,
                     workspace: resolvedWorkspace,
                     attendees: mergedAttendees,
                     objective: resolvedObjective,
-                    liveTranscript: transcriptParagraphs.joined(separator: "\n"),
+                    liveTranscript: liveTranscript,
                     capturedAt: capturedAt,
                     durationMinutes: durationMinutes,
-                    durationSeconds: max(1, elapsedSeconds),
-                    selectedTemplate: selectedTemplate,
-                    meetingMode: meetingMode,
-                    consentState: consentState,
-                    retentionPolicy: retentionPolicy,
+                    durationSeconds: capturedDurationSeconds,
+                    selectedTemplate: capturedTemplate,
+                    meetingMode: capturedMeetingMode,
+                    consentState: capturedConsentState,
+                    retentionPolicy: capturedRetentionPolicy,
                     calendarEventID: calendarEvent?.id,
                     calendarStartDate: calendarEvent?.startDate,
                     calendarEndDate: calendarEvent?.endDate
                 )
-            )
-            _ = await MeetingProcessingCoordinator.shared.enqueue(job, using: store)
-            pendingAudioFileName = nil
+                let job = PendingMeetingProcessingJob(
+                    meetingID: pending.id,
+                    fileName: fileName,
+                    context: context,
+                    capturedNotes: capturedNotes,
+                    pendingNotes: pending.pendingNotes,
+                    moments: capturedMoments,
+                    liveWordCount: liveTranscript.split(whereSeparator: \.isWhitespace).count,
+                    recovery: recovery
+                )
+                _ = await MeetingProcessingCoordinator.shared.enqueue(job, using: store)
+
+                // The durable audio job is now safe. Let the recognizer finish
+                // its buffered tail independently and improve the placeholder
+                // transcript only if enhanced processing has not completed yet.
+                Task { @MainActor in
+                    let finalizedTranscript = await speechFinalization.value
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    store.updatePendingLiveTranscript(
+                        pending.id,
+                        transcript: finalizedTranscript
+                    )
+                }
+            }
             return pending.id
         }
 
-        let id = await store.addLiveMeeting(
+        let normalizedSegments = SpeakerIdentityResolver.normalizedSegments(capturedSegments)
+        let transcriptLines = normalizedSegments.isEmpty
+            ? capturedParagraphs.map {
+                TranscriptLine(speaker: "Meeting", role: "Live capture", text: $0)
+            }
+            : normalizedSegments.map {
+                TranscriptLine(speaker: $0.speaker, role: "On-device capture", text: $0.text)
+            }
+        let id = store.addMeeting(
             title: resolvedTitle,
             workspace: resolvedWorkspace,
             attendees: mergedAttendees,
             objective: resolvedObjective,
-            notes: manualNotes,
-            moments: bookmarks.map(\.text),
-            transcriptParagraphs: transcriptParagraphs,
-            transcriptionSegments: transcriptSegments,
-            meetingMode: meetingMode,
-            consentState: consentState,
-            retentionPolicy: retentionPolicy,
+            notes: capturedNotes,
+            moments: capturedMoments,
+            transcript: transcriptLines,
+            stage: "Captured live on iPhone",
+            durationMinutes: durationMinutes,
+            meetingMode: capturedMeetingMode,
+            consentState: capturedConsentState,
+            retentionPolicy: capturedRetentionPolicy,
             calendarEventID: calendarEvent?.id,
             calendarStartDate: calendarEvent?.startDate,
             calendarEndDate: calendarEvent?.endDate
         )
-        store.selectTemplate(selectedTemplate, for: id)
+        store.selectTemplate(capturedTemplate, for: id)
         return id
     }
 
@@ -938,6 +962,9 @@ final class LiveMeetingCoordinator {
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+        let inferredSpeakerCount = participantNames.count >= 2
+            ? min(participantNames.count, 8)
+            : nil
 
         return SpeechRecognitionContext(
             title: title,
@@ -949,14 +976,15 @@ final class LiveMeetingCoordinator {
             templateGuidance: "\(selectedTemplate.description) \(selectedTemplate.aiHint)",
             vocabulary: includeLiveVocabulary ? finalPassVocabulary : [],
             localeIdentifier: recognitionLocale.identifier,
-            expectedSpeakerCount: expectedSpeakerCount
+            expectedSpeakerCount: expectedSpeakerCount ?? inferredSpeakerCount
         )
     }
 
     private var finalPassVocabulary: [String] {
         let stopWords: Set<String> = [
             "about", "after", "because", "before", "could", "meeting", "should",
-            "their", "there", "these", "they", "this", "through", "today", "would"
+            "their", "there", "these", "they", "this", "through", "today", "would",
+            "never", "without", "cannot", "don't", "didn't", "isn't", "wasn't", "won't"
         ]
         let tokens = transcriptParagraphs
             .joined(separator: " ")
@@ -964,17 +992,24 @@ final class LiveMeetingCoordinator {
                 .union(CharacterSet(charactersIn: "+#.'-"))
                 .inverted)
             .filter { $0.count >= 3 }
+        let frequencies = Dictionary(
+            tokens.map { ($0.lowercased(), 1) },
+            uniquingKeysWith: +
+        )
         var seen: Set<String> = []
 
         return tokens.compactMap { token in
             let lower = token.lowercased()
             guard !stopWords.contains(lower) else { return nil }
-            let isDistinctive = token != lower
-                || token.rangeOfCharacter(from: .decimalDigits) != nil
-                || token.contains("+")
+            let letters = token.filter(\.isLetter)
+            let isAcronym = letters.count >= 2
+                && letters.count <= 8
+                && letters == letters.uppercased()
+            let hasTechnicalMarker = token.contains("+")
                 || token.contains("#")
                 || token.contains("-")
-                || token.count >= 9
+            let isRepeatedLongTerm = token.count >= 8 && frequencies[lower, default: 0] >= 2
+            let isDistinctive = isAcronym || hasTechnicalMarker || isRepeatedLongTerm
             guard isDistinctive, seen.insert(lower).inserted else { return nil }
             return String(token.prefix(48))
         }
@@ -1121,24 +1156,24 @@ final class LiveMeetingCoordinator {
             }
         }
 
-        if lower.contains("next") || lower.contains("follow up") || lower.contains("owner") {
-            return "Next step: \(cleaned)"
+        if let decision = MeetingIntelligenceEngine.decision(from: cleaned) {
+            return "Decision: \(decision)"
         }
 
-        if lower.contains("need") || lower.contains("needs") || lower.contains("must") {
-            return "Need: \(cleaned)"
+        if let action = MeetingIntelligenceEngine.actionItem(from: cleaned) {
+            return "Next step: \(action)"
+        }
+
+        if MeetingIntelligenceEngine.hasAffirmedRiskSignal(in: cleaned) {
+            return "Risk: \(cleaned)"
         }
 
         if lower.contains("budget") || lower.contains("price") {
-            return "Budget signal: \(cleaned)"
+            return "Budget: \(cleaned)"
         }
 
         if lower.contains("timeline") || lower.contains("quarter") || lower.contains("launch") {
             return "Timing: \(cleaned)"
-        }
-
-        if lower.contains("risk") || lower.contains("issue") || lower.contains("problem") || lower.contains("security") {
-            return "Risk: \(cleaned)"
         }
 
         return cleaned
@@ -1188,40 +1223,8 @@ final class LiveMeetingCoordinator {
                 guard !self.isPaused else { return }
                 self.elapsedSeconds += 1
                 self.refreshSpeechActivity()
-                // Refresh elapsed time on Lock Screen / Control Center every 5s
-                if self.elapsedSeconds % 5 == 0 {
-                    self.updateNowPlaying(isLive: true)
-                    MeetingRecordingLiveActivity.shared.update(
-                        inputLevel: self.inputLevel,
-                        isPaused: false
-                    )
-                }
             }
         }
-    }
-
-    /// Push current recording state into the system Now Playing center so
-    /// the Lock Screen + Control Center show "Scribeflow — Recording …"
-    /// with elapsed time. The user can glance without unlocking. This does
-    /// not surface playback transport controls because we aren't a media
-    /// player; we're using NPIC purely as a status surface tied to the
-    /// background-audio session.
-    private func updateNowPlaying(isLive: Bool) {
-        let center = MPNowPlayingInfoCenter.default()
-        var info: [String: Any] = [:]
-        info[MPMediaItemPropertyTitle] = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? "Live capture"
-            : title
-        info[MPMediaItemPropertyArtist] = "Scribeflow"
-        info[MPMediaItemPropertyPlaybackDuration] = TimeInterval(elapsedSeconds + 1)
-        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = TimeInterval(elapsedSeconds)
-        info[MPNowPlayingInfoPropertyPlaybackRate] = isLive ? 1.0 : 0.0
-        info[MPNowPlayingInfoPropertyIsLiveStream] = isLive
-        center.nowPlayingInfo = info
-    }
-
-    private func clearNowPlaying() {
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
     }
 
     private func configureAudioSession() throws {
@@ -1257,25 +1260,30 @@ final class LiveMeetingCoordinator {
         try audioEngine.start()
     }
 
-    private nonisolated func computeAndPublishLevel(_ buffer: AVAudioPCMBuffer) {
-        audioMeterBufferCount &+= 1
-        guard audioMeterBufferCount >= 2 else { return }
-        audioMeterBufferCount = 0
+    private func installAudioTap(
+        format: AVAudioFormat,
+        audioSink: SpeechAudioBufferSink?,
+        audioWriter: TemporaryMeetingAudioWriter
+    ) {
+        let sampler = LiveAudioLevelSampler()
+        audioLevelSampler = sampler
+        audioEngine.inputNode.installTap(onBus: 0, bufferSize: 2048, format: format) {
+            [weak self, audioSink, audioWriter, sampler] buffer, _ in
+            guard let ownedBuffer = AudioPCMBufferCopy.make(from: buffer) else { return }
+            audioSink?.appendOwned(ownedBuffer)
+            audioWriter.appendOwned(ownedBuffer)
 
-        guard let data = buffer.floatChannelData else { return }
-        let frames = Int(buffer.frameLength)
-        guard frames > 0 else { return }
-        var rms: Float = 0
-        vDSP_rmsqv(data[0], 1, &rms, vDSP_Length(frames))
-        let normalized = min(max(Double(rms) * 12, 0), 1)
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            // A small low-pass filter removes visual chatter without scheduling
-            // overlapping SwiftUI animations for every audio sample.
-            self.inputLevel = (self.inputLevel * 0.35) + (normalized * 0.65)
-            if normalized >= 0.08 {
-                self.noteAudibleSpeech()
+            guard let normalized = sampler.sample(buffer) else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.publishInputLevel(normalized)
             }
+        }
+    }
+
+    private func publishInputLevel(_ normalized: Double) {
+        inputLevel = (inputLevel * 0.35) + (normalized * 0.65)
+        if normalized >= 0.08 {
+            noteAudibleSpeech()
         }
     }
 
@@ -1312,12 +1320,8 @@ final class LiveMeetingCoordinator {
         audioEngine.inputNode.removeTap(onBus: 0)
         let format = audioEngine.inputNode.outputFormat(forBus: 0)
         guard format.sampleRate > 0 else { return }
-        audioEngine.inputNode.installTap(onBus: 0, bufferSize: 2048, format: format) { [weak self, audioSink, audioWriter] buffer, _ in
-            guard let self, !self.audioPaused else { return }
-            audioSink?.append(buffer)
-            audioWriter?.append(buffer)
-            self.computeAndPublishLevel(buffer)
-        }
+        guard let audioWriter else { return }
+        installAudioTap(format: format, audioSink: audioSink, audioWriter: audioWriter)
     }
 }
 

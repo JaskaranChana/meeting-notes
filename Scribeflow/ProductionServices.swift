@@ -356,6 +356,7 @@ private actor MultipartAudioUploadBuilder {
         switch pathExtension.lowercased() {
         case "wav": "audio/wav"
         case "aif", "aiff": "audio/aiff"
+        case "caf": "audio/x-caf"
         case "mp3": "audio/mpeg"
         default: "audio/mp4"
         }
@@ -570,22 +571,30 @@ final class TranscriptionRecoveryCoordinator {
                     continue
                 }
 
-                let localFallback = LocalVoiceRecordingService()
-                localFallback.configureTranscriptionContext(
+                let preferredLocale = UserDefaults.standard.string(
+                    forKey: SpeechRecognitionSupport.localePreferenceKey
+                )
+                let context = SpeechRecognitionContext(
                     title: meeting.title,
                     workspace: meeting.workspace,
-                    notes: [meeting.objective, meeting.rawNotes, meeting.attendees.joined(separator: ", ")]
-                        .filter { !$0.isEmpty }
-                        .joined(separator: "\n"),
+                    objective: meeting.objective,
                     attendees: meeting.attendees,
+                    notes: meeting.rawNotes,
+                    templateTitle: meeting.selectedTemplate.title,
+                    templateGuidance: meeting.selectedTemplate.aiHint,
+                    vocabulary: meeting.attendees,
+                    localeIdentifier: preferredLocale?.isEmpty == false ? preferredLocale : nil,
                     expectedSpeakerCount: job.expectedSpeakerCount
                 )
-                let provider = TranscriptionProviderFactory.make(localFallback: localFallback)
 
                 job.markRunning()
                 await queue.upsert(job)
                 do {
-                    let result = try await provider.transcribe(audioURL: audioURL)
+                    let result = try await EnhancedMeetingTranscriptionService.shared.transcribe(
+                        audioURL: audioURL,
+                        context: context,
+                        liveWordCount: 0
+                    )
                     if store.applyRecoveredTranscript(
                         result,
                         recordingID: job.recordingID,
@@ -593,6 +602,10 @@ final class TranscriptionRecoveryCoordinator {
                     ) {
                         job.markCompleted()
                         await queue.remove(id: job.id)
+                        _ = await MeetingProcessingNotification.sendReady(
+                            meetingID: meetingID,
+                            title: meeting.title
+                        )
                     } else {
                         job.markFailed(VoiceRecordingError.noTranscription.localizedDescription)
                         await queue.upsert(job)
@@ -608,6 +621,6 @@ final class TranscriptionRecoveryCoordinator {
             }
         }
 
-        await LocalSpeakerDiarizationService.shared.releaseModels()
+        await EnhancedMeetingTranscriptionService.shared.releaseModels()
     }
 }

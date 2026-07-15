@@ -31,8 +31,8 @@ private actor MeetingTranscriptSnapshotBuilder {
 
 struct MeetingDetailView: View {
     @Environment(MeetingStore.self) private var store
-    @Environment(NavChrome.self) private var navChrome
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @AppStorage("preferredRewriteStyle") private var preferredRewriteStyleRaw = NoteRewriteStyle.concise.rawValue
     let meetingID: Meeting.ID
     @State var isRewriting = false
@@ -49,7 +49,6 @@ struct MeetingDetailView: View {
     @State var includePrivateNotesInShare = true
     @State var includeTranscriptInShare = false
     @State var hasAnimatedIn = false
-    @State private var didEnterDetail = false
     @State var showEnhanced = false
     @State var trustControlsExpanded = false
     @State var shareOptionsExpanded = false
@@ -216,61 +215,13 @@ struct MeetingDetailView: View {
                         .padding(.bottom, 40)
                         .readingWidth()
                         .animation(.easeOut(duration: 0.16), value: selectedTab)
-                        .gesture(
-                            DragGesture(minimumDistance: 30)
-                                .onEnded { value in
-                                    let h = value.translation.width
-                                    let v = abs(value.translation.height)
-                                    guard abs(h) > 60, v < 80 else { return }
-                                    let all = visibleTabs(for: meeting)
-                                    guard let idx = all.firstIndex(of: selectedTab) else { return }
-                                    if h < 0, idx < all.count - 1 {
-                                        HapticEngine.tap(.light)
-                                        withAnimation(AppMotion.smooth) { selectedTab = all[idx + 1] }
-                                    } else if h > 0, idx > 0 {
-                                        HapticEngine.tap(.light)
-                                        withAnimation(AppMotion.smooth) { selectedTab = all[idx - 1] }
-                                    }
-                                }
-                        )
                     }
                 }
                 .background(AppPalette.background.ignoresSafeArea())
                 .accessibilityIdentifier("meetingdetail.view")
-                .navigationTitle("Capture brief")
+                .navigationTitle("Meeting")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Menu {
-                            Button {
-                                store.updatePurposeOverride(nil, for: meeting.id)
-                            } label: {
-                                Label("Automatic", systemImage: meeting.purposeOverride == nil ? "checkmark" : "wand.and.stars")
-                            }
-                            Divider()
-                            ForEach(CapturePurposeKind.allCases, id: \.self) { purpose in
-                                Button {
-                                    store.updatePurposeOverride(purpose, for: meeting.id)
-                                } label: {
-                                    Label(purpose.title, systemImage: meeting.purposeOverride == purpose ? "checkmark" : purpose.systemImage)
-                                }
-                            }
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: meeting.purpose.kind.systemImage)
-                                    .font(.caption.weight(.semibold))
-                                Text(meeting.purpose.displayTitle)
-                                    .font(.caption.weight(.semibold))
-                                    .lineLimit(1)
-                            }
-                            .foregroundStyle(AppPalette.accent)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(AppPalette.accent.opacity(0.08), in: Capsule())
-                        }
-                        .accessibilityLabel("Capture purpose: \(meeting.purpose.displayTitle)")
-                    }
-
                     ToolbarItemGroup(placement: .topBarTrailing) {
                         Menu {
                             Button {
@@ -455,11 +406,7 @@ struct MeetingDetailView: View {
                 .onAppear {
                     hasAnimatedIn = true
                     store.scoreAndSave(for: meeting.id)
-                    if !didEnterDetail {
-                        didEnterDetail = true
-                        navChrome.detailDepth += 1
-                        refreshDerived()   // immediate first paint; later updates are debounced via .task
-                    }
+                    refreshDerived()
                 }
                 .task(id: store.revision) {
                     // Debounce: each keystroke bumps store.revision, which cancels
@@ -487,10 +434,6 @@ struct MeetingDetailView: View {
                     promptTask?.cancel()
                     rewriteTask = nil
                     promptTask = nil
-                    if didEnterDetail {
-                        didEnterDetail = false
-                        navChrome.detailDepth = max(0, navChrome.detailDepth - 1)
-                    }
                 }
             } else {
                 ContentUnavailableView("Meeting not found", systemImage: "exclamationmark.triangle")
@@ -818,8 +761,8 @@ struct MeetingDetailView: View {
 
             Label(
                 report.speakerDetection.detectedCount == 0
-                    ? "No voice labels"
-                    : "\(report.speakerDetection.detectedCount) voice label\(report.speakerDetection.detectedCount == 1 ? "" : "s")",
+                    ? "No speaker labels"
+                    : "\(report.speakerDetection.detectedCount) speaker label\(report.speakerDetection.detectedCount == 1 ? "" : "s")",
                 systemImage: "person.wave.2"
             )
                 .font(.caption.weight(.medium))
@@ -911,7 +854,7 @@ struct MeetingDetailView: View {
                     Text(detailParts.joined(separator: " · "))
                         .font(.caption)
                         .foregroundStyle(AppPalette.secondaryInk)
-                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 8)
                 Image(systemName: "chevron.right")
@@ -950,14 +893,28 @@ struct MeetingDetailView: View {
             : 0
         let risks = meetingSignals.risks.count
         let score = meeting.allowsAccountabilityExtraction ? meeting.score?.overall : nil
-        return HStack(spacing: 0) {
-            overviewMetaStat("Decisions", "\(decisions)", nil, AppPalette.success)
-            overviewStatDivider
-            overviewMetaStat("Actions", "\(actions)", nil, AppPalette.coral)
-            overviewStatDivider
-            overviewMetaStat("Risks", "\(risks)", nil, AppPalette.ink)
-            overviewStatDivider
-            overviewMetaStat("Score", score.map { "\($0)" } ?? "—", score != nil ? "/100" : nil, AppPalette.ink)
+        return Group {
+            if dynamicTypeSize.isAccessibilitySize {
+                VStack(spacing: 0) {
+                    overviewMetaStat("Decisions", "\(decisions)", nil, AppPalette.success)
+                    EditorialRule()
+                    overviewMetaStat("Actions", "\(actions)", nil, AppPalette.coral)
+                    EditorialRule()
+                    overviewMetaStat("Risks", "\(risks)", nil, AppPalette.ink)
+                    EditorialRule()
+                    overviewMetaStat("Score", score.map { "\($0)" } ?? "—", score != nil ? "/100" : nil, AppPalette.ink)
+                }
+            } else {
+                HStack(spacing: 0) {
+                    overviewMetaStat("Decisions", "\(decisions)", nil, AppPalette.success)
+                    overviewStatDivider
+                    overviewMetaStat("Actions", "\(actions)", nil, AppPalette.coral)
+                    overviewStatDivider
+                    overviewMetaStat("Risks", "\(risks)", nil, AppPalette.ink)
+                    overviewStatDivider
+                    overviewMetaStat("Score", score.map { "\($0)" } ?? "—", score != nil ? "/100" : nil, AppPalette.ink)
+                }
+            }
         }
         .overlay(alignment: .top) { EditorialRule() }
         .overlay(alignment: .bottom) { EditorialRule() }
@@ -972,7 +929,7 @@ struct MeetingDetailView: View {
             EditorialEyebrow(text: label)
             HStack(alignment: .firstTextBaseline, spacing: 2) {
                 Text(value)
-                    .font(.system(size: 22, weight: .medium, design: .serif))
+                    .font(AppFont.serif(.title3, weight: .medium))
                     .foregroundStyle(tint)
                     .contentTransition(.numericText())
                 if let suffix {
@@ -1371,15 +1328,15 @@ struct MeetingDetailView: View {
         let title = isProcessing ? "Draft transcript" : "Transcript ready"
         let detail: String
         if isProcessing {
-            detail = "Audio secured · wording and voice labels may update"
+            detail = "Audio secured · wording and speaker labels may update"
         } else if voiceCount > 1 {
-            detail = "\(voiceCount) voice labels detected · review names before sharing"
+            detail = "\(voiceCount) speaker labels detected · review names before sharing"
         } else if voiceCount == 1 {
             detail = meeting.isPersonalCapture
                 ? "Single voice detected · label can be renamed"
-                : "1 voice label detected · review if others spoke"
+                : "1 speaker label detected · review if others spoke"
         } else {
-            detail = "No voice labels detected · transcript remains searchable"
+            detail = "No speaker labels detected · transcript remains searchable"
         }
 
         return HStack(spacing: 12) {
@@ -1637,7 +1594,7 @@ struct MeetingDetailView: View {
         let subtitle: String = {
             if speakers > 0 || actions > 0 {
                 let parts: [String] = [
-                    speakers > 0 ? "\(speakers) voice label\(speakers == 1 ? "" : "s")" : nil,
+                    speakers > 0 ? "\(speakers) speaker label\(speakers == 1 ? "" : "s")" : nil,
                     actions > 0 ? "\(actions) action\(actions == 1 ? "" : "s")" : nil
                 ].compactMap { $0 }
                 return parts.joined(separator: " · ")
@@ -1831,38 +1788,85 @@ struct MeetingDetailView: View {
     private func meetingDetailHero(_ meeting: Meeting) -> some View {
         let words = meeting.transcript.reduce(0) { $0 + $1.text.split(whereSeparator: { $0 == " " }).count }
         return VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top) {
-                EditorialEyebrow(text: "\(meeting.workspace) · \(meeting.when.formatted(.dateTime.month(.abbreviated).day()))")
-                Spacer(minLength: 8)
-                if meeting.allowsMeetingSignalExtraction {
-                    Button {
-                        showingContextPicker = true
-                    } label: {
-                        Image(systemName: meeting.contextMode.systemImage)
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(AppPalette.secondaryInk)
-                            .frame(width: 34, height: 34)
-                            .background(AppPalette.cardBackground, in: Circle())
-                            .overlay(Circle().strokeBorder(AppPalette.border, lineWidth: 1))
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 8) {
+                        EditorialEyebrow(text: "\(meeting.workspace) · \(meeting.when.formatted(.dateTime.month(.abbreviated).day()))")
+                        purposeMenu(meeting)
                     }
-                    .buttonStyle(PressScaleButtonStyle())
-                    .accessibilityLabel("Change meeting mode")
+                } else {
+                    HStack(alignment: .top) {
+                        EditorialEyebrow(text: "\(meeting.workspace) · \(meeting.when.formatted(.dateTime.month(.abbreviated).day()))")
+                        Spacer(minLength: 8)
+                        purposeMenu(meeting)
+                    }
                 }
             }
 
             Text(meeting.title)
-                .font(.system(size: 32, weight: .medium, design: .serif))
+                .font(AppFont.serif(.largeTitle, weight: .medium))
                 .foregroundStyle(AppPalette.ink)
                 .lineSpacing(2)
                 .fixedSize(horizontal: false, vertical: true)
 
-            HStack(spacing: 12) {
-                if !meeting.attendees.isEmpty {
-                    EditorialAvatarStack(names: meeting.attendees, size: 22, max: 4, borderColor: AppPalette.cardBackground)
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 8) {
+                        meetingHeroMetadata(meeting, words: words)
+                    }
+                } else {
+                    HStack(spacing: 12) {
+                        meetingHeroMetadata(meeting, words: words)
+                    }
                 }
-                EditorialMeta(text: meetingMetaLine(meeting, words: words))
             }
         }
+    }
+
+    @ViewBuilder
+    private func meetingHeroMetadata(_ meeting: Meeting, words: Int) -> some View {
+        if !meeting.attendees.isEmpty {
+            EditorialAvatarStack(names: meeting.attendees, size: 22, max: 4, borderColor: AppPalette.cardBackground)
+        }
+        EditorialMeta(text: meetingMetaLine(meeting, words: words))
+        if meeting.allowsMeetingSignalExtraction {
+            Button {
+                showingContextPicker = true
+            } label: {
+                Label(meeting.contextMode.title, systemImage: meeting.contextMode.systemImage)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(AppPalette.secondaryInk)
+                    .frame(minHeight: 36)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Meeting mode, \(meeting.contextMode.title)")
+        }
+    }
+
+    private func purposeMenu(_ meeting: Meeting) -> some View {
+        Menu {
+            Button {
+                store.updatePurposeOverride(nil, for: meeting.id)
+            } label: {
+                Label("Automatic", systemImage: meeting.purposeOverride == nil ? "checkmark" : "wand.and.stars")
+            }
+            Divider()
+            ForEach(CapturePurposeKind.allCases, id: \.self) { purpose in
+                Button {
+                    store.updatePurposeOverride(purpose, for: meeting.id)
+                } label: {
+                    Label(purpose.title, systemImage: meeting.purposeOverride == purpose ? "checkmark" : purpose.systemImage)
+                }
+            }
+        } label: {
+            Label(meeting.purpose.displayTitle, systemImage: meeting.purpose.kind.systemImage)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(AppPalette.accent)
+                .padding(.horizontal, 10)
+                .frame(minHeight: 36)
+                .background(AppPalette.accent.opacity(0.08), in: Capsule())
+        }
+        .accessibilityLabel("Capture purpose: \(meeting.purpose.displayTitle)")
     }
 
     private func meetingMetaLine(_ meeting: Meeting, words: Int) -> String {
@@ -1965,6 +1969,11 @@ struct MeetingDetailView: View {
                             ),
                             label: \.title
                         )
+
+                        Text(meeting.retentionPolicy.detail)
+                            .font(.caption)
+                            .foregroundStyle(AppPalette.tertiaryInk)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     .transition(.opacity.combined(with: .move(edge: .top)))
                 }
@@ -1973,7 +1982,6 @@ struct MeetingDetailView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("People")
                             .font(.caption.weight(.bold))
-                            .kerning(1.1)
                             .foregroundStyle(AppPalette.secondaryInk)
 
                         Text(meeting.attendees.joined(separator: ", "))
@@ -2037,7 +2045,6 @@ struct MeetingDetailView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("DIGEST")
                     .font(.caption2.weight(.bold))
-                    .kerning(1.2)
                     .foregroundStyle(AppPalette.secondaryInk)
                 Text(meeting.objective.isEmpty ? meeting.title : meeting.objective)
                     .font(.title3.weight(.bold))
@@ -2280,7 +2287,6 @@ struct MeetingDetailView: View {
                     .foregroundStyle(tint)
                 Text(title.uppercased())
                     .font(.caption2.weight(.bold))
-                    .kerning(1.0)
                     .foregroundStyle(tint)
             }
             .padding(.horizontal, 20)
@@ -2406,7 +2412,6 @@ struct MeetingDetailView: View {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Review flags")
                                     .font(.caption.weight(.bold))
-                                    .kerning(1.0)
                                     .foregroundStyle(AppPalette.secondaryInk)
 
                                 ForEach(flags, id: \.self) { flag in
@@ -2447,12 +2452,12 @@ struct MeetingDetailView: View {
                             .buttonStyle(.bordered)
                             .tint(AppPalette.ink)
 
-                            Button("Purge transcript") {
+                            Button("Delete source media") {
                                 store.purgeTranscript(for: meeting.id)
                             }
                             .buttonStyle(.bordered)
-                            .tint(AppPalette.ink)
-                            .disabled(meeting.transcript.isEmpty)
+                            .tint(AppPalette.coral)
+                            .disabled(meeting.transcript.isEmpty && meeting.audioRecordings.isEmpty)
                         }
                     }
                     .transition(.opacity.combined(with: .move(edge: .top)))
@@ -2517,7 +2522,7 @@ struct MeetingDetailView: View {
                         let voices = recording.detectedSpeakerCount
                         Label(
                             recording.diarizationAvailable
-                                ? "\(provider.title) · \(voices) voice\(voices == 1 ? "" : "s") separated"
+                                ? "\(provider.title) · \(voices) speaker\(voices == 1 ? "" : "s") separated"
                                 : "\(provider.title) · speaker separation unavailable",
                             systemImage: recording.diarizationAvailable ? "person.wave.2.fill" : "waveform"
                         )
@@ -2550,7 +2555,7 @@ struct MeetingDetailView: View {
                                 expectedSpeakerCount: nil
                             )
                         } label: {
-                            Label("Automatic voices", systemImage: "person.wave.2")
+                            Label("Detect speakers", systemImage: "person.wave.2")
                         }
 
                         ForEach(1...6, id: \.self) { count in
@@ -2644,7 +2649,7 @@ struct MeetingDetailView: View {
                 }?.detectedSpeakerCount ?? 0
                 toast = ToastItem(
                     message: voices > 1
-                        ? "Transcript rebuilt · \(voices) voices separated"
+                        ? "Transcript rebuilt · \(voices) speakers separated"
                         : "Transcript rebuilt",
                     icon: "checkmark.seal.fill"
                 )
@@ -2934,7 +2939,6 @@ struct MeetingDetailView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Carry forward")
                             .font(.caption.weight(.bold))
-                            .kerning(1.0)
                             .foregroundStyle(AppPalette.secondaryInk)
 
                         ForEach(prepBrief.bullets, id: \.self) { bullet in
@@ -2952,7 +2956,6 @@ struct MeetingDetailView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Make sure you ask")
                             .font(.caption.weight(.bold))
-                            .kerning(1.0)
                             .foregroundStyle(AppPalette.secondaryInk)
 
                         ForEach(prepBrief.questions, id: \.self) { question in
@@ -3065,12 +3068,12 @@ struct MeetingDetailView: View {
                     .tint(AppPalette.accent)
                     .disabled(meeting.transcript.isEmpty)
 
-                    Button("Purge transcript") {
+                    Button("Delete source media") {
                         store.purgeTranscript(for: meeting.id)
                     }
                     .buttonStyle(.bordered)
-                    .tint(AppPalette.ink)
-                    .disabled(meeting.transcript.isEmpty)
+                    .tint(AppPalette.coral)
+                    .disabled(meeting.transcript.isEmpty && meeting.audioRecordings.isEmpty)
                 }
 
                 if !meeting.transcriptVisibilityEnabled {
@@ -3139,7 +3142,6 @@ struct MeetingDetailView: View {
                                     VStack(alignment: .leading, spacing: 6) {
                                         Text(line.speaker)
                                             .font(.footnote.weight(.heavy))
-                                            .kerning(0.3)
                                             .foregroundStyle(AppPalette.ink)
 
                                         Text(line.text)
@@ -3345,7 +3347,8 @@ struct MeetingDetailView: View {
     }
 
     private var importedAudioTranscriptPlaceholder: some View {
-        HStack(alignment: .top, spacing: 14) {
+        let isProcessing = meeting?.status == .processing
+        return HStack(alignment: .top, spacing: 14) {
             RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous)
                 .fill(AppPalette.accent.opacity(0.12))
                 .frame(width: 44, height: 44)
@@ -3356,10 +3359,12 @@ struct MeetingDetailView: View {
                 )
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("No transcript for imported audio")
+                Text(isProcessing ? "Transcribing imported audio" : "No transcript yet")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(AppPalette.ink)
-                Text("Imported audio isn't transcribed automatically. You can still play this recording from the Recordings card, or record live for an instant transcript.")
+                Text(isProcessing
+                    ? "You can close Scribeflow. Processing will continue and the original audio stays available."
+                    : "The original audio is saved. Use Retry transcription from the recording menu when you're ready.")
                     .font(.footnote)
                     .foregroundStyle(AppPalette.secondaryInk)
                     .fixedSize(horizontal: false, vertical: true)
@@ -3577,7 +3582,7 @@ private struct SpeakerEditorView: View {
                     SurfaceCard(title: "Speakers", subtitle: "Clean up transcript labels before sharing.") {
                         VStack(alignment: .leading, spacing: 12) {
                             if speakers.isEmpty {
-                                EmptyStateCard(title: "No voices yet", subtitle: "Record or import a transcript and the speakers show up here.")
+                                EmptyStateCard(title: "No speakers yet", subtitle: "Record or import a transcript and speaker labels will appear here.")
                             } else {
                                 ForEach(speakers) { speaker in
                                     speakerRow(speaker)
@@ -3709,7 +3714,6 @@ struct IntelligencePill: View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title.uppercased())
                 .font(.caption2.weight(.bold))
-                .kerning(0.7)
                 .foregroundStyle(AppPalette.secondaryInk)
             Text(value)
                 .font(.caption.weight(.bold))
@@ -3925,7 +3929,6 @@ struct MeetingPresentationSheet: View {
 
                     Text("\(page + 1) of \(slides.count)")
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .kerning(0.6)
                         .foregroundStyle(.white.opacity(0.55))
                         .padding(.leading, 4)
                 }
@@ -3970,7 +3973,6 @@ struct MeetingPresentationSheet: View {
             Image(systemName: icon).font(.system(size: 9, weight: .bold))
             Text(text.uppercased())
                 .font(.system(size: 9.5, weight: .medium, design: .monospaced))
-                .kerning(0.6)
         }
         .foregroundStyle(.white.opacity(0.40))
         .allowsHitTesting(false)
@@ -4248,7 +4250,6 @@ struct MeetingPresentationSheet: View {
                 .motionEntrance(step: 1, active: shown)
             Text("Shared from Scribeflow")
                 .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .kerning(0.8)
                 .foregroundStyle(AppPalette.tertiaryInk)
                 .motionEntrance(step: 2, active: shown)
 

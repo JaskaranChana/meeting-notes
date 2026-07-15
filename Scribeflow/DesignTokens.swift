@@ -285,7 +285,6 @@ struct ProductMetric: View {
                 .contentTransition(.numericText())
             Text(label.uppercased())
                 .font(.caption2.weight(.bold))
-                .kerning(0.8)
                 .foregroundStyle(AppPalette.secondaryInk.opacity(0.72))
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
@@ -637,7 +636,6 @@ struct SectionHeader<Trailing: View>: View {
                 if let eyebrow {
                     Text(eyebrow.uppercased())
                         .font(.caption2.weight(.semibold))
-                        .kerning(0.8)
                         .foregroundStyle(AppPalette.tertiaryInk)
                 }
                 Text(title)

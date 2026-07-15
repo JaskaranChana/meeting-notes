@@ -23,6 +23,7 @@ enum MeetingStatus: String, Codable, CaseIterable, Identifiable {
 }
 
 enum NoteTemplate: String, Codable, CaseIterable, Identifiable {
+    case general
     case discovery
     case exec
     case manager
@@ -34,6 +35,8 @@ enum NoteTemplate: String, Codable, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
+        case .general:
+            "General"
         case .discovery:
             "Discovery"
         case .exec:
@@ -51,6 +54,8 @@ enum NoteTemplate: String, Codable, CaseIterable, Identifiable {
 
     var description: String {
         switch self {
+        case .general:
+            "Organizes what matters without assuming work, tasks, or risks."
         case .discovery:
             "Pulls out buyer pain, signals, and next steps."
         case .exec:
@@ -68,6 +73,8 @@ enum NoteTemplate: String, Codable, CaseIterable, Identifiable {
 
     var aiHint: String {
         switch self {
+        case .general:
+            "Understand the capture on its own terms. Preserve personal thoughts as notes unless the source clearly states a decision or commitment."
         case .discovery:
             "Help the note owner understand needs, constraints, intent signals, and the agreed next step."
         case .exec:
@@ -85,6 +92,7 @@ enum NoteTemplate: String, Codable, CaseIterable, Identifiable {
 
     var systemImage: String {
         switch self {
+        case .general: "note.text"
         case .discovery: "magnifyingglass"
         case .exec: "chart.bar.doc.horizontal"
         case .manager: "person.text.rectangle"
@@ -579,6 +587,32 @@ enum RetentionPolicy: String, Codable, CaseIterable, Identifiable {
             "Keep until deleted"
         }
     }
+
+    var detail: String {
+        switch self {
+        case .notesOnly:
+            "Delete transcripts and source audio now. Keep the saved note."
+        case .transcript24Hours:
+            "Keep transcripts and source audio for 24 hours, then delete them automatically."
+        case .transcript7Days:
+            "Keep transcripts and source audio for 7 days, then delete them automatically."
+        case .keepUntilDeleted:
+            "Keep transcripts and source audio until you delete them."
+        }
+    }
+
+    func expirationDate(startingAt anchor: Date) -> Date? {
+        switch self {
+        case .notesOnly:
+            anchor
+        case .transcript24Hours:
+            anchor.addingTimeInterval(24 * 60 * 60)
+        case .transcript7Days:
+            anchor.addingTimeInterval(7 * 24 * 60 * 60)
+        case .keepUntilDeleted:
+            nil
+        }
+    }
 }
 
 enum EvidenceLevel: String, Codable, CaseIterable, Identifiable {
@@ -591,7 +625,7 @@ enum EvidenceLevel: String, Codable, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .verified:
-            "Verified"
+            "Direct source"
         case .inferred:
             "Inferred"
         case .personalNote:
@@ -669,7 +703,7 @@ struct EvidenceItem: Codable, Hashable, Identifiable {
     var confidenceLabel: String {
         switch level {
         case .verified:
-            "High confidence"
+            "Saved source"
         case .inferred:
             "Needs review"
         case .personalNote:
@@ -1021,6 +1055,7 @@ struct Meeting: Codable, Hashable, Identifiable {
     var consentState: ConsentState = .privateCapture
     var meetingMode: MeetingMode = .privateNotes
     var retentionPolicy: RetentionPolicy = .keepUntilDeleted
+    var retentionPolicyUpdatedAt: Date? = nil
     var evidenceItems: [EvidenceItem] = []
     var commitments: [Commitment] = []
     var sensitiveFlags: [SensitiveFlag] = []
@@ -1058,6 +1093,7 @@ struct Meeting: Codable, Hashable, Identifiable {
         case consentState
         case meetingMode
         case retentionPolicy
+        case retentionPolicyUpdatedAt
         case evidenceItems
         case commitments
         case sensitiveFlags
@@ -1094,6 +1130,7 @@ struct Meeting: Codable, Hashable, Identifiable {
         consentState: ConsentState = .privateCapture,
         meetingMode: MeetingMode = .privateNotes,
         retentionPolicy: RetentionPolicy = .keepUntilDeleted,
+        retentionPolicyUpdatedAt: Date? = nil,
         evidenceItems: [EvidenceItem] = [],
         commitments: [Commitment] = [],
         sensitiveFlags: [SensitiveFlag] = [],
@@ -1128,6 +1165,7 @@ struct Meeting: Codable, Hashable, Identifiable {
         self.consentState = consentState
         self.meetingMode = meetingMode
         self.retentionPolicy = retentionPolicy
+        self.retentionPolicyUpdatedAt = retentionPolicyUpdatedAt ?? when
         self.evidenceItems = evidenceItems
         self.commitments = commitments
         self.sensitiveFlags = sensitiveFlags
@@ -1165,6 +1203,7 @@ struct Meeting: Codable, Hashable, Identifiable {
         consentState = try container.decodeIfPresent(ConsentState.self, forKey: .consentState) ?? .privateCapture
         meetingMode = try container.decodeIfPresent(MeetingMode.self, forKey: .meetingMode) ?? .privateNotes
         retentionPolicy = try container.decodeIfPresent(RetentionPolicy.self, forKey: .retentionPolicy) ?? .keepUntilDeleted
+        retentionPolicyUpdatedAt = try container.decodeIfPresent(Date.self, forKey: .retentionPolicyUpdatedAt) ?? when
         evidenceItems = try container.decodeIfPresent([EvidenceItem].self, forKey: .evidenceItems) ?? []
         commitments = try container.decodeIfPresent([Commitment].self, forKey: .commitments) ?? []
         sensitiveFlags = try container.decodeIfPresent([SensitiveFlag].self, forKey: .sensitiveFlags) ?? []
@@ -1205,6 +1244,7 @@ struct Meeting: Codable, Hashable, Identifiable {
         try container.encode(consentState, forKey: .consentState)
         try container.encode(meetingMode, forKey: .meetingMode)
         try container.encode(retentionPolicy, forKey: .retentionPolicy)
+        try container.encodeIfPresent(retentionPolicyUpdatedAt, forKey: .retentionPolicyUpdatedAt)
         try container.encode(evidenceItems, forKey: .evidenceItems)
         try container.encode(commitments, forKey: .commitments)
         try container.encode(sensitiveFlags, forKey: .sensitiveFlags)

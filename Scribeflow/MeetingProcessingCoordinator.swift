@@ -127,10 +127,29 @@ enum PendingMeetingAudioStore {
     static func delete(_ fileName: String) {
         try? FileManager.default.removeItem(at: url(for: fileName))
     }
+
+    static func deleteAll() {
+        try? FileManager.default.removeItem(at: directoryURL)
+    }
+
+    static func deleteOrphans(keeping fileNames: Set<String>) {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return }
+        for file in files where !fileNames.contains(file.lastPathComponent) {
+            try? FileManager.default.removeItem(at: file)
+        }
+    }
 }
 
-private actor PendingMeetingFileTransfer {
+actor PendingMeetingFileTransfer {
     static let shared = PendingMeetingFileTransfer()
+
+    func adoptForProcessing(_ sourceURL: URL) throws -> String {
+        try PendingMeetingAudioStore.adopt(sourceURL)
+    }
 
     func preserveAsRecording(_ sourceURL: URL) throws -> URL {
         try RecordingFileStore.adoptFile(at: sourceURL)
@@ -170,6 +189,9 @@ actor PendingMeetingProcessingQueue {
             recoveredInterruptedJob = true
         }
         jobs = recovered
+        PendingMeetingAudioStore.deleteOrphans(
+            keeping: Set(recovered.map(\.fileName))
+        )
         if recoveredInterruptedJob {
             try? Self.persist(recovered, to: fileURL)
         }
@@ -264,6 +286,11 @@ actor PendingMeetingProcessingQueue {
         !jobs.isEmpty
     }
 
+    func clear() {
+        jobs = []
+        try? FileManager.default.removeItem(at: fileURL)
+    }
+
     private func persist() throws {
         try Self.persist(jobs, to: fileURL)
     }
@@ -285,8 +312,116 @@ actor PendingMeetingProcessingQueue {
     }
 }
 
+private enum TranscriptQualityEvaluator {
+    struct Assessment {
+        let wordCount: Int
+        let score: Double
+        let isUsable: Bool
+        let isStrong: Bool
+    }
+
+    static func assess(
+        _ result: TranscriptionResult,
+        liveWordCount: Int,
+        audioURL: URL
+    ) -> Assessment {
+        let words = TranscriptAssembler.canonicalWords(in: result.text)
+        guard !words.isEmpty else {
+            return Assessment(wordCount: 0, score: 0, isUsable: false, isStrong: false)
+        }
+
+        let duration = audioDuration(at: audioURL)
+        let frequencies = Dictionary(words.map { ($0, 1) }, uniquingKeysWith: +)
+        let dominantShare = Double(frequencies.values.max() ?? 0) / Double(words.count)
+        let uniqueShare = Double(frequencies.count) / Double(words.count)
+        let liveBaseline = max(0, liveWordCount)
+        let completionRatio = liveBaseline > 0
+            ? Double(words.count) / Double(liveBaseline)
+            : 1
+
+        var longestRun = 1
+        var currentRun = 1
+        if words.count > 1 {
+            for index in 1..<words.count {
+                if words[index] == words[index - 1] {
+                    currentRun += 1
+                    longestRun = max(longestRun, currentRun)
+                } else {
+                    currentRun = 1
+                }
+            }
+        }
+
+        let enoughForDuration = duration < 4 || words.count >= 2
+        let enoughComparedWithLive = liveBaseline < 12 || completionRatio >= 0.28
+        let plausibleMaximum = duration < 5
+            || words.count <= Int((duration / 60) * 330) + 16
+        let repetitionLooksNatural = words.count < 12
+            || (dominantShare < 0.50 && uniqueShare > 0.14 && longestRun < 5)
+        let isUsable = enoughForDuration
+            && enoughComparedWithLive
+            && plausibleMaximum
+            && repetitionLooksNatural
+
+        let timedSegments = result.segments.filter { segment in
+            guard let start = segment.startTime, let end = segment.endTime else { return false }
+            return start.isFinite && end.isFinite && end >= start
+        }.count
+        let timingCoverage = result.segments.isEmpty
+            ? 0
+            : Double(timedSegments) / Double(result.segments.count)
+
+        var score = min(Double(words.count) / 40, 1) * 20
+        score += min(max(completionRatio, 0), 1) * 35
+        score += min(uniqueShare / 0.55, 1) * 15
+        score += timingCoverage * 10
+        if result.diarizationAvailable { score += 8 }
+        if !isUsable { score -= 40 }
+
+        let isStrong = isUsable
+            && score >= 52
+            && (liveBaseline < 12 || completionRatio >= 0.58)
+        return Assessment(
+            wordCount: words.count,
+            score: score,
+            isUsable: isUsable,
+            isStrong: isStrong
+        )
+    }
+
+    static func preferred(
+        from candidates: [TranscriptionResult],
+        liveWordCount: Int,
+        audioURL: URL
+    ) -> TranscriptionResult? {
+        let assessed = candidates.compactMap { result -> (TranscriptionResult, Assessment)? in
+            let assessment = assess(result, liveWordCount: liveWordCount, audioURL: audioURL)
+            return assessment.isUsable ? (result, assessment) : nil
+        }
+        let preferred = assessed.max { left, right in
+                let leftAssessment = left.1
+                let rightAssessment = right.1
+                if abs(leftAssessment.score - rightAssessment.score) > 0.5 {
+                    return leftAssessment.score < rightAssessment.score
+                }
+                if left.0.diarizationAvailable != right.0.diarizationAvailable {
+                    return !left.0.diarizationAvailable
+                }
+                return leftAssessment.wordCount < rightAssessment.wordCount
+            }
+        return preferred?.0
+    }
+
+    private static func audioDuration(at url: URL) -> TimeInterval {
+        guard let file = try? AVAudioFile(forReading: url), file.fileFormat.sampleRate > 0 else {
+            return 0
+        }
+        return Double(file.length) / file.fileFormat.sampleRate
+    }
+}
+
 @MainActor
-private final class EnhancedMeetingTranscriptionService {
+final class EnhancedMeetingTranscriptionService {
     static let shared = EnhancedMeetingTranscriptionService()
 
     func transcribe(
@@ -294,7 +429,7 @@ private final class EnhancedMeetingTranscriptionService {
         context: SpeechRecognitionContext,
         liveWordCount: Int
     ) async throws -> TranscriptionResult {
-        var remoteFallback: TranscriptionResult?
+        var candidates: [TranscriptionResult] = []
         if TranscriptionProviderFactory.isRemoteTranscriptionEnabled {
             do {
                 let localFallback = LocalVoiceRecordingService()
@@ -310,10 +445,17 @@ private final class EnhancedMeetingTranscriptionService {
                 )
                 let provider = TranscriptionProviderFactory.make(localFallback: localFallback)
                 let remoteResult = try await provider.transcribe(audioURL: audioURL)
-                if remoteResult.provider == .backend, !remoteResult.text.isEmpty {
+                let assessment = TranscriptQualityEvaluator.assess(
+                    remoteResult,
+                    liveWordCount: liveWordCount,
+                    audioURL: audioURL
+                )
+                if assessment.isUsable {
+                    candidates.append(remoteResult)
+                }
+                if remoteResult.provider == .backend, assessment.isStrong {
                     return remoteResult
                 }
-                remoteFallback = remoteResult
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -324,23 +466,71 @@ private final class EnhancedMeetingTranscriptionService {
 
         if EnhancedSpeechSettings.isEnabled, isEnglishRecognitionLocale(context) {
             do {
-                return try await EnhancedOnDeviceSpeechEngine.shared.transcribe(
+                let enhancedResult = try await EnhancedOnDeviceSpeechEngine.shared.transcribe(
                     audioURL: audioURL,
                     context: context,
                     liveWordCount: liveWordCount
                 )
+                let assessment = TranscriptQualityEvaluator.assess(
+                    enhancedResult,
+                    liveWordCount: liveWordCount,
+                    audioURL: audioURL
+                )
+                if assessment.isUsable {
+                    candidates.append(enhancedResult)
+                }
+                if let preferred = TranscriptQualityEvaluator.preferred(
+                    from: candidates,
+                    liveWordCount: liveWordCount,
+                    audioURL: audioURL
+                ) {
+                    return preferred
+                }
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                if let remoteFallback { return remoteFallback }
+                if let preferred = TranscriptQualityEvaluator.preferred(
+                    from: candidates,
+                    liveWordCount: liveWordCount,
+                    audioURL: audioURL
+                ), preferred.provider != .backend {
+                    return preferred
+                }
             }
         }
 
-        if let remoteFallback { return remoteFallback }
-        return try await LocalVoiceRecordingService().transcribeMeetingAudio(
-            audioURL: audioURL,
-            context: context
-        )
+        if let preferred = TranscriptQualityEvaluator.preferred(
+            from: candidates,
+            liveWordCount: liveWordCount,
+            audioURL: audioURL
+        ), preferred.provider != .backend {
+            return preferred
+        }
+
+        do {
+            let localResult = try await LocalVoiceRecordingService().transcribeMeetingAudio(
+                audioURL: audioURL,
+                context: context
+            )
+            candidates.append(localResult)
+            if let preferred = TranscriptQualityEvaluator.preferred(
+                from: candidates,
+                liveWordCount: liveWordCount,
+                audioURL: audioURL
+            ) {
+                return preferred
+            }
+            throw VoiceRecordingError.noTranscription
+        } catch {
+            if let preferred = TranscriptQualityEvaluator.preferred(
+                from: candidates,
+                liveWordCount: liveWordCount,
+                audioURL: audioURL
+            ) {
+                return preferred
+            }
+            throw error
+        }
     }
 
     func releaseModels() async {
@@ -441,6 +631,9 @@ private actor EnhancedOnDeviceSpeechEngine {
             } onCancel: {
                 modelLoadTask.cancel()
             }
+        }
+        guard EnhancedSpeechResourcePolicy.allowsModelPreparation else {
+            throw VoiceRecordingError.speechUnavailable
         }
 
         let loadTask = Task<AsrManager, Error> {
@@ -579,6 +772,9 @@ private enum ContextualTranscriptNormalizer {
         for attendee in context.attendees {
             appendTerms(from: attendee, allowsFuzzyMatch: true)
         }
+        for vocabularyTerm in context.vocabulary {
+            appendTerms(from: vocabularyTerm, allowsFuzzyMatch: false)
+        }
         appendTerms(from: context.title, allowsFuzzyMatch: false)
         appendTerms(from: context.workspace, allowsFuzzyMatch: false)
         return terms
@@ -591,7 +787,11 @@ private enum ContextualTranscriptNormalizer {
 
         let core = String(word[coreRange])
         let foldedCore = fold(core)
-        guard !foldedCore.isEmpty, !genericTerms.contains(foldedCore) else { return word }
+        guard !foldedCore.isEmpty,
+              !genericTerms.contains(foldedCore),
+              !protectedTerms.contains(foldedCore),
+              core.rangeOfCharacter(from: .decimalDigits) == nil
+        else { return word }
 
         if let exact = terms.first(where: { $0.folded == foldedCore }) {
             return word.replacingCharacters(in: coreRange, with: exact.display)
@@ -600,14 +800,14 @@ private enum ContextualTranscriptNormalizer {
         var best: (term: Term, distance: Int)?
         var isAmbiguous = false
         for term in terms where term.allowsFuzzyMatch {
-            guard term.folded.first == foldedCore.first else { continue }
-            let maximumDistance = term.folded.count >= 9 ? 2 : (term.folded.count >= 5 ? 1 : 0)
-            guard maximumDistance > 0,
-                  abs(term.folded.count - foldedCore.count) <= maximumDistance
+            guard term.folded.count >= 6,
+                  foldedCore.count >= 6,
+                  term.folded.prefix(3) == foldedCore.prefix(3),
+                  abs(term.folded.count - foldedCore.count) <= 1
             else { continue }
 
-            let distance = editDistance(foldedCore, term.folded, limit: maximumDistance)
-            guard distance <= maximumDistance else { continue }
+            let distance = editDistance(foldedCore, term.folded, limit: 1)
+            guard distance == 1 else { continue }
             if let current = best {
                 if distance < current.distance {
                     best = (term, distance)
@@ -627,6 +827,15 @@ private enum ContextualTranscriptNormalizer {
     private static let genericTerms: Set<String> = [
         "about", "after", "before", "capture", "client", "meeting", "notes",
         "personal", "project", "review", "speaker", "team", "today", "voice", "workspace"
+    ]
+
+    private static let protectedTerms: Set<String> = [
+        "no", "not", "never", "none", "without", "cannot", "can't", "cant",
+        "don't", "dont", "didn't", "didnt", "doesn't", "doesnt", "isn't", "isnt",
+        "wasn't", "wasnt", "aren't", "arent", "weren't", "werent", "won't", "wont",
+        "shouldn't", "shouldnt", "wouldn't", "wouldnt", "couldn't", "couldnt",
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+        "nine", "ten", "hundred", "thousand", "million", "billion"
     ]
 
     private static func tokens(in text: String) -> [String] {
@@ -680,7 +889,7 @@ enum MeetingProcessingNotification {
     @discardableResult
     static func sendReady(meetingID: Meeting.ID, title: String) async -> Bool {
         let center = UNUserNotificationCenter.current()
-        let permission = await ScribeflowNotificationAuthorization.shared.requestIfNeeded()
+        let permission = await ScribeflowNotificationAuthorization.shared.currentPermission()
         guard permission.canSchedule else {
             await postInAppFallback(title: title, permission: permission)
             return false
@@ -753,13 +962,6 @@ final class MeetingProcessingCoordinator {
             return false
         }
 
-        // This is the moment the user asks Scribeflow to finish work in the
-        // background. Start the one-time permission request now; sendReady()
-        // reuses the same in-flight request if processing finishes quickly.
-        Task {
-            _ = await ScribeflowNotificationAuthorization.shared.requestIfNeeded()
-        }
-
         MeetingProcessingBackgroundScheduler.schedule()
         beginExtendedExecution()
         startProcessingIfNeeded()
@@ -804,6 +1006,22 @@ final class MeetingProcessingCoordinator {
         attach(store)
         suspendedMeetingIDs.remove(meetingID)
         startProcessingIfNeeded()
+    }
+
+    func discardAll() async {
+        processingTask?.cancel()
+        retryWakeTask?.cancel()
+        if let processingTask {
+            await processingTask.value
+        }
+        processingTask = nil
+        retryWakeTask = nil
+        activeMeetingID = nil
+        suspendedMeetingIDs.removeAll()
+        discardedMeetingIDs.removeAll()
+        await PendingMeetingProcessingQueue.shared.clear()
+        PendingMeetingAudioStore.deleteAll()
+        endExtendedExecution()
     }
 
     func processPendingAndWait() async -> Bool {
@@ -894,10 +1112,12 @@ final class MeetingProcessingCoordinator {
 
             guard let runningJob = try? await queue.markRunning(pendingJob.meetingID) else { continue }
             activeMeetingID = runningJob.meetingID
+            let canUseEnhancedModels = EnhancedSpeechSettings.isEnabled
+                && EnhancedSpeechResourcePolicy.allowsModelPreparation
             store.updateMeetingProcessingStage(
-                EnhancedSpeechSettings.isEnabled && LocalSpeakerDiarizationSettings.isEnabled
+                canUseEnhancedModels && LocalSpeakerDiarizationSettings.isEnabled
                     ? "Refining transcript and separating speakers"
-                    : (EnhancedSpeechSettings.isEnabled
+                    : (canUseEnhancedModels
                         ? "Applying enhanced speech recognition"
                         : "Refining the full transcript"),
                 for: runningJob.meetingID
@@ -1079,10 +1299,11 @@ enum MeetingProcessingBackgroundScheduler {
         }
     }
 
+    @MainActor
     static func schedule(earliestBeginDate: Date? = nil) {
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
         let request = BGProcessingTaskRequest(identifier: identifier)
-        request.requiresNetworkConnectivity = false
+        request.requiresNetworkConnectivity = TranscriptionProviderFactory.isRemoteTranscriptionEnabled
         request.requiresExternalPower = false
         request.earliestBeginDate = earliestBeginDate
         try? BGTaskScheduler.shared.submit(request)

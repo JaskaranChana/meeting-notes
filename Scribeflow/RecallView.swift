@@ -1,5 +1,4 @@
 import SwiftUI
-import ActivityKit
 #if canImport(FoundationModels)
 import FoundationModels
 #endif
@@ -93,7 +92,6 @@ struct SourceCitedChatView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("SUGGESTED")
                 .font(.caption.weight(.bold))
-                .kerning(1.2)
                 .foregroundStyle(AppPalette.secondaryInk.opacity(0.7))
                 .padding(.horizontal, 16)
             ScrollView(.horizontal, showsIndicators: false) {
@@ -339,7 +337,6 @@ private struct ChatBubble: View {
         VStack(alignment: .leading, spacing: 4) {
             Text("SOURCES")
                 .font(.caption2.weight(.bold))
-                .kerning(1.0)
                 .foregroundStyle(AppPalette.secondaryInk.opacity(0.6))
             ForEach(message.citations) { citation in
                 HStack(alignment: .top, spacing: 6) {
@@ -385,7 +382,6 @@ struct MeetingScoreCard: View {
                         .foregroundStyle(scoreColor(score.overall))
                     Text("MEETING QUALITY")
                         .font(.caption.weight(.bold))
-                        .kerning(1.3)
                         .foregroundStyle(AppPalette.secondaryInk)
                     Spacer()
                     scoreRing(score)
@@ -412,7 +408,6 @@ struct MeetingScoreCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("PERSONAL NOTE")
                     .font(.caption.weight(.bold))
-                    .kerning(1.3)
                     .foregroundStyle(AppPalette.secondaryInk)
                 Text("Scribeflow keeps personal captures as notes instead of scoring them like meetings.")
                     .font(.subheadline)
@@ -645,7 +640,6 @@ struct PeopleIntelligenceCard: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("TOP TOPICS")
                         .font(.caption2.weight(.bold))
-                        .kerning(1.0)
                         .foregroundStyle(AppPalette.secondaryInk.opacity(0.6))
                     HStack(spacing: 6) {
                         ForEach(person.topTopics.prefix(3), id: \.self) { topic in
@@ -664,7 +658,6 @@ struct PeopleIntelligenceCard: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("OPEN ITEMS")
                         .font(.caption2.weight(.bold))
-                        .kerning(1.0)
                         .foregroundStyle(AppPalette.secondaryInk.opacity(0.6))
                     ForEach(person.openCommitments.prefix(3)) { commitment in
                         HStack(spacing: 6) {
@@ -684,7 +677,6 @@ struct PeopleIntelligenceCard: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("RECENT MEETINGS")
                         .font(.caption2.weight(.bold))
-                        .kerning(1.0)
                         .foregroundStyle(AppPalette.secondaryInk.opacity(0.6))
                     ForEach(person.meetings.prefix(3)) { meeting in
                         HStack(spacing: 6) {

@@ -303,6 +303,7 @@ private actor ActionItemsSnapshotBuilder {
 
 struct ActionItemsView: View {
     @Environment(MeetingStore.self) private var store
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let isActive: Bool
     @Binding var selectedMeetingID: Meeting.ID?
     @Binding var toast: ToastItem?
@@ -357,8 +358,8 @@ struct ActionItemsView: View {
             .readingWidth()
         }
         .background(AppPalette.background.ignoresSafeArea())
-        .navigationTitle("Tasks")
-        .navigationBarTitleDisplayMode(.large)
+        .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
         .refreshable {
             HapticEngine.tap(.light)
             toast = ToastItem(message: "Up to date", icon: "checkmark.circle.fill")
@@ -426,21 +427,33 @@ struct ActionItemsView: View {
     private var summaryHeader: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
-                EditorialEyebrow(text: "Tasks")
-                Text("Everything you owe")
-                    .font(.system(size: 28, weight: .medium, design: .serif))
+                Text("Tasks")
+                    .font(AppFont.serif(.title, weight: .medium))
                     .foregroundStyle(AppPalette.ink)
-                Text("Aggregated from meetings and calls with clear commitments.")
-                    .font(.system(size: 13))
+                Text("Follow through on clear commitments from your meetings.")
+                    .font(.subheadline)
                     .foregroundStyle(AppPalette.secondaryInk)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            HStack(spacing: 0) {
-                statButton(.open, openCount, "Open", AppPalette.accent)
-                cellRule
-                statButton(.atRisk, atRiskCount, "At risk", AppPalette.coral)
-                cellRule
-                statButton(.done, doneCount, "Done", AppPalette.success)
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(spacing: 0) {
+                        statButton(.open, openCount, "Open", AppPalette.accent)
+                        EditorialRule()
+                        statButton(.atRisk, atRiskCount, "At risk", AppPalette.coral)
+                        EditorialRule()
+                        statButton(.done, doneCount, "Done", AppPalette.success)
+                    }
+                } else {
+                    HStack(spacing: 0) {
+                        statButton(.open, openCount, "Open", AppPalette.accent)
+                        cellRule
+                        statButton(.atRisk, atRiskCount, "At risk", AppPalette.coral)
+                        cellRule
+                        statButton(.done, doneCount, "Done", AppPalette.success)
+                    }
+                }
             }
             .overlay(alignment: .top) { EditorialRule() }
             .overlay(alignment: .bottom) { EditorialRule() }
@@ -473,7 +486,7 @@ struct ActionItemsView: View {
             EditorialEyebrow(text: label)
             CountUpNumber(
                 value: hasAnimatedIn ? Double(value) : 0,
-                font: .system(size: 24, weight: .medium, design: .serif),
+                font: AppFont.serif(.title3, weight: .medium),
                 color: tint
             )
             .animation(.easeOut(duration: 0.8), value: hasAnimatedIn)
@@ -503,14 +516,18 @@ struct ActionItemsView: View {
                         Text(attentionHeadline)
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(AppPalette.ink)
+                            .fixedSize(horizontal: false, vertical: true)
                         Text(attentionDetail)
                             .font(.caption)
                             .foregroundStyle(AppPalette.secondaryInk)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer(minLength: 0)
-                    Image(systemName: "chevron.right")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(AppPalette.secondaryInk)
+                    if !dynamicTypeSize.isAccessibilitySize {
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(AppPalette.secondaryInk)
+                    }
                 }
                 .padding(14)
                 .background(
@@ -588,7 +605,6 @@ struct ActionItemsView: View {
                     VStack(spacing: 0) {
                         ForEach(group.items) { item in
                             ActionItemRow(item: item, onStatusChange: setStatus, onOpen: openMeeting, onAddToReminders: addToReminders, onScheduleReminder: scheduleReminder, onCancelReminder: cancelReminder)
-                                .editorialReveal()
                             if item.id != group.items.last?.id { EditorialRule() }
                         }
                     }
@@ -851,6 +867,7 @@ enum RemindersExporter {
 // MARK: - Row
 
 private struct ActionItemRow: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let item: AggregatedActionItem
     let onStatusChange: (CommitmentStatus, AggregatedActionItem) -> Void
     let onOpen: (Meeting.ID) -> Void
@@ -893,7 +910,6 @@ private struct ActionItemRow: View {
                             .font(.subheadline.weight(.medium))
                             .foregroundStyle(item.commitment.status == .fulfilled ? AppPalette.secondaryInk : AppPalette.ink)
                             .strikethrough(item.commitment.status == .fulfilled, color: AppPalette.secondaryInk)
-                            .lineLimit(3)
                             .fixedSize(horizontal: false, vertical: true)
                             .multilineTextAlignment(.leading)
 
@@ -904,38 +920,33 @@ private struct ActionItemRow: View {
                                 .fixedSize(horizontal: false, vertical: true)
                         }
 
-                        HStack(spacing: 8) {
-                            if item.commitment.owner != "Owner not named" {
-                                metaChip(
-                                    item.commitment.owner,
-                                    icon: item.commitment.owner == "You" ? "person.fill" : "person",
-                                    tint: item.commitment.owner == "You" ? AppPalette.accent : AppPalette.secondaryInk
-                                )
-                            }
-                            dueChip
-                            priorityChip
-                            sourceChip
-                            Spacer(minLength: 0)
+                        WrappingHStack(spacing: 6) {
+                            taskMetadata
                         }
 
                         if let reminderLabel = item.reminderLabel {
                             metaChip(reminderLabel, icon: "bell.fill", tint: AppPalette.accent)
                         }
 
-                        HStack(spacing: 6) {
-                            Image(systemName: "doc.text.magnifyingglass")
-                                .font(.caption2)
-                                .foregroundStyle(AppPalette.secondaryInk.opacity(0.65))
-                            Text(item.meetingTitle)
-                                .font(.caption.weight(.medium))
-                                .foregroundStyle(AppPalette.secondaryInk)
-                                .lineLimit(1)
-                            Text("·")
-                                .font(.caption)
-                                .foregroundStyle(AppPalette.secondaryInk.opacity(0.5))
-                            Text(item.meetingDate, style: .relative)
-                                .font(.caption2.weight(.medium))
-                                .foregroundStyle(AppPalette.secondaryInk.opacity(0.7))
+                        Group {
+                            if dynamicTypeSize.isAccessibilitySize {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    sourceMeetingLabel
+                                    Text(item.meetingDate, style: .relative)
+                                        .font(.caption2.weight(.medium))
+                                        .foregroundStyle(AppPalette.secondaryInk.opacity(0.7))
+                                }
+                            } else {
+                                HStack(spacing: 6) {
+                                    sourceMeetingLabel
+                                    Text("·")
+                                        .font(.caption)
+                                        .foregroundStyle(AppPalette.secondaryInk.opacity(0.5))
+                                    Text(item.meetingDate, style: .relative)
+                                        .font(.caption2.weight(.medium))
+                                        .foregroundStyle(AppPalette.secondaryInk.opacity(0.7))
+                                }
+                            }
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -994,6 +1005,32 @@ private struct ActionItemRow: View {
         }
     }
 
+    @ViewBuilder
+    private var taskMetadata: some View {
+        if item.commitment.owner != "Owner not named" {
+            metaChip(
+                item.commitment.owner,
+                icon: item.commitment.owner == "You" ? "person.fill" : "person",
+                tint: item.commitment.owner == "You" ? AppPalette.accent : AppPalette.secondaryInk
+            )
+        }
+        dueChip
+        priorityChip
+        sourceChip
+    }
+
+    private var sourceMeetingLabel: some View {
+        HStack(spacing: 6) {
+                            Image(systemName: "doc.text.magnifyingglass")
+                                .font(.caption2)
+                                .foregroundStyle(AppPalette.secondaryInk.opacity(0.65))
+                            Text(item.meetingTitle)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(AppPalette.secondaryInk)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+    }
+
     private var checkboxStroke: Color {
         switch item.commitment.status {
         case .fulfilled: return AppPalette.accent
@@ -1023,7 +1060,7 @@ private struct ActionItemRow: View {
                 .font(.caption2.weight(.bold))
             Text(text)
                 .font(.caption2.weight(.semibold))
-                .lineLimit(1)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .foregroundStyle(strong ? .white : tint)
         .padding(.horizontal, 8)

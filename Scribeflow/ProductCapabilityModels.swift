@@ -66,7 +66,7 @@ struct LocalOnlyAccountSyncService: AccountSyncStatusProviding {
             ProductCapabilityStatus(
                 id: "speaker-detection",
                 title: "Speaker detection",
-                detail: "Speaker labels are normalized and editable. Provider diarization is preserved end to end with honest detected-versus-listed counts.",
+                detail: "Speaker labels are normalized and editable. Automatic speaker separation is preserved with honest detected-versus-listed counts.",
                 systemImage: "person.wave.2.fill",
                 state: .localOnly
             )

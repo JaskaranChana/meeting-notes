@@ -1,6 +1,8 @@
 import Foundation
+import CryptoKit
 import Observation
 import OSLog
+import UserNotifications
 #if canImport(FoundationModels)
 import FoundationModels
 #endif
@@ -17,31 +19,208 @@ private struct SourceProofCacheKey: Hashable {
     let claim: String
 }
 
+/// Conservative lexical guardrail shared by generated briefs, source proof,
+/// and workspace answers. A claim must be supported by one cited excerpt;
+/// unrelated lines can never combine their tokens to manufacture support.
+private enum ClaimEvidenceValidator {
+    private static let ignoredTokens: Set<String> = [
+        "about", "after", "again", "also", "around", "been", "being", "but", "from",
+        "have", "into", "just", "more", "that", "than", "their", "them", "then",
+        "they", "this", "what", "when", "with", "will", "would", "could", "should",
+        "there", "here", "were", "your", "ours", "meeting", "notes", "please", "need",
+        "needs", "task", "action", "the", "and", "for"
+    ]
+
+    private static let dateTerms: Set<String> = [
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+        "january", "february", "march", "april", "may", "june", "july", "august",
+        "september", "october", "november", "december", "today", "tomorrow", "tonight"
+    ]
+
+    private static let nonEntityCapitalizedWords: Set<String> = [
+        "A", "An", "The", "This", "That", "These", "Those", "We", "I", "You", "They",
+        "Decision", "Next", "Risk", "Summary", "Send", "Create", "Review", "Update",
+        "Confirm", "Discuss", "Complete", "Prepare", "Share", "Follow"
+    ]
+
+    static func matchStrength(claim: String, source: String) -> SourceMatchStrength? {
+        let normalizedClaim = normalizedText(claim)
+        let normalizedSource = normalizedText(source)
+        guard !normalizedClaim.isEmpty, !normalizedSource.isEmpty else { return nil }
+        guard hasNegation(normalizedClaim) == hasNegation(normalizedSource) else { return nil }
+        guard preservesAssertions(from: normalizedClaim, in: normalizedSource) else { return nil }
+        guard criticalTerms(in: claim).isSubset(of: allTokens(in: source)) else { return nil }
+
+        if fingerprint(normalizedClaim) == fingerprint(normalizedSource) {
+            return .exact
+        }
+        if normalizedClaim.count >= 8,
+           normalizedSource.contains(normalizedClaim) || normalizedClaim.contains(normalizedSource) {
+            return .partial
+        }
+
+        let claimTokens = semanticTokens(in: normalizedClaim)
+        let sourceTokens = semanticTokens(in: normalizedSource)
+        guard !claimTokens.isEmpty, !sourceTokens.isEmpty else { return nil }
+        let overlap = claimTokens.intersection(sourceTokens).count
+        let required = claimTokens.count <= 3
+            ? claimTokens.count
+            : max(3, Int(ceil(Double(claimTokens.count) * 0.72)))
+        return overlap >= required ? .partial : nil
+    }
+
+    static func supports(claim: String, sources: [String]) -> Bool {
+        let claims = atomicClaims(in: claim)
+        guard !claims.isEmpty else { return false }
+        return claims.allSatisfy { atomicClaim in
+            sources.contains { matchStrength(claim: atomicClaim, source: $0) != nil }
+        }
+    }
+
+    static func bestSupportingSource(for claim: String, sources: [String]) -> String? {
+        sources.first { matchStrength(claim: claim, source: $0) != nil }
+    }
+
+    static func isExact(_ claim: String, source: String) -> Bool {
+        fingerprint(normalizedText(claim)) == fingerprint(normalizedText(source))
+    }
+
+    private static func atomicClaims(in text: String) -> [String] {
+        text
+            .components(separatedBy: CharacterSet(charactersIn: ".!?;\n"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private static func semanticTokens(in text: String) -> Set<String> {
+        Set(
+            text.lowercased()
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { $0.count > 2 && !ignoredTokens.contains($0) }
+        )
+    }
+
+    private static func criticalTerms(in text: String) -> Set<String> {
+        let lower = text.lowercased()
+        var terms = Set(
+            lower.components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { token in
+                    token.contains(where: \.isNumber) || dateTerms.contains(token)
+                }
+        )
+
+        let words = text.components(separatedBy: CharacterSet.alphanumerics.inverted)
+        for word in words where word.count > 1 {
+            guard word.first?.isUppercase == true,
+                  !nonEntityCapitalizedWords.contains(word)
+            else { continue }
+            terms.insert(word.lowercased())
+        }
+        return terms
+    }
+
+    private static func allTokens(in text: String) -> Set<String> {
+        Set(
+            text.lowercased()
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { !$0.isEmpty }
+        )
+    }
+
+    private static func hasNegation(_ text: String) -> Bool {
+        let markers = [" not ", " no ", " never ", " without ", " cannot ", "can't", "won't", "isn't", "wasn't"]
+        let padded = " \(text.lowercased()) "
+        return markers.contains { padded.contains($0) }
+    }
+
+    private static func preservesAssertions(from claim: String, in source: String) -> Bool {
+        let decisionMarkers = ["decision", "decided", "approved", "agreed", "confirmed"]
+        let commitmentMarkers = ["commit", "committed", "promised", "assigned", "must", "will"]
+        let riskMarkers = ["risk", "blocked", "blocker", "at risk"]
+        let uncertaintyMarkers = ["maybe", "might", "consider", "proposed", "pending", "not decided"]
+
+        if containsAny(decisionMarkers, in: claim), !containsAny(decisionMarkers, in: source) { return false }
+        if containsAny(commitmentMarkers, in: claim), !containsAny(commitmentMarkers, in: source) { return false }
+        if containsAny(riskMarkers, in: claim), !containsAny(riskMarkers, in: source) { return false }
+        if containsAny(uncertaintyMarkers, in: source),
+           containsAny(decisionMarkers + commitmentMarkers, in: claim),
+           !containsAny(uncertaintyMarkers, in: claim) {
+            return false
+        }
+        return true
+    }
+
+    private static func containsAny(_ markers: [String], in text: String) -> Bool {
+        markers.contains { text.localizedCaseInsensitiveContains($0) }
+    }
+
+    private static func normalizedText(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private static func fingerprint(_ text: String) -> String {
+        text.components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
+    }
+}
+
 struct WorkspaceAnswer {
     let text: String
     let citations: [RAGResult]
 }
 
 private actor MeetingPersistenceWriter {
-    private var lastWrittenData: Data?
+    private var lastWrittenDigest: SHA256.Digest?
 
     /// Encodes and atomically writes the library. Throws on encode/write
     /// failure so the caller can surface data loss instead of swallowing it.
     @discardableResult
-    func saveMeetings(_ meetings: [Meeting], to url: URL) throws -> Bool {
+    func saveMeetings(
+        _ meetings: [Meeting],
+        to url: URL,
+        recoveryURL: URL
+    ) throws -> Bool {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(meetings)
-        if lastWrittenData == data { return false }
-        if lastWrittenData == nil,
-           let existing = try? Data(contentsOf: url),
-           existing == data {
-            lastWrittenData = data
+        let digest = SHA256.hash(data: data)
+        if lastWrittenDigest == digest { return false }
+
+        let existingData = try? Data(contentsOf: url, options: .mappedIfSafe)
+        if lastWrittenDigest == nil,
+           let existingData,
+           SHA256.hash(data: existingData) == digest {
+            lastWrittenDigest = digest
             return false
         }
+
+        var preservedPreviousVersion = false
+        if let existingData, !existingData.isEmpty {
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            if (try? decoder.decode([Meeting].self, from: existingData)) != nil {
+                try writeProtected(existingData, to: recoveryURL)
+                preservedPreviousVersion = true
+            }
+        }
+
         try data.write(to: url, options: .atomic)
-        lastWrittenData = data
+        try FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: url.path
+        )
+        if !preservedPreviousVersion {
+            try writeProtected(data, to: recoveryURL)
+        }
+        lastWrittenDigest = digest
         return true
+    }
+
+    private func writeProtected(_ data: Data, to url: URL) throws {
+        try data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: url.path
+        )
     }
 
     /// Copies the live file to a known-good backup — but only after verifying it
@@ -54,6 +233,10 @@ private actor MeetingPersistenceWriter {
         decoder.dateDecodingStrategy = .iso8601
         guard (try? decoder.decode([Meeting].self, from: data)) != nil else { return }
         try? data.write(to: backup, options: .atomic)
+        try? FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: backup.path
+        )
     }
 }
 
@@ -76,6 +259,7 @@ final class MeetingStore {
             _eventPrepCache.removeAll(keepingCapacity: true)
             _intelligenceReportCache.removeAll(keepingCapacity: true)
             _sourceProofCache.removeAll(keepingCapacity: true)
+            scheduleRetentionEnforcement()
         }
     }
 
@@ -139,7 +323,6 @@ final class MeetingStore {
             - Maya will confirm the integration scope
             - Risk: legal still needs to review the data terms
             - Budget approved at $25k for phase one
-            - Tip: tap Enhance notes below, then Share recap
             """,
             transcript: [],
             summaries: [],
@@ -188,6 +371,9 @@ final class MeetingStore {
     private var derivedMigrationTask: Task<Void, Never>?
 
     @ObservationIgnored
+    private var retentionTask: Task<Void, Never>?
+
+    @ObservationIgnored
     private var aiProcessingTasks: [Meeting.ID: Task<Void, Never>] = [:]
 
     @ObservationIgnored
@@ -217,7 +403,13 @@ final class MeetingStore {
         let hasSavedData = fileManager.fileExists(atPath: mainURL.path)
             || fileManager.fileExists(atPath: backupURL.path)
 
-        if shouldResetData {
+        if shouldResetData && shouldUseSeedData {
+            meetings = Meeting.seed.map { meeting in
+                var mutableMeeting = Self.normalizedMeeting(meeting)
+                mutableMeeting.selectedPromptID = meeting.prompts.first?.id
+                return mutableMeeting
+            }
+        } else if shouldResetData {
             meetings = []
         } else if hasSavedData {
             // Real data wins over seed. Recovers from the backup and quarantines
@@ -283,11 +475,13 @@ final class MeetingStore {
             for: rowsNeedingMigration,
             preservingAuthoredCommitmentsFor: authoredSeedIDs
         )
+        enforceRetentionPolicies()
     }
 
     deinit {
         saveTask?.cancel()
         derivedMigrationTask?.cancel()
+        retentionTask?.cancel()
     }
 
     private static func needsDerivedDataRefresh(_ meeting: Meeting) -> Bool {
@@ -704,10 +898,13 @@ final class MeetingStore {
         // like "book the security walkthrough" doesn't double as a risk.
         let risks = extractedSignalLines(
             from: meeting,
-            keywords: ["risk", "concern", "issue", "blocker", "security", "timeline", "budget", "delay", "problem"],
+            keywords: ["risk", "concern", "issue", "blocker", "blocked", "delay", "problem", "unsafe"],
             fallbackPrefixes: ["risk", "concern", "issue"],
             limit: 4,
-            exclude: MeetingIntelligenceEngine.isActionableLine
+            exclude: {
+                MeetingIntelligenceEngine.isActionableLine($0)
+                    || !MeetingIntelligenceEngine.hasAffirmedRiskSignal(in: $0)
+            }
         )
 
         // Open questions — the unresolved items every meeting template surfaces.
@@ -951,6 +1148,10 @@ final class MeetingStore {
     func updateRetentionPolicy(_ policy: RetentionPolicy, for id: Meeting.ID) {
         guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
         meetings[index].retentionPolicy = policy
+        meetings[index].retentionPolicyUpdatedAt = .now
+        if policy == .notesOnly, meetings[index].status != .processing, meetings[index].status != .live {
+            purgeRetainedSources(for: id, stage: "Source media deleted by retention policy")
+        }
     }
 
     func setTranscriptVisibility(_ isVisible: Bool, for id: Meeting.ID) {
@@ -959,19 +1160,84 @@ final class MeetingStore {
     }
 
     func purgeTranscript(for id: Meeting.ID) {
-        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
-        meetings[index].transcript = []
-        for recordingIndex in meetings[index].audioRecordings.indices {
-            meetings[index].audioRecordings[recordingIndex].transcript = ""
-            meetings[index].audioRecordings[recordingIndex].transcriptionSegments = []
-            meetings[index].audioRecordings[recordingIndex].transcriptionProvider = nil
-            meetings[index].audioRecordings[recordingIndex].diarizationAvailable = false
+        purgeRetainedSources(for: id, stage: "Transcript and source audio deleted after review")
+    }
+
+    /// Applies persisted retention promises both while the app is running and
+    /// when it next opens after a deadline elapsed in the background.
+    @discardableResult
+    func enforceRetentionPolicies(now: Date = .now) -> Int {
+        let expiredIDs = meetings.compactMap { meeting -> Meeting.ID? in
+            guard meeting.status != .processing,
+                  meeting.status != .live,
+                  hasRetainedSources(meeting),
+                  let deadline = meeting.retentionPolicy.expirationDate(
+                    startingAt: meeting.retentionPolicyUpdatedAt ?? meeting.when
+                  ),
+                  deadline <= now
+            else { return nil }
+            return meeting.id
         }
-        meetings[index].aiBrief?.speakerContributions = []
-        meetings[index].retentionPolicy = .notesOnly
-        meetings[index].transcriptVisibilityEnabled = false
-        meetings[index].stage = "Transcript purged after review"
+
+        for id in expiredIDs {
+            purgeRetainedSources(for: id, stage: "Source media deleted by retention policy", now: now)
+        }
+        scheduleRetentionEnforcement(now: now)
+        return expiredIDs.count
+    }
+
+    private func purgeRetainedSources(
+        for id: Meeting.ID,
+        stage: String,
+        now: Date = .now
+    ) {
+        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        var meeting = meetings[index]
+        let fileNames = meeting.audioRecordings.map(\.fileName)
+
+        MeetingProcessingCoordinator.shared.discard(id)
+        fileNames.forEach { RecordingFileStore.deleteFile(named: $0) }
+        meeting.transcript = []
+        meeting.audioRecordings = []
+        meeting.aiBrief?.speakerContributions = []
+        meeting.retentionPolicy = .notesOnly
+        meeting.retentionPolicyUpdatedAt = now
+        meeting.transcriptVisibilityEnabled = false
+        meeting.stage = stage
+        meetings[index] = meeting
         refreshSummariesIfNeeded(at: index)
+    }
+
+    private func hasRetainedSources(_ meeting: Meeting) -> Bool {
+        !meeting.transcript.isEmpty || !meeting.audioRecordings.isEmpty
+    }
+
+    private func scheduleRetentionEnforcement(now: Date = .now) {
+        retentionTask?.cancel()
+        retentionTask = nil
+
+        let nextDeadline = meetings.compactMap { meeting -> Date? in
+            guard meeting.status != .processing,
+                  meeting.status != .live,
+                  hasRetainedSources(meeting)
+            else { return nil }
+            return meeting.retentionPolicy.expirationDate(
+                startingAt: meeting.retentionPolicyUpdatedAt ?? meeting.when
+            )
+        }.min()
+        guard let nextDeadline else { return }
+
+        let delay = max(0, nextDeadline.timeIntervalSince(now))
+        retentionTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(delay))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, let self else { return }
+            self.retentionTask = nil
+            self.enforceRetentionPolicies()
+        }
     }
 
     func deleteEvidenceItem(for meetingID: Meeting.ID, evidenceID: EvidenceItem.ID) {
@@ -1434,6 +1700,7 @@ final class MeetingStore {
     }
 
     func deleteAllUserData() async {
+        await MeetingProcessingCoordinator.shared.discardAll()
         aiProcessingTasks.values.forEach { $0.cancel() }
         aiProcessingTasks.removeAll()
         aiProcessingRunIDs.removeAll()
@@ -1462,6 +1729,8 @@ final class MeetingStore {
         }
 
         SpotlightIndex.removeAll()
+        UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
+        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
         WidgetSharedStore.clear()
         WebhookStore.shared.clear()
         AnalyticsLog.shared.clear()
@@ -1946,6 +2215,7 @@ final class MeetingStore {
         calendarEventID: String? = nil,
         calendarStartDate: Date? = nil,
         calendarEndDate: Date? = nil,
+        selectedTemplate: NoteTemplate = .general,
         shouldScheduleAIProcessing: Bool = true
     ) -> Meeting.ID {
         let normalizedAttendees = attendees.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -1959,12 +2229,12 @@ final class MeetingStore {
             status: status,
             stage: stage,
             objective: objective,
-            rawNotes: notes.isEmpty ? "- Add your key takeaways here" : notes,
+            rawNotes: notes,
             transcript: transcript,
             summaries: [],
             prompts: Self.defaultPrompts(),
-            destinations: ["Email", "Slack", "Notion"],
-            selectedTemplate: .discovery,
+            destinations: [],
+            selectedTemplate: selectedTemplate,
             selectedPromptID: nil,
             isPinned: false,
             consentState: consentState,
@@ -2176,11 +2446,9 @@ final class MeetingStore {
             calendarEventID: calendarEventID,
             calendarStartDate: calendarStartDate,
             calendarEndDate: calendarEndDate,
+            selectedTemplate: selectedTemplate,
             shouldScheduleAIProcessing: false
         )
-        if let index = meetings.firstIndex(where: { $0.id == meetingID }) {
-            meetings[index].selectedTemplate = selectedTemplate
-        }
         return (meetingID, pendingNotes)
     }
 
@@ -2291,6 +2559,20 @@ final class MeetingStore {
         meetings[index].stage = message
         refreshSummariesIfNeeded(at: index)
         scheduleAIProcessing(for: id)
+    }
+
+    func updatePendingLiveTranscript(_ id: Meeting.ID, transcript: String) {
+        guard let index = meetings.firstIndex(where: { $0.id == id }),
+              meetings[index].status == .processing
+        else { return }
+        let cleaned = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return }
+        meetings[index].transcript = transcriptLines(
+            from: cleaned,
+            speaker: "Meeting",
+            role: "Live capture"
+        )
+        meetings[index].transcriptVisibilityEnabled = true
     }
 
     @discardableResult
@@ -2522,6 +2804,8 @@ final class MeetingStore {
         })
         meetings[meetingIndex].transcriptVisibilityEnabled = true
         meetings[meetingIndex].retentionPolicy = .transcript7Days
+        meetings[meetingIndex].retentionPolicyUpdatedAt = .now
+        meetings[meetingIndex].status = .ready
         meetings[meetingIndex].stage = result.usedFallback
             ? "Transcript recovered locally"
             : "Transcript recovered"
@@ -2680,7 +2964,11 @@ final class MeetingStore {
 
     private func persist(_ snapshot: [Meeting]) async {
         do {
-            let didWrite = try await persistenceWriter.saveMeetings(snapshot, to: saveURL)
+            let didWrite = try await persistenceWriter.saveMeetings(
+                snapshot,
+                to: saveURL,
+                recoveryURL: backupURL
+            )
             let defaults = UserDefaults.standard
             let preferenceKey = "scribeflow.automaticBackupsEnabled"
             let automaticBackupsEnabled = defaults.object(forKey: preferenceKey) == nil
@@ -2738,6 +3026,12 @@ final class MeetingStore {
         }
         meeting.sensitiveFlags = detectedSensitiveFlags(for: meeting)
         meeting.derivedDataVersion = Self.currentDerivedDataVersion
+    }
+
+    private static func completeSentence(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let last = trimmed.last, !".!?".contains(last) else { return trimmed }
+        return trimmed + "."
     }
 
     private func generatedSummaries(for meeting: Meeting) -> [TemplateSummary] {
@@ -2834,13 +3128,20 @@ final class MeetingStore {
         }
 
         let modelSummary = meeting.aiBrief?.summary.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let objective = meeting.objective.trimmingCharacters(in: .whitespacesAndNewlines)
+        let meetingTitle = meeting.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let title = !modelSummary.isEmpty
             ? modelSummary
-            : (meeting.objective.isEmpty
-                ? "Summary of \(meeting.title)."
-                : "This meeting is centered on \(meeting.objective.lowercased()).")
+            : (!objective.isEmpty
+                ? Self.completeSentence(objective)
+                : (meetingTitle.isEmpty
+                    ? "Captured and ready to review."
+                    : "Summary of \(meetingTitle)."))
 
         return [
+            TemplateSummary(template: .general, summary: MeetingSummary(
+                eyebrow: "Auto draft", title: title,
+                sections: sections("Decisions", "Next steps", "Key points"))),
             TemplateSummary(template: .discovery, summary: MeetingSummary(
                 eyebrow: "Auto draft", title: title,
                 sections: sections("Decisions", "Next steps", "Key points"))),
@@ -2850,6 +3151,15 @@ final class MeetingStore {
             TemplateSummary(template: .manager, summary: MeetingSummary(
                 eyebrow: "Coach angle", title: "Turn this capture into coaching and accountability.",
                 sections: sections("Decisions to reinforce", "Hold owners to", "Observed"))),
+            TemplateSummary(template: .standup, summary: MeetingSummary(
+                eyebrow: "Standup", title: "Progress, blockers, and next ownership.",
+                sections: sections("Decisions", "Owners and next steps", "Progress and blockers"))),
+            TemplateSummary(template: .interview, summary: MeetingSummary(
+                eyebrow: "Interview", title: "Evidence and decision context from this interview.",
+                sections: sections("Decision signals", "Follow-up", "Observed evidence"))),
+            TemplateSummary(template: .brainstorm, summary: MeetingSummary(
+                eyebrow: "Brainstorm", title: "Themes and ideas worth carrying forward.",
+                sections: sections("Ideas selected", "Experiments and next moves", "Themes"))),
         ]
     }
 
@@ -2989,18 +3299,16 @@ final class MeetingStore {
 
         let leadIn: String?
 
-        if lower.contains("decision") || lower.contains("decide") {
-            leadIn = "A clear decision emerged"
-        } else if lower.contains("next") || lower.contains("follow up") || lower.contains("owner") || lower.contains("action") {
-            leadIn = "The meeting landed on a concrete next step"
-        } else if lower.contains("need") || lower.contains("needs") || lower.contains("must") || lower.contains("requirement") {
-            leadIn = "The group emphasized an important requirement"
-        } else if lower.contains("security") || lower.contains("risk") || lower.contains("issue") || lower.contains("problem") {
-            leadIn = "A meaningful risk came through"
+        if MeetingIntelligenceEngine.decision(from: cleaned) != nil {
+            leadIn = "Decision"
+        } else if MeetingIntelligenceEngine.actionItem(from: cleaned) != nil {
+            leadIn = "Next step"
+        } else if MeetingIntelligenceEngine.hasAffirmedRiskSignal(in: cleaned) {
+            leadIn = "Risk"
         } else if lower.contains("budget") || lower.contains("price") {
-            leadIn = "Budget pressure showed up in the discussion"
+            leadIn = "Budget"
         } else if lower.contains("timeline") || lower.contains("quarter") || lower.contains("launch") {
-            leadIn = "Timing came through as an important factor"
+            leadIn = "Timing"
         } else {
             leadIn = nil
         }
@@ -3149,10 +3457,11 @@ final class MeetingStore {
 
             if lower.contains("bookmark:") || lower.contains("personal note") {
                 level = .personalNote
-            } else if !snippets.isEmpty {
-                level = .verified
             } else {
-                level = .inferred
+                // This row is the user's saved note itself. Transcript overlap
+                // can add corroboration, but is not required to prove the note
+                // exists in Scribeflow's source record.
+                level = .verified
             }
 
             return EvidenceItem(
@@ -3506,12 +3815,8 @@ final class MeetingStore {
     }
 
     private func supportingSnippets(for line: String, in transcriptParagraphs: [String]) -> [String] {
-        let tokens = significantTokens(in: line)
-        guard !tokens.isEmpty else { return [] }
-
-        return transcriptParagraphs.filter { paragraph in
-            let overlap = tokens.intersection(significantTokens(in: paragraph)).count
-            return overlap >= 2 || paragraph.lowercased().contains(sentenceBody(line).lowercased())
+        transcriptParagraphs.filter {
+            ClaimEvidenceValidator.matchStrength(claim: line, source: $0) != nil
         }
         .prefix(2)
         .map { $0 }
@@ -3551,7 +3856,7 @@ final class MeetingStore {
         let audioReferences = matchingAudioReferences(for: text, in: meeting)
         let noteReferences = matchingNoteReferences(for: text, in: meeting)
 
-        let directReferences = transcriptReferences + audioReferences + noteReferences
+        let directReferences = noteReferences + transcriptReferences + audioReferences
         if !directReferences.isEmpty {
             return Array(directReferences.prefix(3))
         }
@@ -3654,38 +3959,7 @@ final class MeetingStore {
     }
 
     private func sourceTextMatchStrength(_ claim: String, _ source: String) -> SourceMatchStrength? {
-        let cleanedClaim = sentenceBody(claim).lowercased()
-        let cleanedSource = sentenceBody(source).lowercased()
-        guard !cleanedClaim.isEmpty, !cleanedSource.isEmpty else { return nil }
-
-        let claimPolarity = polarityMarkers(in: cleanedClaim)
-        let sourcePolarity = polarityMarkers(in: cleanedSource)
-        guard claimPolarity == sourcePolarity else { return nil }
-
-        if normalizedFingerprint(cleanedClaim) == normalizedFingerprint(cleanedSource) {
-            return .exact
-        }
-
-        if cleanedClaim.count >= 8,
-           cleanedSource.contains(cleanedClaim) || cleanedClaim.contains(cleanedSource)
-        {
-            return .partial
-        }
-
-        let claimTokens = significantTokens(in: cleanedClaim)
-        let sourceTokens = significantTokens(in: cleanedSource)
-        guard claimTokens.count >= 3, sourceTokens.count >= 3 else { return nil }
-
-        let overlap = claimTokens.intersection(sourceTokens).count
-        let requiredOverlap = max(3, Int(ceil(Double(claimTokens.count) * 0.7)))
-        return overlap >= requiredOverlap ? .partial : nil
-    }
-
-    private func polarityMarkers(in text: String) -> Set<String> {
-        let markers = ["not", "no", "never", "without", "cannot", "can't", "won't", "isn't", "wasn't"]
-        return Set(markers.filter { marker in
-            text.range(of: #"\b\#(NSRegularExpression.escapedPattern(for: marker))\b"#, options: .regularExpression) != nil
-        })
+        ClaimEvidenceValidator.matchStrength(claim: claim, source: source)
     }
 
     private func extractedSignalLines(
@@ -4088,6 +4362,8 @@ private enum AppleIntelligenceNoteTransformer {
         \(styleInstruction)
         Do not add headings.
         Do not invent facts that aren't supported by the notes or transcript.
+        Preserve negation, names, numbers, dates, prices, and ownership exactly. If
+        the transcript is ambiguous, keep the uncertainty instead of guessing.
         """)
 
         let transcriptContext = representativeContext(
@@ -4242,15 +4518,15 @@ private struct GeneratedBrief {
     var needsClarification: [String]
     @Guide(description: "A one or two sentence plain-language summary tailored to the detected capture purpose. Never call it a meeting unless capturePurpose is meeting or call.")
     var summary: String
-    @Guide(description: "Decisions that were actually made. Empty if none were made.")
+    @Guide(description: "Decisions that were actually made. Empty for proposals, pending choices, or explicit statements that no decision was made.")
     var decisions: [String]
-    @Guide(description: "Action items / commitments, each with an owner and due date when stated.")
+    @Guide(description: "Explicit action items or commitments only, each with an owner and due date when stated. A negated commitment such as 'will not' or 'does not need to' is not an action.")
     var actions: [GeneratedActionItem]
     @Guide(description: "Unresolved questions that still need an answer. Empty if none.")
     var openQuestions: [String]
     @Guide(description: "Other substantive discussion points that are not decisions or actions.")
     var keyPoints: [String]
-    @Guide(description: "Risks, blockers, or concerns raised. Empty if none.")
+    @Guide(description: "Affirmed risks, blockers, or concerns raised. Empty for statements such as 'no risk', 'not blocked', or neutral mentions of security, budget, or timeline.")
     var risks: [String]
     @Guide(description: "Up to four short points the note owner most needs to understand, ranked for the stated objective and brief focus. Do not repeat the summary or invent recommendations.")
     var whatMatters: [String]
@@ -4316,6 +4592,14 @@ private enum AppleIntelligenceBriefExtractor {
         15. An appointment may contain important instructions, and a personal plan
             may contain intended steps. Keep those in descriptive sections; do not
             turn them into work tasks, owners, risks, or commitments.
+        16. Treat speech recognition as fallible evidence. Preserve negation and the
+            exact meaning of names, numbers, dates, prices, quantities, and owners.
+            Never silently resolve an uncertain word into a stronger claim.
+        17. "Not decided" is not a decision, "will not" is not an action item, and
+            "no risk" is not a risk. Keep negative instructions as constraints only
+            when the words explicitly support them.
+        18. When speakers conflict, wording is incomplete, or a critical proper noun
+            or number is unclear, use needsClarification instead of guessing.
 
         For enhancedNotes, treat the user's own bullet points as the skeleton:
         keep each one VERBATIM as the anchor (in their order) and add a short
@@ -4365,6 +4649,28 @@ private enum AppleIntelligenceBriefExtractor {
             ?? fallbackPurpose
         let allowsMeetingSignals = capturePurpose.allowsMeetingSignals
         let allowsAccountability = capturePurpose.allowsAccountabilityExtraction
+        let authoredNoteLines = meeting.rawNotes
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let transcriptEvidenceLines = meeting.transcript.map { line in
+            let speaker = SpeakerIdentityResolver.normalizedDisplayName(line.speaker)
+            return speaker.isEmpty ? line.text : "\(speaker): \(line.text)"
+        }
+        let directEvidenceLines = authoredNoteLines + transcriptEvidenceLines
+        let fallbackContextLines = [meeting.objective, meeting.title]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let sourceEvidenceLines = directEvidenceLines.isEmpty ? fallbackContextLines : directEvidenceLines
+        let supportedDecisionCount = sourceEvidenceLines.reduce(0) { count, line in
+            count + (MeetingIntelligenceEngine.decision(from: line) == nil ? 0 : 1)
+        }
+        let supportedActionCount = sourceEvidenceLines.reduce(0) { count, line in
+            count + (MeetingIntelligenceEngine.actionItem(from: line) == nil ? 0 : 1)
+        }
+        let supportedRiskCount = sourceEvidenceLines.reduce(0) { count, line in
+            count + (MeetingIntelligenceEngine.hasAffirmedRiskSignal(in: line) ? 1 : 0)
+        }
 
         // Nonsense input → a clear verdict, nothing manufactured (rule 2).
         guard g.makesSense else {
@@ -4389,6 +4695,10 @@ private enum AppleIntelligenceBriefExtractor {
             let generatedSpeakerKey = SpeakerIdentityResolver.canonicalKey(for: generatedSpeaker)
             guard generatedSpeakerKey == key else { return nil }
             guard seenSpeakers.insert(key).inserted else { return nil }
+            guard let contributionStrength = ClaimEvidenceValidator.matchStrength(
+                claim: contribution,
+                source: "\(speaker): \(sourceLine.text)"
+            ) else { return nil }
 
             return AISpeakerContribution(
                 speaker: speaker,
@@ -4401,48 +4711,96 @@ private enum AppleIntelligenceBriefExtractor {
                     speaker: speaker,
                     transcriptLineID: sourceLine.id,
                     lineIndex: lineIndex,
-                    matchStrength: .exact
+                    matchStrength: contributionStrength
                 )]
             )
         }
 
-        let actions = deduplicatedActions(
+        let generatedActions = deduplicatedActions(
             g.actions
-                .map {
-                    AIActionItem(
-                        task: clean($0.task),
-                        owner: clean($0.owner),
-                        due: clean($0.due),
-                        priority: clean($0.priority).lowercased(),
-                        why: clean($0.why)
+                .compactMap { generated -> AIActionItem? in
+                    let task = clean(generated.task)
+                    guard !task.isEmpty,
+                          let supportingLine = ClaimEvidenceValidator.bestSupportingSource(
+                            for: task,
+                            sources: sourceEvidenceLines
+                          )
+                    else { return nil }
+                    let owner = supportedActionMetadata(
+                        clean(generated.owner),
+                        sourceLines: [supportingLine],
+                        allowsGenericValues: true
+                    )
+                    let due = supportedActionMetadata(
+                        clean(generated.due),
+                        sourceLines: [supportingLine],
+                        allowsGenericValues: false
+                    )
+                    let why = clean(generated.why)
+                    return AIActionItem(
+                        task: task,
+                        owner: owner,
+                        due: due,
+                        priority: clean(generated.priority).lowercased(),
+                        why: isGrounded(why, in: sourceEvidenceLines) ? why : ""
                     )
                 }
-                .filter { !$0.task.isEmpty }
         )
+        let actions = supportedActionCount == 0
+            ? []
+            : Array(generatedActions.prefix(max(1, supportedActionCount * 2)))
+        let decisions = supportedDecisionCount == 0
+            ? []
+            : Array(groundedStrings(g.decisions.map(clean), in: sourceEvidenceLines).prefix(max(1, supportedDecisionCount * 2)))
+        let risks = supportedRiskCount == 0
+            ? []
+            : Array(groundedStrings(g.risks.map(clean), in: sourceEvidenceLines).prefix(max(1, supportedRiskCount * 2)))
+        let generatedSummary = clean(g.summary)
+        let trustedSummary: String
+        if isGrounded(generatedSummary, in: sourceEvidenceLines) {
+            trustedSummary = generatedSummary
+        } else {
+            let objective = meeting.objective.trimmingCharacters(in: .whitespacesAndNewlines)
+            trustedSummary = objective.isEmpty ? (sourceEvidenceLines.first ?? "") : objective
+        }
 
+        let generatedTopic = clean(g.captureTopic)
+        let trustedTopic = isGrounded(generatedTopic, in: sourceEvidenceLines)
+            ? generatedTopic
+            : clean(meeting.title)
         let brief = AIBriefData(
             capturePurpose: capturePurpose,
-            captureTopic: clean(g.captureTopic),
+            captureTopic: trustedTopic,
             captureDomain: normalizedDomain(clean(g.captureDomain), for: capturePurpose),
             purposeConfidence: normalizedPurposeConfidence(clean(g.purposeConfidence)),
-            summary: clean(g.summary),
-            decisions: allowsMeetingSignals
-                ? deduplicatedStrings(g.decisions.map(clean))
-                : [],
+            summary: trustedSummary,
+            decisions: allowsMeetingSignals ? decisions : [],
             actions: allowsAccountability ? actions : [],
-            openQuestions: deduplicatedStrings(g.openQuestions.map(clean)),
-            keyPoints: deduplicatedStrings(g.keyPoints.map(clean)),
-            risks: allowsMeetingSignals
-                ? deduplicatedStrings(g.risks.map(clean))
-                : [],
-            whatMatters: Array(deduplicatedStrings(g.whatMatters.map(clean)).prefix(4)),
+            openQuestions: groundedStrings(g.openQuestions.map(clean), in: sourceEvidenceLines),
+            keyPoints: groundedStrings(g.keyPoints.map(clean), in: sourceEvidenceLines),
+            risks: allowsMeetingSignals ? risks : [],
+            whatMatters: Array(groundedStrings(g.whatMatters.map(clean), in: sourceEvidenceLines).prefix(4)),
             speakerContributions: Array(speakerContributions.prefix(6)),
             enhancedNotes: g.enhancedNotes
-                .map { EnhancedNoteData(anchor: clean($0.anchor), detail: clean($0.detail)) }
-                .filter { !$0.anchor.isEmpty },
-            sections: purposeAppropriateSections(g.sections, purpose: capturePurpose, clean: clean),
+                .compactMap { generated -> EnhancedNoteData? in
+                    let generatedAnchor = clean(generated.anchor)
+                    guard let anchor = authoredNoteLines.first(where: {
+                        ClaimEvidenceValidator.isExact(generatedAnchor, source: $0)
+                    }) else { return nil }
+                    let detail = clean(generated.detail)
+                    return EnhancedNoteData(
+                        anchor: anchor,
+                        detail: isGrounded(detail, in: sourceEvidenceLines) ? detail : ""
+                    )
+                },
+            sections: purposeAppropriateSections(
+                g.sections,
+                purpose: capturePurpose,
+                sourceLines: sourceEvidenceLines,
+                clean: clean
+            ),
             makesSense: true,
-            needsClarification: deduplicatedStrings(g.needsClarification.map(clean))
+            needsClarification: groundedStrings(g.needsClarification.map(clean), in: sourceEvidenceLines)
         )
         return (brief, detected)
     }
@@ -4471,6 +4829,7 @@ private enum AppleIntelligenceBriefExtractor {
     private static func purposeAppropriateSections(
         _ sections: [GeneratedSection],
         purpose: CapturePurposeKind,
+        sourceLines: [String],
         clean: (String) -> String
     ) -> [AIBriefSection] {
         let forbiddenPersonalHeadings = [
@@ -4486,7 +4845,7 @@ private enum AppleIntelligenceBriefExtractor {
                 return nil
             }
 
-            let items = deduplicatedStrings(section.items.map(clean))
+            let items = groundedStrings(section.items.map(clean), in: sourceLines)
             guard !items.isEmpty else { return nil }
             return AIBriefSection(heading: heading, items: items)
         }
@@ -4505,6 +4864,27 @@ private enum AppleIntelligenceBriefExtractor {
             accepted.append((text, tokens))
         }
         return accepted.map { $0.text }
+    }
+
+    private static func groundedStrings(_ values: [String], in sourceLines: [String]) -> [String] {
+        deduplicatedStrings(values).filter { isGrounded($0, in: sourceLines) }
+    }
+
+    private static func isGrounded(_ value: String, in sourceLines: [String]) -> Bool {
+        ClaimEvidenceValidator.supports(claim: value, sources: sourceLines)
+    }
+
+    private static func supportedActionMetadata(
+        _ value: String,
+        sourceLines: [String],
+        allowsGenericValues: Bool
+    ) -> String {
+        guard !value.isEmpty else { return "" }
+        if allowsGenericValues,
+           ["you", "team", "we", "i"].contains(value.lowercased()) {
+            return value.lowercased() == "i" ? "You" : value
+        }
+        return sourceLines.contains(where: { $0.localizedCaseInsensitiveContains(value) }) ? value : ""
     }
 
     private static func deduplicatedActions(_ values: [AIActionItem]) -> [AIActionItem] {
@@ -4612,6 +4992,8 @@ private enum AppleIntelligenceMeetingAssistant {
         Be concise, useful, and polished.
         Prefer bullets or short paragraphs depending on the user's request.
         Do not invent facts that are not supported by the meeting context.
+        Preserve negation, names, numbers, dates, prices, and stated ownership. Say
+        that the evidence is unclear when the transcript does not support a precise answer.
         """)
 
         let transcriptContext = meeting.transcript
@@ -4724,6 +5106,12 @@ private enum AppleIntelligenceWorkspaceAssistant {
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() }
                 .filter { allowedIDs.contains($0) }
             guard !text.isEmpty, !sourceIDs.isEmpty else { continue }
+            let citedSnippets = sources
+                .filter { sourceIDs.contains($0.sourceID) }
+                .map(\.snippet)
+            guard ClaimEvidenceValidator.supports(claim: text, sources: citedSnippets) else {
+                continue
+            }
 
             let tokens = semanticTokens(in: text)
             guard !tokens.isEmpty else { continue }

@@ -40,10 +40,7 @@ struct InvestorPresentationView: View {
 
     private var presentationHeader: some View {
         HStack(spacing: 12) {
-            Image(decorative: "BrandMark")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 30, height: 30)
+            ScribeflowBrandMark(size: 30)
             Text("SCRIBEFLOW")
                 .font(.caption.weight(.bold))
                 .foregroundStyle(AppPalette.secondaryInk)

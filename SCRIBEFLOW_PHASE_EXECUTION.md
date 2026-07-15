@@ -98,7 +98,7 @@ Status: complete for repository-controlled work.
 
 - Added a protected, bounded local MetricKit archive.
 - Added App Health checks and user-controlled diagnostics export/clear.
-- Added build-only GitHub Actions compilation with cancellation and timeout controls.
+- Added GitHub Actions Debug tests plus Debug and Release compilation with cancellation and timeout controls.
 
 ### Inclusive Product
 
@@ -198,7 +198,39 @@ quality remains a release validation step.
 
 ### Verification Checkpoint
 
-- Latest Debug iOS Simulator build succeeded on July 14, 2026.
+- Latest Debug iOS Simulator build succeeded on July 15, 2026 after the final
+  strict-concurrency and imported-audio integration fixes.
 - Latest Release iOS Simulator build succeeded on July 14, 2026.
 - Both builds used fresh DerivedData and code signing disabled for compile verification.
 - Tests and screenshots were intentionally not run for this checkpoint.
+
+## Final Stabilization Pass - 15 July 2026
+
+Status: repository-controlled implementation complete; device certification
+and signed service configuration remain external release gates.
+
+- Retention choices now delete expired transcripts and recording files, not
+  merely update descriptive UI.
+- App Lock relocks after backgrounding, while Debug builds continue to open
+  directly for development.
+- Every accepted generated claim must be supported by one source excerpt;
+  unrelated snippets can no longer combine into false evidence.
+- Live audio delivery is lock-free on the render callback, recognition rotation
+  is serialized, and Save queues secured audio before waiting for final captions.
+- Imported audio is preflighted off the main actor, appears immediately as
+  processing, and uses the enhanced retryable transcription pipeline.
+- First-use speech models respect power, heat, and storage constraints and fall
+  back automatically.
+- Persistence uses a compact content digest, refreshes known-good recovery data,
+  and protects meetings, recordings, queues, analytics, and backups at rest.
+- Full JSON backups are bounded before audio allocation; private iCloud backup
+  is notes-only.
+- Deleting all user data now clears pending processing audio, queues, and local
+  notifications as well as visible meetings.
+- Root dock visibility follows each tab's real navigation path instead of a
+  fragile shared counter. Week calendar navigation now moves by week and reports
+  week-specific counts.
+- Incomplete Live Activity and Now Playing status code was removed until a real
+  Widget extension and device-certified controls exist.
+- App icon files retain the same opaque artwork without an App Store-invalid
+  alpha channel.

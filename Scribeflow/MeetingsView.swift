@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MeetingsView: View {
     @Environment(MeetingStore.self) private var store
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let isActive: Bool
     @Binding var selectedMeetingID: Meeting.ID?
     let onAskTap: () -> Void
@@ -126,7 +127,7 @@ struct MeetingsView: View {
         }
         .background(AppPalette.background.ignoresSafeArea())
         .accessibilityIdentifier("library.view")
-        .navigationTitle("Library")
+        .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(for: Meeting.ID.self) { id in
             MeetingDetailView(meetingID: id)
@@ -194,7 +195,6 @@ struct MeetingsView: View {
 
     private func actionableLibraryRow(_ meeting: Meeting) -> some View {
         EditorialLibraryRow(meeting: meeting, searchQuery: searchText)
-            .editorialReveal()
     }
 
     private func refreshSnapshot(for key: LibrarySnapshotKey) async {
@@ -325,29 +325,55 @@ struct MeetingsView: View {
 
     private var libraryHero: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 4) {
-                    EditorialEyebrow(text: "Library")
-                    Text("All meetings")
-                        .font(.system(size: 28, weight: .medium, design: .serif))
-                        .foregroundStyle(AppPalette.ink)
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 12) {
+                        libraryTitle
+                        askLibraryButton
+                    }
+                } else {
+                    HStack(alignment: .firstTextBaseline) {
+                        libraryTitle
+                        Spacer(minLength: 8)
+                        askLibraryButton
+                    }
                 }
-
-                Spacer(minLength: 8)
-
-                Button {
-                    HapticEngine.tap(.medium)
-                    onAskTap()
-                } label: {
-                    EditorialChip(text: "Ask", systemImage: "sparkle.magnifyingglass", variant: .ink)
-                }
-                .buttonStyle(PressScaleButtonStyle(scale: 0.94))
-                .accessibilityLabel("Ask across your library")
             }
 
-            EditorialMeta(text: "\(snapshot.totalMeetingsCount) saved · \(snapshot.pinnedCount) pinned · \(snapshot.openLoopCount) follow-ups")
+            Text("\(snapshot.totalMeetingsCount) saved · \(snapshot.pinnedCount) pinned · \(snapshot.openLoopCount) follow-ups")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(AppPalette.secondaryInk)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.top, 2)
+    }
+
+    private var libraryTitle: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Library")
+                .font(AppFont.serif(.title, weight: .medium))
+                .foregroundStyle(AppPalette.ink)
+            Text("Meetings, voice notes, and quick thoughts")
+                .font(.subheadline)
+                .foregroundStyle(AppPalette.secondaryInk)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var askLibraryButton: some View {
+        Button {
+            HapticEngine.tap(.medium)
+            onAskTap()
+        } label: {
+            Label("Ask", systemImage: "sparkle.magnifyingglass")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .frame(minHeight: 44)
+                .background(AppPalette.ink, in: Capsule())
+        }
+        .buttonStyle(PressScaleButtonStyle(scale: 0.94))
+        .accessibilityLabel("Ask across your library")
     }
 
     private var searchField: some View {
@@ -574,7 +600,6 @@ struct MeetingsView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
                 .font(.caption.weight(.heavy))
-                .kerning(1.4)
                 .foregroundStyle(AppPalette.secondaryInk)
             VStack(spacing: 0) {
                 content()

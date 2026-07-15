@@ -17,6 +17,7 @@ struct TodayView: View {
     @Environment(MeetingStore.self) private var store
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let isActive: Bool
     @Binding var selectedMeetingID: Meeting.ID?
     /// Open the unified capture surface in either `.record` or `.type` mode.
@@ -460,7 +461,7 @@ struct TodayView: View {
         guard !currentUserEmail.isEmpty else { return nil }
         let local = currentUserEmail.split(separator: "@").first.map(String.init) ?? ""
         let first = local.split(whereSeparator: { ".-_0123456789".contains($0) }).first.map(String.init) ?? local
-        guard first.count >= 2 else { return nil }
+        guard (2...18).contains(first.count) else { return nil }
         // Skip generic mailbox names so the greeting never reads "Hi, You."
         let generic: Set<String> = ["you", "test", "admin", "user", "demo", "me", "hello", "hi", "info", "mail", "contact", "team"]
         guard !generic.contains(first.lowercased()) else { return nil }
@@ -491,38 +492,42 @@ struct TodayView: View {
     private var cinematicBriefing: some View {
         let plan = dailyPlan
         return VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 7) {
-                    Capsule().fill(AppPalette.accent).frame(width: 40, height: 3)
-                    Text(briefDateLine)
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .kerning(1.0)
-                        .foregroundStyle(AppPalette.accent)
-                    Text(briefGreeting)
-                        .scaledFont(size: 34, weight: .semibold, design: .serif, relativeTo: .largeTitle)
-                        .foregroundStyle(AppPalette.ink)
-                        .fixedSize(horizontal: false, vertical: true)
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 12) {
+                        briefingIdentity
+                        HStack {
+                            Spacer(minLength: 0)
+                            briefingCaptureMenu
+                        }
+                    }
+                } else {
+                    HStack(alignment: .top, spacing: 12) {
+                        briefingIdentity
+                        Spacer(minLength: 8)
+                        briefingCaptureMenu
+                    }
                 }
-                Spacer(minLength: 8)
-                CaptureMenuButton(size: 44, onRecord: { onCapture(.record) }, onType: { onCapture(.type) }, onImport: { showingAudioImporter = true })
             }
             .padding(.bottom, 20)
 
             if plan.isEmpty {
                 briefClearState
             } else {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                HStack(alignment: dynamicTypeSize.isAccessibilitySize ? .top : .firstTextBaseline, spacing: 6) {
                     Text("\(plan.count)")
-                        .font(.system(size: 17, weight: .bold, design: .serif))
+                        .font(AppFont.serif(.headline, weight: .bold))
                         .foregroundStyle(AppPalette.ink)
                     Text(plan.count == 1 ? "thing needs you" : "things need you")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.subheadline.weight(.semibold))
                         .foregroundStyle(AppPalette.secondaryInk)
+                        .fixedSize(horizontal: false, vertical: true)
                     Spacer()
-                    Text("TODAY")
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .kerning(1.2)
-                        .foregroundStyle(AppPalette.tertiaryInk)
+                    if !dynamicTypeSize.isAccessibilitySize {
+                        Text("TODAY")
+                            .font(AppFont.mono(.caption2, weight: .bold))
+                            .foregroundStyle(AppPalette.tertiaryInk)
+                    }
                 }
                 .padding(.bottom, 6)
 
@@ -538,28 +543,31 @@ struct TodayView: View {
             }
 
             Rectangle().fill(AppPalette.border.opacity(0.7)).frame(height: 1)
-            HStack(spacing: 8) {
-                briefStat("\(weekMeetingCount)", weekMeetingCount == 1 ? "meeting" : "meetings")
-                Circle().fill(AppPalette.tertiaryInk.opacity(0.5)).frame(width: 3, height: 3)
-                briefStat("\(followThroughPct)%", "follow-through")
-                if followThroughPct >= 60 {
-                    Image(systemName: "arrow.up.right")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(AppPalette.success)
-                }
-                Spacer()
-                Button { onTasksTap() } label: {
-                    HStack(spacing: 4) {
-                        Text("All tasks").font(.caption.weight(.semibold))
-                        Image(systemName: "arrow.right").font(.caption2.weight(.bold))
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 10) {
+                        briefStat("\(weekMeetingCount)", weekMeetingCount == 1 ? "meeting" : "meetings")
+                        briefStat("\(followThroughPct)%", "follow-through")
+                        allTasksButton
                     }
-                    .foregroundStyle(AppPalette.accent)
+                } else {
+                    HStack(spacing: 8) {
+                        briefStat("\(weekMeetingCount)", weekMeetingCount == 1 ? "meeting" : "meetings")
+                        Circle().fill(AppPalette.tertiaryInk.opacity(0.5)).frame(width: 3, height: 3)
+                        briefStat("\(followThroughPct)%", "follow-through")
+                        if followThroughPct >= 60 {
+                            Image(systemName: "arrow.up.right")
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(AppPalette.success)
+                        }
+                        Spacer()
+                        allTasksButton
+                    }
                 }
-                .buttonStyle(PressScaleButtonStyle(scale: 0.95))
             }
             .padding(.top, 12)
         }
-        .padding(22)
+        .padding(dynamicTypeSize.isAccessibilitySize ? 18 : 22)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(briefingSurface)
         .overlay(
@@ -567,6 +575,37 @@ struct TodayView: View {
                 .strokeBorder(AppPalette.border.opacity(0.6), lineWidth: 0.8)
         )
         .appShadow(AppShadow.card)
+    }
+
+    private var briefingIdentity: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Capsule().fill(AppPalette.accent).frame(width: 40, height: 3)
+            Text(briefDateLine)
+                .font(AppFont.mono(.caption2, weight: .semibold))
+                .foregroundStyle(AppPalette.accent)
+            Text(briefGreeting)
+                .font(AppFont.serif(.largeTitle, weight: .semibold))
+                .foregroundStyle(AppPalette.ink)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var briefingCaptureMenu: some View {
+        CaptureMenuButton(
+            size: 44,
+            onRecord: { onCapture(.record) },
+            onType: { onCapture(.type) },
+            onImport: { showingAudioImporter = true }
+        )
+    }
+
+    private var allTasksButton: some View {
+        Button { onTasksTap() } label: {
+            Label("All tasks", systemImage: "arrow.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(AppPalette.accent)
+        }
+        .buttonStyle(PressScaleButtonStyle(scale: 0.95))
     }
 
     @ViewBuilder
@@ -596,13 +635,12 @@ struct TodayView: View {
                     Text(item.commitment.statement)
                         .scaledFont(size: 16, weight: .medium, design: .serif, relativeTo: .body)
                         .foregroundStyle(AppPalette.ink)
-                        .lineLimit(2)
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
                     Text(planReason(item))
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(planTint(item))
-                        .lineLimit(1)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 6)
                 Image(systemName: "chevron.right")
@@ -865,12 +903,10 @@ struct TodayView: View {
                     BreathingDot(tint: AppPalette.coral, size: 6)
                     Text("STARTING")
                         .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                        .kerning(0.9)
                         .foregroundStyle(AppPalette.coral)
                     TimelineView(.periodic(from: .now, by: 1)) { context in
                         Text(countdownLabel(until: event.startDate, now: context.date))
                             .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                            .kerning(0.9)
                             .foregroundStyle(AppPalette.coral)
                             .monospacedDigit()
                             .contentTransition(.numericText())
@@ -1064,15 +1100,17 @@ struct TodayView: View {
         case .success(let urls):
             guard let url = urls.first else { return }
             Task {
-                if let meetingID = await importAudioFile(from: url) {
+                do {
+                    let meetingID = try await importAudioFile(from: url)
                     await MainActor.run {
                         selectedMeetingID = meetingID
-                        toast = ToastItem(message: "Audio's in", icon: "checkmark.circle.fill")
+                        toast = ToastItem(message: "Audio saved and transcribing", icon: "checkmark.circle.fill")
                         HapticEngine.notify(.success)
                     }
-                } else {
+                } catch {
+                    AnalyticsLog.shared.log("audioImport.failed", ["error": error.localizedDescription])
                     await MainActor.run {
-                        toast = ToastItem(message: "Couldn't bring that audio in", icon: "exclamationmark.triangle.fill")
+                        toast = ToastItem(message: error.localizedDescription, icon: "exclamationmark.triangle.fill")
                         HapticEngine.notify(.error)
                     }
                 }
@@ -1083,65 +1121,62 @@ struct TodayView: View {
     }
 
     @MainActor
-    private func importAudioFile(from url: URL) async -> Meeting.ID? {
+    private func importAudioFile(from url: URL) async throws -> Meeting.ID {
         let didStart = url.startAccessingSecurityScopedResource()
         defer { if didStart { url.stopAccessingSecurityScopedResource() } }
 
-        do {
-            try RecordingFileStore.ensureDirectory()
-            let recordingID = UUID()
-            let destination = try RecordingFileStore.makeRecordingURL(id: recordingID)
-            if FileManager.default.fileExists(atPath: destination.path) {
-                try? FileManager.default.removeItem(at: destination)
+        let imported = try await AudioImportService.shared.importFile(from: url)
+        let originalName = url.deletingPathExtension().lastPathComponent
+        let cleanedTitle = originalName.replacingOccurrences(of: "_", with: " ").capitalized
+        let title = cleanedTitle.isEmpty ? "Imported audio" : cleanedTitle
+
+        let attachment = AudioRecordingAttachment(
+            id: imported.recordingID,
+            title: title,
+            createdAt: .now,
+            durationSeconds: imported.durationSeconds,
+            fileName: imported.fileName,
+            transcript: "",
+            linkedNote: "",
+            source: .noteAttachment,
+            fileSizeBytes: imported.fileSizeBytes
+        )
+
+        let meetingID = store.addMeeting(
+            title: title,
+            workspace: "Imports",
+            attendees: ["You"],
+            objective: "Imported audio file",
+            notes: "- Imported audio ready for transcription",
+            status: .processing,
+            stage: "Transcribing imported audio",
+            durationMinutes: attachment.durationMinutes,
+            audioRecordings: [attachment],
+            shouldScheduleAIProcessing: false
+        )
+        Task { @MainActor in
+            let outcome = await TranscriptionRecoveryCoordinator.shared.requestRetranscription(
+                recording: attachment,
+                meetingID: meetingID,
+                expectedSpeakerCount: nil,
+                using: store
+            )
+            switch outcome {
+            case .completed:
+                break
+            case .queued:
+                store.updateMeetingProcessingStage(
+                    "Transcription queued and will retry automatically",
+                    for: meetingID
+                )
+            case .failed(let message):
+                store.finishPendingMeetingWithLiveTranscript(
+                    meetingID,
+                    message: "Audio saved · \(message)"
+                )
             }
-            try FileManager.default.copyItem(at: url, to: destination)
-            RecordingFileStore.protectFile(at: destination)
-
-            let fileName = RecordingFileStore.fileName(for: destination)
-            let fileSize = RecordingFileStore.fileSize(at: destination)
-            let durationSeconds = await asyncAudioDurationSeconds(for: destination)
-
-            let originalName = url.deletingPathExtension().lastPathComponent
-            let cleanedTitle = originalName.replacingOccurrences(of: "_", with: " ").capitalized
-            let title = cleanedTitle.isEmpty ? "Imported audio" : cleanedTitle
-
-            let attachment = AudioRecordingAttachment(
-                id: recordingID,
-                title: title,
-                createdAt: .now,
-                durationSeconds: Int(durationSeconds.rounded()),
-                fileName: fileName,
-                transcript: "",
-                linkedNote: "",
-                source: .noteAttachment,
-                fileSizeBytes: fileSize
-            )
-
-            let meetingID = store.addMeeting(
-                title: title,
-                workspace: "Imports",
-                attendees: ["You"],
-                objective: "Imported audio file",
-                notes: "- Imported audio file: \(fileName)",
-                durationMinutes: max(1, Int(durationSeconds / 60)),
-                audioRecordings: [attachment]
-            )
-            return meetingID
-        } catch {
-            AnalyticsLog.shared.log("audioImport.failed", ["error": error.localizedDescription])
-            return nil
         }
-    }
-
-    private func asyncAudioDurationSeconds(for url: URL) async -> Double {
-        let asset = AVURLAsset(url: url)
-        do {
-            let duration = try await asset.load(.duration)
-            let seconds = CMTimeGetSeconds(duration)
-            return seconds.isFinite ? seconds : 0
-        } catch {
-            return 0
-        }
+        return meetingID
     }
 
 
@@ -1672,7 +1707,6 @@ struct NextMoveCard: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(move.eyebrow)
                     .font(.caption2.weight(.heavy))
-                    .kerning(1.1)
                     .foregroundStyle(tint)
                 Text(move.title)
                     .font(AppType.cardTitle())
@@ -1776,7 +1810,6 @@ struct HomeRecentNotesSection: View {
                 Spacer(minLength: 0)
                 Text(Self.relativeTimeBadge(for: meeting.when))
                     .font(.caption2.weight(.heavy))
-                    .kerning(0.6)
                     .foregroundStyle(AppPalette.tertiaryInk)
             }
 
@@ -2253,7 +2286,6 @@ struct HowItWorksSheet: View {
                 .frame(width: 6, height: 6)
             Text(stageBadgeText)
                 .font(.caption2.weight(.heavy))
-                .kerning(1.0)
                 .foregroundStyle(stage.tint)
                 .contentTransition(.opacity)
         }
@@ -2370,7 +2402,6 @@ struct HowItWorksSheet: View {
                 .font(.system(size: 9, weight: .heavy))
             Text(actorLabel)
                 .font(.caption2.weight(.heavy))
-                .kerning(1.2)
         }
         .foregroundStyle(stage.tint)
         .padding(.horizontal, 9)
@@ -2492,7 +2523,6 @@ struct HowItWorksSheet: View {
                 .font(.system(size: 11, weight: .heavy))
             Text("Tap to continue")
                 .font(.caption.weight(.bold))
-                .kerning(0.4)
         }
         .foregroundStyle(AppPalette.tertiaryInk)
         .opacity(stage == .capture ? 1 : 0.6)
@@ -2660,7 +2690,6 @@ private struct ProcessingPreview: View {
                     .foregroundStyle(AppPalette.secondaryInk)
                 Text("WHAT WAS SAID")
                     .font(.caption2.weight(.heavy))
-                    .kerning(1.2)
                     .foregroundStyle(AppPalette.secondaryInk)
             }
             HStack(alignment: .top, spacing: 8) {
@@ -2699,7 +2728,6 @@ private struct ProcessingPreview: View {
                         .font(.system(size: 11, weight: .heavy))
                     Text("AI EXTRACTS")
                         .font(.caption2.weight(.heavy))
-                        .kerning(1.3)
                     Image(systemName: "arrow.down")
                         .font(.system(size: 10, weight: .heavy))
                 }
@@ -2720,7 +2748,6 @@ private struct ProcessingPreview: View {
                     .foregroundStyle(AppPalette.success)
                 Text("ACTION ITEM EXTRACTED")
                     .font(.caption2.weight(.heavy))
-                    .kerning(1.2)
                     .foregroundStyle(AppPalette.success)
             }
             HStack(alignment: .top, spacing: 10) {
@@ -2998,9 +3025,7 @@ private struct ConfettiBit: Identifiable {
     var rotation: Double
 }
 
-/// Step 4 preview — meeting outputs landing in calendar, email, and tasks.
-/// Three lightweight cards stagger in, each demonstrating one integration
-/// surface the meeting has been routed into.
+/// Step 4 preview of user-controlled destinations already available in-app.
 private struct ActionPreview: View {
     @State private var visibleRows = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -3013,10 +3038,10 @@ private struct ActionPreview: View {
 
     private let rows: [Row] = [
         Row(icon: "calendar.badge.clock", tint: AppPalette.coral, title: "Calendar"),
-        Row(icon: "envelope.fill", tint: AppPalette.accent, title: "Email draft"),
+        Row(icon: "square.and.arrow.up", tint: AppPalette.accent, title: "Share"),
         Row(icon: "checklist", tint: AppPalette.success, title: "Tasks"),
-        Row(icon: "bubble.left.and.bubble.right.fill", tint: AppPalette.gold, title: "Slack"),
-        Row(icon: "doc.fill.badge.plus", tint: AppPalette.accentDeep, title: "Notion")
+        Row(icon: "rectangle.stack.fill", tint: AppPalette.gold, title: "Library"),
+        Row(icon: "list.bullet.rectangle", tint: AppPalette.accentDeep, title: "Reminders")
     ]
 
     var body: some View {
@@ -3043,7 +3068,7 @@ private struct ActionPreview: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onAppear { runReveal() }
-        .accessibilityLabel("Calendar, email, tasks, Slack, and Notion all updated")
+        .accessibilityLabel("Calendar, sharing, tasks, library, and reminders")
     }
 
     private func actionRow(_ row: Row) -> some View {
@@ -3266,7 +3291,6 @@ private struct CapturePreview: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(line.speaker)
                     .font(.caption2.weight(.heavy))
-                    .kerning(0.4)
                     .foregroundStyle(line.tint)
                 Text(line.text)
                     .font(.footnote)
@@ -3362,7 +3386,6 @@ private struct ReviewPreview: View {
                         .font(.system(size: 12, weight: .heavy))
                     Text("AI SUMMARY")
                         .font(.caption.weight(.heavy))
-                        .kerning(1.4)
                 }
                 .foregroundStyle(AppPalette.gold)
                 .opacity(showHeader ? 1 : 0)

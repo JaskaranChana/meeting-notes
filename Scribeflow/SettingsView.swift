@@ -7,6 +7,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     var showsDoneButton = true
 
     @AppStorage("hasCompletedLaunchOnboarding") private var hasCompletedLaunchOnboarding = false
@@ -52,9 +53,19 @@ struct SettingsView: View {
                         .padding(.bottom, 24)
 
                     settingsGroup(title: "Appearance") {
-                        HStack(spacing: 8) {
-                            ForEach(AppearancePreference.allCases) { option in
-                                appearanceChip(option)
+                        Group {
+                            if dynamicTypeSize.isAccessibilitySize {
+                                VStack(spacing: 12) {
+                                    ForEach(AppearancePreference.allCases) { option in
+                                        appearanceChip(option)
+                                    }
+                                }
+                            } else {
+                                HStack(spacing: 8) {
+                                    ForEach(AppearancePreference.allCases) { option in
+                                        appearanceChip(option)
+                                    }
+                                }
                             }
                         }
                         .padding(.horizontal, 14)
@@ -469,24 +480,15 @@ struct SettingsView: View {
 
     private var appHeader: some View {
         VStack(alignment: .leading, spacing: 14) {
-            EditorialEyebrow(text: "Settings")
             HStack(spacing: 16) {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(AppPalette.softSurface)
-                    .frame(width: 56, height: 56)
-                    .overlay(
-                        Image(decorative: "BrandMark")
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 30, height: 30)
-                    )
+                ScribeflowBrandMark(size: 56)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Scribeflow")
-                        .font(.system(size: 26, weight: .medium, design: .serif))
+                        .font(AppFont.serif(.title2, weight: .medium))
                         .foregroundStyle(AppPalette.ink)
                     Text("Your meeting memory")
-                        .font(.system(size: 13))
+                        .font(.subheadline)
                         .foregroundStyle(AppPalette.secondaryInk)
                 }
                 Spacer()
@@ -588,7 +590,6 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title.uppercased())
                 .font(.system(.caption2, design: .monospaced).weight(.medium))
-                .kerning(0.9)
                 .foregroundStyle(AppPalette.tertiaryInk)
                 .padding(.leading, 4)
 
@@ -650,18 +651,18 @@ struct SettingsView: View {
         } label: {
             HStack(spacing: 14) {
                 Image(systemName: icon)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(iconColor)
                     .frame(width: 24, height: 24)
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title)
-                        .font(.system(size: 15, weight: .medium))
+                        .font(.subheadline.weight(.medium))
                         .foregroundStyle(AppPalette.ink)
                     Text(subtitle)
-                        .font(.system(size: 12))
+                        .font(.caption)
                         .foregroundStyle(AppPalette.tertiaryInk)
-                        .lineLimit(1)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Spacer()
@@ -678,21 +679,36 @@ struct SettingsView: View {
     }
 
     private func settingInfoRow(icon: String, iconColor: Color, title: String, value: String) -> some View {
-        HStack(spacing: 14) {
-            Image(systemName: icon)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(iconColor)
-                .frame(width: 24, height: 24)
-
-            Text(title)
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(AppPalette.ink)
-
-            Spacer()
-
-            Text(value)
-                .font(.system(size: 13))
-                .foregroundStyle(AppPalette.tertiaryInk)
+        Group {
+            if dynamicTypeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(title, systemImage: icon)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(AppPalette.ink)
+                    Text(value)
+                        .font(.footnote)
+                        .foregroundStyle(AppPalette.tertiaryInk)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, 38)
+                }
+                .symbolRenderingMode(.monochrome)
+                .tint(iconColor)
+            } else {
+                HStack(spacing: 14) {
+                    Image(systemName: icon)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(iconColor)
+                        .frame(width: 24, height: 24)
+                    Text(title)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(AppPalette.ink)
+                    Spacer()
+                    Text(value)
+                        .font(.footnote)
+                        .foregroundStyle(AppPalette.tertiaryInk)
+                        .multilineTextAlignment(.trailing)
+                }
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 13)
@@ -701,7 +717,7 @@ struct SettingsView: View {
     private var appLockRow: some View {
         HStack(spacing: 14) {
             Image(systemName: requireAppUnlock ? "lock.fill" : "lock.open")
-                .font(.system(size: 15, weight: .semibold))
+                .font(.subheadline.weight(.semibold))
                 .foregroundStyle(requireAppUnlock ? AppPalette.accent : AppPalette.secondaryInk)
                 .frame(width: 24, height: 24)
 
@@ -729,19 +745,18 @@ struct SettingsView: View {
     private var speechLanguageSettingsRow: some View {
         HStack(spacing: 14) {
             Image(systemName: "globe")
-                .font(.system(size: 15, weight: .semibold))
+                .font(.subheadline.weight(.semibold))
                 .foregroundStyle(AppPalette.accent)
                 .frame(width: 24, height: 24)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text("Transcription language")
-                    .font(.system(size: 15, weight: .medium))
+                    .font(.subheadline.weight(.medium))
                     .foregroundStyle(AppPalette.ink)
                 Text(speechLanguageSubtitle)
-                    .font(.system(size: 12))
+                    .font(.caption)
                     .foregroundStyle(AppPalette.tertiaryInk)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Spacer(minLength: 8)
@@ -803,19 +818,18 @@ struct SettingsView: View {
     private var demoModeRow: some View {
         HStack(spacing: 14) {
             Image(systemName: investorDemoMode ? "play.rectangle.fill" : "play.rectangle")
-                .font(.system(size: 15, weight: .semibold))
+                .font(.subheadline.weight(.semibold))
                 .foregroundStyle(investorDemoMode ? AppPalette.accent : AppPalette.secondaryInk)
                 .frame(width: 24, height: 24)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text("Investor demo mode")
-                    .font(.system(size: 15, weight: .medium))
+                    .font(.subheadline.weight(.medium))
                     .foregroundStyle(AppPalette.ink)
                 Text(investorDemoMode ? demoModePreparedSubtitle : "Keep walkthrough data repeatable")
-                    .font(.system(size: 12))
+                    .font(.caption)
                     .foregroundStyle(AppPalette.tertiaryInk)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.75)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Spacer()

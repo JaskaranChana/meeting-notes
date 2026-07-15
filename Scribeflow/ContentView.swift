@@ -1,12 +1,6 @@
 import CoreSpotlight
 import SwiftUI
 
-/// Tracks how many detail views are pushed across the tab stacks, so the
-/// bottom dock can hide while you're reading a meeting and reappear at root.
-@MainActor @Observable final class NavChrome {
-    var detailDepth = 0
-}
-
 /// Root tab shell. Five daily-use tabs: **Today** (briefing), **Library**
 /// (notes), **Tasks** (action items), **Calendar** (meeting schedule), and
 /// **Ask** (workspace-wide AI). Settings is a sheet from Today's toolbar.
@@ -20,7 +14,11 @@ struct ContentView: View {
     @State private var selectedTab: RootTab = .home
     #endif
     @State private var selectedMeetingID: Meeting.ID?
+    @State private var homePath = NavigationPath()
     @State private var libraryPath = NavigationPath()
+    @State private var tasksPath = NavigationPath()
+    @State private var calendarPath = NavigationPath()
+    @State private var askPath = NavigationPath()
     @State private var captureMode: CaptureView.Mode?
     @State private var showingSettings = false
     @State private var isPrivacyScreenVisible = false
@@ -30,7 +28,7 @@ struct ContentView: View {
     @State private var openActionItemCount = 0
     @StateObject private var pendingInbox = PendingCaptureInbox.shared
     @AppStorage(AppearancePreference.storageKey) private var appearanceRaw = AppearancePreference.system.rawValue
-    @State private var navChrome = NavChrome()
+    @AppStorage("scribeflow.navigation.lastRootTab") private var lastRootTabRaw = RootTab.home.rawValue
 
     var body: some View {
         ZStack {
@@ -45,7 +43,6 @@ struct ContentView: View {
                 mainTabs
                 #endif
             }
-            .environment(navChrome)
             .fullScreenCover(item: Binding(
                 get: { captureMode.map { CaptureModeWrapper(mode: $0) } },
                 set: { wrapper in captureMode = wrapper?.mode }
@@ -68,6 +65,13 @@ struct ContentView: View {
             }
             .tint(AppPalette.accent)
             .onAppear {
+                #if DEBUG
+                if AppQARoute.current == nil {
+                    selectedTab = RootTab(rawValue: lastRootTabRaw) ?? .home
+                }
+                #else
+                selectedTab = RootTab(rawValue: lastRootTabRaw) ?? .home
+                #endif
                 selectedMeetingID = selectedMeetingID ?? store.recentMeetings.first?.id
                 refreshRootChromeSnapshot()
             }
@@ -97,9 +101,10 @@ struct ContentView: View {
         .animation(AppMotion.bounce, value: toast != nil)
         .onChange(of: scenePhase) { _, phase in
             withAnimation(AppMotion.fade) {
-                isPrivacyScreenVisible = phase == .background
+                isPrivacyScreenVisible = phase != .active
             }
             if phase == .active {
+                store.enforceRetentionPolicies()
                 drainPendingCaptureIntents()
             } else {
                 Task { await store.flushPersistence() }
@@ -129,6 +134,9 @@ struct ContentView: View {
         .onChange(of: store.revision) { _, _ in
             refreshRootChromeSnapshot()
             scheduleSpotlightIndex()
+        }
+        .onChange(of: selectedTab) { _, tab in
+            lastRootTabRaw = tab.rawValue
         }
         .onContinueUserActivity(SpotlightIndex.activityType) { activity in
             handleSpotlightActivity(activity)
@@ -194,14 +202,10 @@ struct ContentView: View {
                 .fill(reduceTransparency ? AnyShapeStyle(AppPalette.paper) : AnyShapeStyle(.ultraThinMaterial))
                 .ignoresSafeArea()
             VStack(spacing: 14) {
-                Image(decorative: "BrandMark")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 64, height: 64)
-                    .opacity(0.88)
+                ScribeflowBrandMark(size: 64)
+                    .opacity(0.92)
                 Text("SCRIBEFLOW")
                     .font(.caption.weight(.bold))
-                    .kerning(2.2)
                     .foregroundStyle(AppPalette.ink.opacity(0.6))
             }
         }
@@ -209,7 +213,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private var rootDock: some View {
-        if navChrome.detailDepth == 0 {
+        if selectedNavigationDepth == 0 {
             RootTabBar(
                 items: [
                     RootTabBarItem(id: RootTab.home.rawValue, label: AppStrings.Navigation.today, systemImage: "house"),
@@ -234,7 +238,7 @@ struct ContentView: View {
     private var mainTabs: some View {
         VStack(spacing: 0) {
             TabView(selection: $selectedTab) {
-                NavigationStack {
+                NavigationStack(path: $homePath) {
                     TodayView(
                         isActive: selectedTab == .home,
                         selectedMeetingID: $selectedMeetingID,
@@ -259,7 +263,7 @@ struct ContentView: View {
                 }
                 .tag(RootTab.library)
 
-                NavigationStack {
+                NavigationStack(path: $tasksPath) {
                     ActionItemsView(
                         isActive: selectedTab == .tasks,
                         selectedMeetingID: $selectedMeetingID,
@@ -269,7 +273,7 @@ struct ContentView: View {
                 }
                 .tag(RootTab.tasks)
 
-                NavigationStack {
+                NavigationStack(path: $calendarPath) {
                     MeetingCalendarView(
                         isActive: selectedTab == .calendar,
                         selectedMeetingID: $selectedMeetingID,
@@ -280,7 +284,7 @@ struct ContentView: View {
                 }
                 .tag(RootTab.calendar)
 
-                NavigationStack {
+                NavigationStack(path: $askPath) {
                     AskView()
                         .toolbar(.hidden, for: .tabBar)
                 }
@@ -289,7 +293,7 @@ struct ContentView: View {
             .toolbar(.hidden, for: .tabBar)
             .tint(AppPalette.accent)
 
-            if navChrome.detailDepth == 0 {
+            if selectedNavigationDepth == 0 {
                 RootDockChrome {
                     rootDock
                 }
@@ -297,8 +301,18 @@ struct ContentView: View {
             }
         }
         .background(AppPalette.background.ignoresSafeArea())
-        .animation(AppMotion.smooth, value: navChrome.detailDepth)
+        .animation(AppMotion.smooth, value: selectedNavigationDepth)
         .modifier(ScribeflowChrome())
+    }
+
+    private var selectedNavigationDepth: Int {
+        switch selectedTab {
+        case .home: homePath.count
+        case .library: libraryPath.count
+        case .tasks: tasksPath.count
+        case .calendar: calendarPath.count
+        case .ask: askPath.count
+        }
     }
 
     private func activateRootTab(_ tab: RootTab) {

@@ -100,7 +100,6 @@ struct RecordingPrivacyView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("HOW YOUR DATA IS PROTECTED")
                 .font(.caption2.weight(.medium))
-                .kerning(0.6)
                 .foregroundStyle(AppPalette.tertiaryInk)
             Text("Clear limits, safer recordings")
                 .font(.system(.title2, design: .serif).weight(.semibold))
@@ -227,8 +226,8 @@ struct RecordingPrivacyView: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(AppPalette.ink)
                 Text(localSpeakerDiarizationEnabled
-                     ? "Enabled. The speaker model is cached after its first use; meeting audio remains local."
-                     : "Off. Transcripts keep one shared speaker label unless a configured provider separates voices.")
+                     ? "Enabled. First use may download a speaker model over your current connection. It stays on device, and constrained devices fall back automatically."
+                     : "Off. Transcripts keep one shared speaker label unless the configured service separates speakers.")
                     .font(.caption)
                     .foregroundStyle(AppPalette.secondaryInk)
                     .fixedSize(horizontal: false, vertical: true)
@@ -259,7 +258,7 @@ struct RecordingPrivacyView: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(AppPalette.ink)
                 Text(enhancedLocalTranscriptionEnabled
-                     ? "Enabled for English meetings. A compact speech model is cached after first use and runs after Save."
+                     ? "Enabled for English meetings. First use may download a speech model over your current connection. Low power, heat, or low storage uses Apple Speech instead."
                      : "Off. Final transcripts use Apple Speech.")
                     .font(.caption)
                     .foregroundStyle(AppPalette.secondaryInk)

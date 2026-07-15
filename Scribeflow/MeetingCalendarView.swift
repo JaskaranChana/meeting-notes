@@ -5,6 +5,7 @@ struct MeetingCalendarView: View {
     @Environment(MeetingStore.self) private var store
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let isActive: Bool
     @Binding var selectedMeetingID: Meeting.ID?
     let onCapture: (CaptureView.Mode) -> Void
@@ -56,7 +57,7 @@ struct MeetingCalendarView: View {
                 .readingWidth()
             }
             .background(AppPalette.background.ignoresSafeArea())
-            .navigationTitle("Calendar")
+            .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -126,29 +127,39 @@ struct MeetingCalendarView: View {
 
     private var calendarHeader: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .center, spacing: 10) {
-                VStack(alignment: .leading, spacing: 4) {
-                    EditorialMeta(text: "Calendar")
-                    Text(displayedMonth.formatted(.dateTime.month(.wide).year()))
-                        .font(.system(size: 30, weight: .medium, design: .serif))
-                        .foregroundStyle(AppPalette.ink)
-                        .contentTransition(.numericText())
-                }
-
-                Spacer(minLength: 8)
-
-                HStack(spacing: 8) {
-                    monthButton("chevron.left") { moveMonth(by: -1) }
-                    monthButton("chevron.right") { moveMonth(by: 1) }
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 10) {
+                        calendarTitle
+                        monthNavigation
+                    }
+                } else {
+                    HStack(alignment: .center, spacing: 10) {
+                        calendarTitle
+                        Spacer(minLength: 8)
+                        monthNavigation
+                    }
                 }
             }
 
-            HStack(spacing: 0) {
-                calendarStat("\(snapshot.monthMeetingCount)", "notes", AppPalette.accent)
-                calendarRule
-                calendarStat("\(snapshot.monthEventCount)", "events", AppPalette.gold)
-                calendarRule
-                calendarStat("\(snapshot.selectedOpenLoopCount)", "open", AppPalette.coral)
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(spacing: 0) {
+                        calendarStat("\(visibleNoteCount)", "notes", AppPalette.accent)
+                        EditorialRule()
+                        calendarStat("\(visibleEventCount)", "events", AppPalette.gold)
+                        EditorialRule()
+                        calendarStat("\(snapshot.selectedOpenLoopCount)", "day open", AppPalette.coral)
+                    }
+                } else {
+                    HStack(spacing: 0) {
+                        calendarStat("\(visibleNoteCount)", "notes", AppPalette.accent)
+                        calendarRule
+                        calendarStat("\(visibleEventCount)", "events", AppPalette.gold)
+                        calendarRule
+                        calendarStat("\(snapshot.selectedOpenLoopCount)", "day open", AppPalette.coral)
+                    }
+                }
             }
             .overlay(alignment: .top) { EditorialRule() }
             .overlay(alignment: .bottom) { EditorialRule() }
@@ -157,6 +168,51 @@ struct MeetingCalendarView: View {
             calendarControls
         }
         .accessibilityIdentifier("calendar.header")
+    }
+
+    private var calendarTitle: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Calendar")
+                .font(AppFont.serif(.title, weight: .medium))
+                .foregroundStyle(AppPalette.ink)
+            Text(visiblePeriodTitle)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(AppPalette.secondaryInk)
+                .contentTransition(.numericText())
+        }
+    }
+
+    private var monthNavigation: some View {
+        HStack(spacing: 8) {
+            monthButton("chevron.left", accessibilityLabel: "Previous \(calendarScope.periodName)") {
+                moveVisiblePeriod(by: -1)
+            }
+            monthButton("chevron.right", accessibilityLabel: "Next \(calendarScope.periodName)") {
+                moveVisiblePeriod(by: 1)
+            }
+        }
+    }
+
+    private var visiblePeriodTitle: String {
+        guard calendarScope == .week,
+              let interval = Calendar.current.dateInterval(of: .weekOfYear, for: selectedDate)
+        else {
+            return displayedMonth.formatted(.dateTime.month(.wide).year())
+        }
+        let inclusiveEnd = interval.end.addingTimeInterval(-1)
+        let start = interval.start.formatted(.dateTime.month(.abbreviated).day())
+        let end = inclusiveEnd.formatted(.dateTime.month(.abbreviated).day().year())
+        return "\(start) - \(end)"
+    }
+
+    private var visibleNoteCount: Int {
+        guard calendarScope == .week else { return snapshot.monthMeetingCount }
+        return snapshot.selectedWeekAgendaDays.reduce(0) { $0 + $1.meetings.count }
+    }
+
+    private var visibleEventCount: Int {
+        guard calendarScope == .week else { return snapshot.monthEventCount }
+        return snapshot.selectedWeekAgendaDays.reduce(0) { $0 + $1.events.count }
     }
 
     private var calendarTimelineStrip: some View {
@@ -210,61 +266,99 @@ struct MeetingCalendarView: View {
     }
 
     private var calendarLegend: some View {
-        HStack(spacing: 8) {
-            legendChip("Notes", tint: AppPalette.accent)
-            legendChip("Events", tint: AppPalette.gold)
-            legendChip("Open loops", tint: AppPalette.coral)
-            Spacer(minLength: 0)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                legendChip("Notes", tint: AppPalette.accent)
+                legendChip("Events", tint: AppPalette.gold)
+                legendChip("Open loops", tint: AppPalette.coral)
+            }
         }
     }
 
     private var calendarControls: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Picker("Calendar view", selection: $calendarScope) {
-                ForEach(CalendarScope.allCases) { scope in
-                    Label(scope.title, systemImage: scope.systemImage)
-                        .tag(scope)
-                }
-            }
-            .pickerStyle(.segmented)
-            .accessibilityLabel("Calendar view")
-
-            HStack(spacing: 10) {
-                Menu {
-                    Picker("Show", selection: $calendarFilter) {
-                        ForEach(CalendarContentFilter.allCases) { filter in
-                            Label(filter.title, systemImage: filter.systemImage)
-                                .tag(filter)
-                        }
+            if dynamicTypeSize.isAccessibilitySize {
+                calendarScopeMenu
+            } else {
+                Picker("Calendar view", selection: $calendarScope) {
+                    ForEach(CalendarScope.allCases) { scope in
+                        Label(scope.title, systemImage: scope.systemImage)
+                            .tag(scope)
                     }
-                } label: {
-                    Label(calendarFilter.title, systemImage: calendarFilter.systemImage)
-                        .font(.caption.weight(.bold))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(AppPalette.softSurface, in: Capsule())
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Calendar filter")
+                .pickerStyle(.segmented)
+                .accessibilityLabel("Calendar view")
+            }
 
-                Spacer(minLength: 8)
-
-                Button {
-                    HapticEngine.select()
-                    jumpToNextActivity()
-                } label: {
-                    Label("Next busy day", systemImage: "forward.end.fill")
-                        .font(.caption.weight(.bold))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(AppPalette.cardBackground, in: Capsule())
-                        .overlay(Capsule().strokeBorder(AppPalette.border.opacity(0.65), lineWidth: 0.8))
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 10) {
+                        calendarFilterMenu
+                        nextBusyDayButton
+                    }
+                } else {
+                    HStack(spacing: 10) {
+                        calendarFilterMenu
+                        Spacer(minLength: 8)
+                        nextBusyDayButton
+                    }
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(AppPalette.accent)
-                .accessibilityLabel("Jump to next matching day")
             }
         }
+    }
+
+    private var calendarScopeMenu: some View {
+        Menu {
+            Picker("Calendar view", selection: $calendarScope) {
+                ForEach(CalendarScope.allCases) { scope in
+                    Label(scope.title, systemImage: scope.systemImage).tag(scope)
+                }
+            }
+        } label: {
+            Label(calendarScope.title, systemImage: calendarScope.systemImage)
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .frame(minHeight: 44)
+                .background(AppPalette.softSurface, in: RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Calendar view, \(calendarScope.title)")
+    }
+
+    private var calendarFilterMenu: some View {
+        Menu {
+            Picker("Show", selection: $calendarFilter) {
+                ForEach(CalendarContentFilter.allCases) { filter in
+                    Label(filter.title, systemImage: filter.systemImage).tag(filter)
+                }
+            }
+        } label: {
+            Label(calendarFilter.title, systemImage: calendarFilter.systemImage)
+                .font(.caption.weight(.bold))
+                .padding(.horizontal, 10)
+                .frame(minHeight: 44)
+                .background(AppPalette.softSurface, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Calendar filter, \(calendarFilter.title)")
+    }
+
+    private var nextBusyDayButton: some View {
+        Button {
+            HapticEngine.select()
+            jumpToNextActivity()
+        } label: {
+            Label("Next busy day", systemImage: "forward.end.fill")
+                .font(.caption.weight(.bold))
+                .padding(.horizontal, 10)
+                .frame(minHeight: 44)
+                .background(AppPalette.cardBackground, in: Capsule())
+                .overlay(Capsule().strokeBorder(AppPalette.border.opacity(0.65), lineWidth: 0.8))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(AppPalette.accent)
+        .accessibilityLabel("Jump to next matching day")
     }
 
     @ViewBuilder
@@ -282,7 +376,7 @@ struct MeetingCalendarView: View {
     private var calendarGrid: some View {
         VStack(spacing: 10) {
             LazyVGrid(columns: Self.weekColumns, spacing: 8) {
-                ForEach(Self.weekdaySymbols(), id: \.self) { symbol in
+                ForEach(Array(Self.weekdaySymbols().enumerated()), id: \.offset) { _, symbol in
                     Text(symbol)
                         .font(.caption2.weight(.bold))
                         .foregroundStyle(AppPalette.tertiaryInk)
@@ -518,7 +612,11 @@ struct MeetingCalendarView: View {
             .frame(width: 5, height: 5)
     }
 
-    private func monthButton(_ systemImage: String, action: @escaping () -> Void) -> some View {
+    private func monthButton(
+        _ systemImage: String,
+        accessibilityLabel: String,
+        action: @escaping () -> Void
+    ) -> some View {
         Button {
             HapticEngine.select()
             withAnimation(AppMotion.snappy) { action() }
@@ -530,7 +628,7 @@ struct MeetingCalendarView: View {
                 .background(AppPalette.softSurface, in: Circle())
                 .overlay(Circle().strokeBorder(AppPalette.border.opacity(0.65), lineWidth: 0.8))
         }
-        .accessibilityLabel(systemImage.contains("left") ? "Previous month" : "Next month")
+        .accessibilityLabel(accessibilityLabel)
     }
 
     private func selectDay(_ day: MeetingCalendarDay) {
@@ -550,7 +648,7 @@ struct MeetingCalendarView: View {
     private func calendarStat(_ value: String, _ label: String, _ tint: Color) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(value)
-                .font(.system(size: 24, weight: .medium, design: .serif))
+                .font(AppFont.serif(.title3, weight: .medium))
                 .foregroundStyle(tint)
             Text(label.uppercased())
                 .font(.caption2.weight(.bold))
@@ -639,7 +737,7 @@ struct MeetingCalendarView: View {
         selectedDate = Calendar.current.startOfDay(for: event.startDate)
         openMeeting(id)
         HapticEngine.notify(.success)
-        toast = ToastItem(message: "Prep note added to calendar", icon: "calendar.badge.checkmark")
+        toast = ToastItem(message: "Note linked to calendar event", icon: "calendar.badge.checkmark")
     }
 
     private func showPrep(for event: CalendarEventSnapshot) {
@@ -684,8 +782,16 @@ struct MeetingCalendarView: View {
         toast = ToastItem(message: "Note added for \(date.formatted(.dateTime.month(.abbreviated).day()))", icon: "square.and.pencil")
     }
 
-    private func moveMonth(by delta: Int) {
-        guard let nextMonth = Calendar.current.date(byAdding: .month, value: delta, to: displayedMonth) else { return }
+    private func moveVisiblePeriod(by delta: Int) {
+        let calendar = Calendar.current
+        if calendarScope == .week {
+            guard let nextWeek = calendar.date(byAdding: .day, value: delta * 7, to: selectedDate) else { return }
+            selectedDate = calendar.startOfDay(for: nextWeek)
+            displayedMonth = Self.startOfMonth(for: nextWeek)
+            return
+        }
+
+        guard let nextMonth = calendar.date(byAdding: .month, value: delta, to: displayedMonth) else { return }
         displayedMonth = Self.startOfMonth(for: nextMonth)
         selectedDate = displayedMonth
     }
@@ -773,6 +879,10 @@ private enum CalendarScope: String, CaseIterable, Identifiable {
         case .week: "calendar.day.timeline.left"
         case .agenda: "list.bullet.rectangle"
         }
+    }
+
+    var periodName: String {
+        self == .week ? "week" : "month"
     }
 }
 

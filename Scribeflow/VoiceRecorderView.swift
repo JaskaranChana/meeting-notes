@@ -105,7 +105,6 @@ struct VoiceRecorderView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("VOICE MEMORY")
                         .font(.caption2.weight(.medium))
-                        .kerning(0.8)
                         .foregroundStyle(.white.opacity(0.50))
                     Text(viewModel.elapsedLabel)
                         .font(AppFont.mono(.largeTitle, weight: .semibold))

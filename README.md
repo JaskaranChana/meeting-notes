@@ -67,10 +67,11 @@ flowchart LR
     H -. "User controlled" .-> J["Export or private backup"]
 ~~~
 
-The save path is intentionally short. A recording or note is persisted first,
-then durable processing can continue after the user closes the save flow. Failed
-transcription work is queued, survives relaunch, and can be retried without
-blocking the main interface.
+The save path is intentionally short. A pending note appears immediately, the
+recording is secured into a durable queue, and final captions no longer block
+dismissal. Processing can continue after the user closes the save flow. Failed
+transcription work survives relaunch and can be retried without blocking the
+main interface.
 
 ## Calendar and preparation
 
@@ -101,7 +102,10 @@ brainstorms. Users can leave voice detection automatic or provide an expected
 count from one to six to guide local clustering.
 
 Enhanced transcription can use FluidAudio for ordered speaker turns on device.
-Apple Speech remains the compatibility path when diarization is unavailable.
+Its speech and speaker models may download on first use; Low Power Mode, thermal
+pressure, or less than 1 GB of available storage automatically selects Apple
+Speech instead. Apple Speech also remains the compatibility path when
+diarization is unavailable.
 Speaker labels describe transcript turns, not biometric identity, and can be
 renamed or corrected before sharing.
 
@@ -128,10 +132,10 @@ context.
 Every generated point follows the same policy:
 
 ~~~text
-Supported by an exact source      -> Confirmed
-Supported by partial context      -> Review the source
-Reasonable but not directly said  -> Inferred
-No defensible evidence            -> Omit or ask for clarification
+Copied from one saved source      -> Direct source
+Supported by one source excerpt   -> Partial match
+Useful surrounding material      -> Context only
+No defensible evidence            -> Omit or mark for review
 ~~~
 
 User-authored notes remain distinct from generated context. Regeneration
@@ -154,7 +158,7 @@ the exact saved meeting evidence.
 <td width="50%" align="center"><img src="docs/screenshots/ask-sources.jpg" width="300" alt="Scribeflow Ask answer with sources"></td>
 </tr>
 <tr>
-<td align="center"><b>Everything you owe</b><br><sub>Owners, due dates, priority, rationale, reminders, and source meetings.</sub></td>
+<td align="center"><b>Follow through</b><br><sub>Owners, due dates, priority, rationale, reminders, and source meetings.</sub></td>
 <td align="center"><b>Answers with evidence</b><br><sub>Saved-note and transcript citations with speaker and line context.</sub></td>
 </tr>
 </table>
@@ -195,7 +199,7 @@ receives enough bottom clearance to scroll completely above it.
 | Speaker turns | FluidAudio local diarization with constrained clustering and editable labels |
 | Intelligence | Foundation Models guided generation on supported devices with deterministic fallback |
 | Grounding | Purpose classification, raw-source retrieval, validated citations, confidence states |
-| Persistence | Local JSON library, debounced off-main writes, protected snapshots, staged restore |
+| Persistence | Local JSON library, digest-deduplicated off-main writes, protected recovery, staged restore |
 | Scheduling | EventKit calendar context, Reminders export, UserNotifications follow-through |
 | Discovery | Core Spotlight and App Intents for capture, search, and recent-meeting shortcuts |
 | Operations | MetricKit archive, app-health checks, diagnostics export, durable retry queues |
@@ -204,8 +208,13 @@ receives enough bottom clearance to scroll completely above it.
 
 Latency-sensitive work is kept away from typing, scrolling, and first paint:
 derived intelligence migrates gradually, persistence skips identical snapshots,
-calendar reads run asynchronously, and recall reuses a revision-cached source
-index.
+analytics writes are opt-in and debounced off the main actor, calendar reads run
+asynchronously, and recall reuses a revision-cached source index.
+
+Portable notes-only backups scale independently of recording size. The legacy
+single-file full export is preflighted and limited to 64 MB of embedded audio so
+it cannot allocate an unbounded Base64 package. Private iCloud backup, when the
+signed capability is enabled, is notes-only; recordings remain user-controlled.
 
 ## Run locally
 
@@ -260,7 +269,7 @@ Scribeflow is explicit about what is local, optional, and externally gated.
   production schema are provisioned.
 - iOS does not allow Scribeflow to capture cellular, FaceTime, WhatsApp, or audio
   from another app. Recording consent remains the user's responsibility.
-- Voice labels are editable transcript clusters, not voiceprints or verified
+- Speaker labels are editable transcript clusters, not voiceprints or verified
   identities.
 
 Read the full [privacy policy](PRIVACY.md), [terms](TERMS.md), and

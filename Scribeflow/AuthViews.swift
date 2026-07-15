@@ -39,10 +39,7 @@ private struct AuthLoadingView: View {
         ZStack {
             AuthBackground()
             VStack(spacing: 16) {
-                Image(decorative: "BrandMark")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 76, height: 76)
+                ScribeflowBrandMark(size: 76)
                     .shadow(color: .black.opacity(0.10), radius: 10, y: 5)
                 ProgressView()
                     .tint(AuthPalette.accent)
@@ -88,22 +85,13 @@ struct AuthenticationView: View {
     private var authHeader: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack(spacing: 14) {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(AppPalette.softSurface)
-                    .frame(width: 54, height: 54)
-                    .overlay(
-                        Image(decorative: "BrandMark")
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 28, height: 28)
-                    )
+                ScribeflowBrandMark(size: 54)
 
                 VStack(alignment: .leading, spacing: 5) {
                     Text("SCRIBEFLOW")
                         .font(.system(.caption2, design: .monospaced).weight(.medium))
-                        .kerning(0.9)
                         .foregroundStyle(AuthPalette.tertiaryInk)
-                    Text("Sign in to start")
+                    Text("Your private workspace")
                         .font(.system(.title, design: .serif).weight(.semibold))
                         .foregroundStyle(AuthPalette.ink)
                         .lineLimit(1)
@@ -159,7 +147,6 @@ struct AuthenticationView: View {
                     .frame(height: 0.6)
                 Text("OR")
                     .font(.caption2.weight(.bold))
-                    .kerning(1.2)
                     .foregroundStyle(AuthPalette.secondaryInk.opacity(0.7))
                 Rectangle()
                     .fill(AuthPalette.secondaryInk.opacity(0.18))

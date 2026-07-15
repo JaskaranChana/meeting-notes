@@ -14,7 +14,7 @@ final class VoiceNoteManager {
     private var captureGeneration = 0
 
     var onTranscription: ((String) -> Void)?
- 
+
     func requestPermission(completion: @escaping (Bool) -> Void) {
         Task {
             let permissions = await VoiceRecordingPermissionService.request()
@@ -66,7 +66,8 @@ final class VoiceNoteManager {
 
             inputNode.removeTap(onBus: 0)
             inputNode.installTap(onBus: 0, bufferSize: 2048, format: format) { [audioSink] buffer, _ in
-                audioSink.append(buffer)
+                guard let ownedBuffer = AudioPCMBufferCopy.make(from: buffer) else { return }
+                audioSink.appendOwned(ownedBuffer)
             }
             audioEngine.prepare()
             try audioEngine.start()

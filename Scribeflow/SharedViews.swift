@@ -1,5 +1,101 @@
 import SwiftUI
 
+/// Crisp in-app mark sized for toolbars, privacy covers, and launch surfaces.
+/// The App Store icon remains a separate asset with its own optical sizing.
+struct ScribeflowBrandMark: View {
+    var size: CGFloat = 40
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
+                .fill(AppPalette.accentButton)
+            Image(systemName: "waveform")
+                .font(.system(size: size * 0.44, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+    }
+}
+
+/// Places compact metadata and chips on as many rows as the available width
+/// needs, avoiding truncation at larger text sizes and with long names.
+struct WrappingHStack: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        let availableWidth = proposal.width ?? .infinity
+        let rows = layoutRows(subviews: subviews, availableWidth: availableWidth)
+        let width = proposal.width ?? rows.map(\.width).max() ?? 0
+        let height = rows.reduce(0) { $0 + $1.height } + CGFloat(max(0, rows.count - 1)) * spacing
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        let rows = layoutRows(subviews: subviews, availableWidth: bounds.width)
+        var y = bounds.minY
+        for row in rows {
+            var x = bounds.minX
+            for item in row.items {
+                item.subview.place(
+                    at: CGPoint(x: x, y: y),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(item.size)
+                )
+                x += item.size.width + spacing
+            }
+            y += row.height + spacing
+        }
+    }
+
+    private func layoutRows(subviews: Subviews, availableWidth: CGFloat) -> [Row] {
+        var rows: [Row] = []
+        var row = Row()
+
+        for subview in subviews {
+            let ideal = subview.sizeThatFits(.unspecified)
+            let width = min(ideal.width, availableWidth)
+            let size = ideal.width > availableWidth
+                ? subview.sizeThatFits(ProposedViewSize(width: availableWidth, height: nil))
+                : ideal
+            let item = Item(subview: subview, size: CGSize(width: width, height: size.height))
+            let proposedWidth = row.items.isEmpty ? width : row.width + spacing + width
+
+            if !row.items.isEmpty, proposedWidth > availableWidth {
+                rows.append(row)
+                row = Row(items: [item], width: width, height: size.height)
+            } else {
+                row.items.append(item)
+                row.width = proposedWidth
+                row.height = max(row.height, size.height)
+            }
+        }
+
+        if !row.items.isEmpty { rows.append(row) }
+        return rows
+    }
+
+    private struct Item {
+        let subview: LayoutSubview
+        let size: CGSize
+    }
+
+    private struct Row {
+        var items: [Item] = []
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
+}
+
 // MARK: - Empty / section components
 
 struct EmptyStateCard: View {
@@ -83,7 +179,6 @@ struct SurfaceCard<Content: View>: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title.uppercased())
                     .font(.caption2.weight(.medium))
-                    .kerning(0.6)
                     .foregroundStyle(AppPalette.tertiaryInk)
                 Text(subtitle)
                     .font(.subheadline.weight(.medium))
@@ -310,9 +405,9 @@ struct EditorialEyebrow: View {
 
     var body: some View {
         Text(text.uppercased())
-            .font(.system(.caption2, design: .monospaced).weight(.medium))
-            .kerning(0.9)
+            .font(AppFont.mono(.caption2, weight: .medium))
             .foregroundStyle(tint)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -324,10 +419,9 @@ struct EditorialMeta: View {
 
     var body: some View {
         Text(text.uppercased())
-            .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-            .kerning(0.5)
+            .font(AppFont.mono(.caption2, weight: .medium))
             .foregroundStyle(tint)
-            .lineLimit(1)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 

@@ -24,10 +24,48 @@ enum EnhancedSpeechSettings {
     }
 }
 
+enum EnhancedSpeechResourcePolicy {
+    private static let minimumAvailableCapacity: Int64 = 1_000_000_000
+
+    /// Large speech models should never compete with a thermally constrained
+    /// device, Low Power Mode, or the user's last gigabyte of storage. The
+    /// transcription pipeline automatically falls back to Apple Speech.
+    static var allowsModelPreparation: Bool {
+        let processInfo = ProcessInfo.processInfo
+        guard !processInfo.isLowPowerModeEnabled else { return false }
+        switch processInfo.thermalState {
+        case .serious, .critical:
+            return false
+        case .nominal, .fair:
+            break
+        @unknown default:
+            return false
+        }
+
+        let volumeURL = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        guard let values = try? volumeURL.resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+        ), let available = values.volumeAvailableCapacityForImportantUsage else {
+            return true
+        }
+        return available >= minimumAvailableCapacity
+    }
+}
+
 actor LocalSpeakerDiarizationService {
     static let shared = LocalSpeakerDiarizationService()
 
     #if canImport(FluidAudio)
+    private struct AlignedWordChunk {
+        var speaker: String
+        var words: [String]
+        var firstWordIndex: Int
+        var lastWordIndex: Int
+    }
+
     private var manager: OfflineDiarizerManager?
     private var managerSpeakerCount: Int?
     #endif
@@ -60,6 +98,9 @@ actor LocalSpeakerDiarizationService {
                managerSpeakerCount == constrainedSpeakerCount {
                 manager = existing
             } else {
+                guard EnhancedSpeechResourcePolicy.allowsModelPreparation else {
+                    return coalesced(result)
+                }
                 var configuration = OfflineDiarizerConfig.default
                 // Meeting turns are often shorter than the library default.
                 // Retain enough audio for stable embeddings while allowing
@@ -88,14 +129,12 @@ actor LocalSpeakerDiarizationService {
                 displayNames[turn.speakerId] = "Speaker \(displayNames.count + 1)"
             }
 
-            let aligned = result.segments.map { segment in
-                var revised = segment
-                revised.speaker = bestSpeaker(
+            let aligned = result.segments.flatMap { segment in
+                alignedSegments(
                     for: segment,
                     turns: orderedTurns,
                     displayNames: displayNames
-                ) ?? SpeakerIdentityResolver.normalizedDisplayName(segment.speaker)
-                return revised
+                )
             }
 
             var enriched = result
@@ -124,6 +163,104 @@ actor LocalSpeakerDiarizationService {
     }
 
     #if canImport(FluidAudio)
+    private func alignedSegments(
+        for segment: TranscriptionSegment,
+        turns: [TimedSpeakerSegment],
+        displayNames: [String: String]
+    ) -> [TranscriptionSegment] {
+        guard let start = segment.startTime,
+              let end = segment.endTime,
+              end > start
+        else {
+            var revised = segment
+            revised.speaker = SpeakerIdentityResolver.normalizedDisplayName(segment.speaker)
+            return [revised]
+        }
+
+        let relevantTurns = turns.filter { turn in
+            let overlap = max(
+                0,
+                min(end, Double(turn.endTimeSeconds))
+                    - max(start, Double(turn.startTimeSeconds))
+            )
+            return overlap >= 0.18
+        }
+        let distinctSpeakerIDs = Set(relevantTurns.map(\.speakerId))
+        let words = segment.text.split(whereSeparator: \.isWhitespace).map(String.init)
+
+        guard distinctSpeakerIDs.count > 1,
+              end - start >= 1.5,
+              words.count >= max(4, distinctSpeakerIDs.count * 2)
+        else {
+            var revised = segment
+            revised.speaker = bestSpeaker(
+                for: segment,
+                turns: turns,
+                displayNames: displayNames
+            ) ?? SpeakerIdentityResolver.normalizedDisplayName(segment.speaker)
+            return [revised]
+        }
+
+        var chunks: [AlignedWordChunk] = []
+        for (wordIndex, word) in words.enumerated() {
+            let progress = (Double(wordIndex) + 0.5) / Double(words.count)
+            let wordTime = start + ((end - start) * progress)
+            let speakerID = speakerID(at: wordTime, turns: relevantTurns)
+            let speaker = speakerID.flatMap { displayNames[$0] }
+                ?? bestSpeaker(for: segment, turns: turns, displayNames: displayNames)
+                ?? SpeakerIdentityResolver.normalizedDisplayName(segment.speaker)
+
+            if chunks.last?.speaker == speaker {
+                chunks[chunks.count - 1].words.append(word)
+                chunks[chunks.count - 1].lastWordIndex = wordIndex
+            } else {
+                chunks.append(AlignedWordChunk(
+                    speaker: speaker,
+                    words: [word],
+                    firstWordIndex: wordIndex,
+                    lastWordIndex: wordIndex
+                ))
+            }
+        }
+
+        guard chunks.count > 1 else {
+            var revised = segment
+            revised.speaker = chunks.first?.speaker
+                ?? SpeakerIdentityResolver.normalizedDisplayName(segment.speaker)
+            return [revised]
+        }
+
+        return chunks.map { chunk in
+            let chunkStart = start + ((end - start) * Double(chunk.firstWordIndex) / Double(words.count))
+            let chunkEnd = start + ((end - start) * Double(chunk.lastWordIndex + 1) / Double(words.count))
+            return TranscriptionSegment(
+                speaker: chunk.speaker,
+                text: chunk.words.joined(separator: " "),
+                startTime: chunkStart,
+                endTime: chunkEnd
+            )
+        }
+    }
+
+    private func speakerID(
+        at time: TimeInterval,
+        turns: [TimedSpeakerSegment]
+    ) -> String? {
+        let active = turns.filter {
+            Double($0.startTimeSeconds) <= time && time <= Double($0.endTimeSeconds)
+        }
+        if let strongest = active.max(by: { $0.qualityScore < $1.qualityScore }) {
+            return strongest.speakerId
+        }
+
+        guard let nearest = turns.min(by: {
+            distance(from: time, to: $0) < distance(from: time, to: $1)
+        }), distance(from: time, to: nearest) <= 0.75 else {
+            return nil
+        }
+        return nearest.speakerId
+    }
+
     private func bestSpeaker(
         for segment: TranscriptionSegment,
         turns: [TimedSpeakerSegment],
@@ -222,14 +359,7 @@ actor LocalSpeakerDiarizationService {
     }
 
     private static func joined(_ leading: String, _ trailing: String) -> String {
-        let leading = leading.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trailing = trailing.trimmingCharacters(in: .whitespacesAndNewlines)
-        if leading.isEmpty { return trailing }
-        if trailing.isEmpty { return leading }
-        if ",.!?:;)]}".contains(trailing.first ?? " ") {
-            return leading + trailing
-        }
-        return "\(leading) \(trailing)"
+        TranscriptAssembler.joining(leading, trailing)
     }
 }
 
@@ -246,7 +376,6 @@ final class TemporaryMeetingAudioWriter: @unchecked Sendable {
         label: "ai.scribeflow.live-audio-writer",
         qos: .userInitiated
     )
-    private let stateLock = NSLock()
     private let url: URL
     private var file: AVAudioFile?
     private var converter: AVAudioConverter?
@@ -265,24 +394,22 @@ final class TemporaryMeetingAudioWriter: @unchecked Sendable {
     }
 
     func append(_ buffer: AVAudioPCMBuffer) {
-        guard let copied = Self.copy(buffer) else { return }
-        let box = BufferBox(copied)
-        stateLock.lock()
-        guard isAcceptingAudio else {
-            stateLock.unlock()
-            return
-        }
+        guard let copied = AudioPCMBufferCopy.make(from: buffer) else { return }
+        appendOwned(copied)
+    }
+
+    func appendOwned(_ buffer: AVAudioPCMBuffer) {
+        let box = BufferBox(buffer)
         queue.async { [weak self, box] in
-            self?.write(box.buffer)
+            guard let self, self.isAcceptingAudio else { return }
+            self.write(box.buffer)
         }
-        stateLock.unlock()
     }
 
     func finish() async -> URL? {
-        stateLock.withLock { isAcceptingAudio = false }
-
         return await withCheckedContinuation { continuation in
             queue.async { [self] in
+                isAcceptingAudio = false
                 converter = nil
                 file = nil
                 let hasAudio = ((try? AVAudioFile(forReading: url).length) ?? 0) > 0
@@ -297,8 +424,8 @@ final class TemporaryMeetingAudioWriter: @unchecked Sendable {
     }
 
     func discard() {
-        stateLock.withLock { isAcceptingAudio = false }
         queue.async { [self] in
+            isAcceptingAudio = false
             converter = nil
             file = nil
             try? FileManager.default.removeItem(at: url)
@@ -348,28 +475,4 @@ final class TemporaryMeetingAudioWriter: @unchecked Sendable {
         try? file.write(from: output)
     }
 
-    private static func copy(_ source: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
-        guard let destination = AVAudioPCMBuffer(
-            pcmFormat: source.format,
-            frameCapacity: source.frameLength
-        ) else { return nil }
-        destination.frameLength = source.frameLength
-
-        let sourceBuffers = UnsafeMutableAudioBufferListPointer(source.mutableAudioBufferList)
-        let destinationBuffers = UnsafeMutableAudioBufferListPointer(destination.mutableAudioBufferList)
-        guard sourceBuffers.count == destinationBuffers.count else { return nil }
-
-        for index in sourceBuffers.indices {
-            guard let sourceData = sourceBuffers[index].mData,
-                  let destinationData = destinationBuffers[index].mData
-            else { continue }
-            let byteCount = min(
-                Int(sourceBuffers[index].mDataByteSize),
-                Int(destinationBuffers[index].mDataByteSize)
-            )
-            memcpy(destinationData, sourceData, byteCount)
-            destinationBuffers[index].mDataByteSize = UInt32(byteCount)
-        }
-        return destination
-    }
 }

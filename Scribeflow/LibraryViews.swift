@@ -236,6 +236,7 @@ struct ActionableCompactMeetingRow: View {
 /// summary, then an avatar stack + duration / actions / audio meta strip and a
 /// trailing relative timestamp. Flat on the page, separated by hairlines.
 struct EditorialLibraryRow: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let meeting: Meeting
     var searchQuery: String = ""
 
@@ -289,48 +290,54 @@ struct EditorialLibraryRow: View {
                             Circle().fill(AppPalette.accent).frame(width: 6, height: 6)
                         }
                         Text(meeting.title.isEmpty ? "Untitled" : meeting.title)
-                            .scaledFont(size: 17, weight: .medium, design: .serif, relativeTo: .body)
+                            .font(AppFont.serif(.body, weight: .medium))
                             .foregroundStyle(AppPalette.ink)
-                            .lineLimit(2)
                             .multilineTextAlignment(.leading)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     if !summaryLine.isEmpty {
                         Text(summaryLine)
-                            .font(.system(size: 13))
+                            .font(.subheadline)
                             .foregroundStyle(AppPalette.secondaryInk)
-                            .lineLimit(2)
                             .multilineTextAlignment(.leading)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    HStack(spacing: 10) {
-                        if meeting.status == .processing {
-                            EditorialMeta(text: "processing", tint: AppPalette.gold)
-                        }
-                        if !meeting.attendees.isEmpty {
-                            EditorialAvatarStack(names: meeting.attendees, size: 18, max: 3)
-                        }
-                        if !durationLabel.isEmpty { EditorialMeta(text: durationLabel) }
-                        if openActions > 0 {
-                            Text("·").foregroundStyle(AppPalette.border)
-                            EditorialMeta(text: "\(openActions) action\(openActions == 1 ? "" : "s")", tint: AppPalette.coral)
-                        }
-                        if !meeting.audioRecordings.isEmpty {
-                            Text("·").foregroundStyle(AppPalette.border)
-                            EditorialMeta(text: "audio", tint: AppPalette.accent)
-                        }
+                    WrappingHStack(spacing: 10) {
+                        rowMetadata
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                EditorialMeta(text: Self.relativeBadge(for: meeting.when))
-                    .padding(.top, 3)
+                if !dynamicTypeSize.isAccessibilitySize {
+                    EditorialMeta(text: Self.relativeBadge(for: meeting.when))
+                        .padding(.top, 3)
+                }
             }
             .padding(.vertical, 14)
             .contentShape(Rectangle())
             .overlay(alignment: .bottom) { EditorialRule() }
         }
         .buttonStyle(EditorialRowStyle())
+    }
+
+    @ViewBuilder
+    private var rowMetadata: some View {
+        if meeting.status == .processing {
+            EditorialMeta(text: "processing", tint: AppPalette.gold)
+        }
+        if !meeting.attendees.isEmpty {
+            EditorialAvatarStack(names: meeting.attendees, size: 18, max: 3)
+        }
+        if !durationLabel.isEmpty { EditorialMeta(text: durationLabel) }
+        if openActions > 0 {
+            EditorialMeta(text: "\(openActions) action\(openActions == 1 ? "" : "s")", tint: AppPalette.coral)
+        }
+        if !meeting.audioRecordings.isEmpty {
+            EditorialMeta(text: "audio", tint: AppPalette.accent)
+        }
+        if dynamicTypeSize.isAccessibilitySize {
+            EditorialMeta(text: Self.relativeBadge(for: meeting.when))
+        }
     }
 }
 
@@ -416,6 +423,7 @@ struct FolderRow: View {
 
 struct FolderDetailView: View {
     @Environment(MeetingStore.self) private var store
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let folder: WorkspaceFolder
     @Binding var selectedMeetingID: Meeting.ID?
 
@@ -424,40 +432,44 @@ struct FolderDetailView: View {
     @State private var modelSelection: ChatModelSelection = .auto
     @State private var isRunningChat = false
     @State private var answer: String?
+    @State private var searchText = ""
+    @State private var showsFolderChat = false
 
     private var meetings: [Meeting] { store.meetings(in: folder) }
+    private var filteredMeetings: [Meeting] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return meetings }
+        return meetings.filter { meeting in
+            meeting.title.localizedStandardContains(query)
+                || meeting.objective.localizedStandardContains(query)
+                || meeting.attendees.contains(where: { $0.localizedStandardContains(query) })
+                || meeting.rawNotes.localizedStandardContains(query)
+        }
+    }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                SurfaceCard(title: "Folder", subtitle: folder.name) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text(folder.description).font(.subheadline).foregroundStyle(AppPalette.secondaryInk)
-                        HStack(spacing: 10) {
-                            meta("Meetings", value: "\(folder.meetingCount)")
-                            meta("Updated", value: folder.latestMeetingDate.formatted(date: .abbreviated, time: .shortened))
-                        }
-                    }
+            LazyVStack(alignment: .leading, spacing: 18) {
+                folderSummary
+                folderChatTool
+
+                EditorialSectionHead(title: searchText.isEmpty ? "Meetings" : "Results", titleSize: 20) {
+                    EditorialMeta(text: "\(filteredMeetings.count)")
                 }
-                folderChatCard
-                SurfaceCard(title: "Meetings", subtitle: "Notes inside this folder") {
-                    if meetings.isEmpty {
-                        VStack(spacing: 6) {
-                            Image(systemName: "tray")
-                                .font(.title3)
-                                .foregroundStyle(AppPalette.tertiaryInk)
-                            Text("No meetings yet in this folder.")
-                                .font(.subheadline)
-                                .foregroundStyle(AppPalette.secondaryInk)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                    } else {
-                        VStack(spacing: 10) {
-                            ForEach(meetings) { meeting in
-                                NavigationLink(value: meeting.id) { CompactMeetingRow(meeting: meeting) }
-                                    .buttonStyle(.plain)
-                            }
+
+                if filteredMeetings.isEmpty {
+                    EmptyStateCard(
+                        title: searchText.isEmpty ? "No meetings yet" : "Nothing matches",
+                        subtitle: searchText.isEmpty
+                            ? "Saved notes in this workspace will appear here."
+                            : "Try another word or clear the search.",
+                        systemImage: searchText.isEmpty ? "tray" : "magnifyingglass",
+                        tint: AppPalette.accent
+                    )
+                } else {
+                    LazyVStack(spacing: 0) {
+                        ForEach(filteredMeetings) { meeting in
+                            EditorialLibraryRow(meeting: meeting, searchQuery: searchText)
                         }
                     }
                 }
@@ -468,11 +480,34 @@ struct FolderDetailView: View {
         .accessibilityIdentifier("folderdetail.view")
         .navigationTitle(folder.name)
         .navigationBarTitleDisplayMode(.inline)
+        .searchable(text: $searchText, prompt: "Search this folder")
         .navigationDestination(for: Meeting.ID.self) { id in MeetingDetailView(meetingID: id) }
     }
 
-    private var folderChatCard: some View {
-        SurfaceCard(title: "Folder chat", subtitle: "Ask across this workspace with source-linked answers.") {
+    private var folderSummary: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(folder.description)
+                .font(.body)
+                .foregroundStyle(AppPalette.secondaryInk)
+                .fixedSize(horizontal: false, vertical: true)
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 10) {
+                        meta("Meetings", value: "\(meetings.count)")
+                        meta("Updated", value: folder.latestMeetingDate.formatted(date: .abbreviated, time: .shortened))
+                    }
+                } else {
+                    HStack(spacing: 24) {
+                        meta("Meetings", value: "\(meetings.count)")
+                        meta("Updated", value: folder.latestMeetingDate.formatted(date: .abbreviated, time: .shortened))
+                    }
+                }
+            }
+        }
+    }
+
+    private var folderChatTool: some View {
+        DisclosureGroup(isExpanded: $showsFolderChat) {
             VStack(alignment: .leading, spacing: 12) {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
@@ -484,18 +519,18 @@ struct FolderDetailView: View {
                 }
                 TextField("Ask anything about this folder", text: $prompt, axis: .vertical)
                     .padding(.horizontal, 14).padding(.vertical, 14)
-                    .background(AppPalette.cardBackground.opacity(0.90), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .background(AppPalette.softSurface, in: RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous))
                 HStack(spacing: 12) {
                     Toggle("Use transcripts", isOn: $includeTranscripts)
                         .font(.footnote.weight(.semibold)).tint(AppPalette.accent)
                     Spacer()
-                    Picker("Model", selection: $modelSelection) {
+                    Picker("Answer model", selection: $modelSelection) {
                         ForEach(ChatModelSelection.allCases) { Text($0.title).tag($0) }
                     }
                     .pickerStyle(.menu)
                 }
                 Text(modelSelection.helperText).font(.footnote).foregroundStyle(AppPalette.secondaryInk)
-                Button(isRunningChat ? "Thinking..." : "Run chat") { runPrompt(prompt) }
+                Button(isRunningChat ? "Answering..." : "Ask folder") { runPrompt(prompt) }
                     .buttonStyle(.borderedProminent).tint(AppPalette.accent)
                     .disabled(isRunningChat || prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 if let answer {
@@ -505,16 +540,34 @@ struct FolderDetailView: View {
                         .background(AppPalette.cardBackground.opacity(0.92), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 }
             }
+            .padding(.top, 12)
+        } label: {
+            HStack {
+                Label("Ask this folder", systemImage: "sparkle.magnifyingglass")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(AppPalette.ink)
+                Spacer(minLength: 8)
+                Text("Source-linked")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(AppPalette.accent)
+            }
+            .frame(minHeight: 44)
         }
+        .tint(AppPalette.accent)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous)
+                .strokeBorder(AppPalette.border.opacity(0.45), lineWidth: 0.7)
+        )
     }
 
     private func meta(_ title: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title.uppercased()).font(.caption2.weight(.bold)).kerning(0.9).foregroundStyle(AppPalette.secondaryInk)
+            Text(title.uppercased()).font(.caption2.weight(.bold)).foregroundStyle(AppPalette.secondaryInk)
             Text(value).font(.subheadline.weight(.semibold)).foregroundStyle(AppPalette.ink)
         }
-        .padding(12)
-        .background(AppPalette.softSurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private func runRecipe(_ recipe: WorkspaceRecipe) { prompt = recipe.prompt; runPrompt(recipe.prompt) }

@@ -11,18 +11,18 @@ enum SourceProofConfidence: String, Codable, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .confirmed: "Confirmed"
-        case .likely: "Likely"
-        case .inferred: "Inferred"
+        case .confirmed: "Direct source"
+        case .likely: "Partial match"
+        case .inferred: "Context only"
         case .needsReview: "Needs review"
         }
     }
 
     var detail: String {
         switch self {
-        case .confirmed: "Backed by a saved transcript line."
-        case .likely: "Backed by saved notes or calendar context."
-        case .inferred: "Generated from meeting context without a direct matching line."
+        case .confirmed: "The claim matches a saved source excerpt directly."
+        case .likely: "A saved excerpt supports part of the claim; review the wording."
+        case .inferred: "The source provides context but does not prove the full claim."
         case .needsReview: "There is not enough saved source material to verify this claim."
         }
     }

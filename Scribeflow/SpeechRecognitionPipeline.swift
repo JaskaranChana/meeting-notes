@@ -2,6 +2,114 @@ import AVFoundation
 import Foundation
 import Speech
 
+enum TranscriptAssembler {
+    private struct Token {
+        let folded: String
+        let range: Range<String.Index>
+    }
+
+    static func joining(
+        _ leadingValue: String,
+        _ trailingValue: String,
+        maximumOverlapWords: Int = 24
+    ) -> String {
+        let leading = normalizedWhitespace(leadingValue)
+        let trailing = normalizedWhitespace(trailingValue)
+        guard !leading.isEmpty else { return trailing }
+        guard !trailing.isEmpty else { return leading }
+
+        let leadingTokens = tokens(in: leading)
+        let trailingTokens = tokens(in: trailing)
+        let maximumOverlap = min(maximumOverlapWords, leadingTokens.count, trailingTokens.count)
+        var overlapCount = 0
+
+        if maximumOverlap >= 2 {
+            for candidate in stride(from: maximumOverlap, through: 2, by: -1) {
+                let leadingStart = leadingTokens.count - candidate
+                let matches = (0..<candidate).allSatisfy { offset in
+                    leadingTokens[leadingStart + offset].folded == trailingTokens[offset].folded
+                }
+                if matches {
+                    overlapCount = candidate
+                    break
+                }
+            }
+        }
+
+        guard overlapCount > 0 else {
+            return appendWithoutOverlap(leading, trailing)
+        }
+
+        let consumedEnd = trailingTokens[overlapCount - 1].range.upperBound
+        let remainder = normalizedWhitespace(String(trailing[consumedEnd...]))
+        return appendWithoutOverlap(leading, remainder)
+    }
+
+    static func wordCount(in text: String) -> Int {
+        tokens(in: text).count
+    }
+
+    static func canonicalWords(in text: String) -> [String] {
+        tokens(in: text).map(\.folded)
+    }
+
+    private static func appendWithoutOverlap(_ leading: String, _ trailing: String) -> String {
+        guard !trailing.isEmpty else { return leading }
+        guard let first = trailing.first else { return leading }
+        if ",.!?:;".contains(first), let last = leading.last, ",.!?:;".contains(last) {
+            var revisedLeading = leading
+            revisedLeading.removeLast()
+            return revisedLeading + trailing
+        }
+        if ",.!?:;)]}".contains(first) || "([{\"".contains(leading.last ?? " ") {
+            return leading + trailing
+        }
+        return "\(leading) \(trailing)"
+    }
+
+    private static func normalizedWhitespace(_ text: String) -> String {
+        text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
+    private static func tokens(in text: String) -> [Token] {
+        var output: [Token] = []
+        var index = text.startIndex
+
+        while index < text.endIndex {
+            guard text[index].isLetter || text[index].isNumber else {
+                index = text.index(after: index)
+                continue
+            }
+
+            let start = index
+            index = text.index(after: index)
+            while index < text.endIndex {
+                let character = text[index]
+                if character.isLetter || character.isNumber {
+                    index = text.index(after: index)
+                    continue
+                }
+                if character == "'" || character == "’" || character == "-" {
+                    let next = text.index(after: index)
+                    if next < text.endIndex, text[next].isLetter || text[next].isNumber {
+                        index = next
+                        continue
+                    }
+                }
+                break
+            }
+
+            let range = start..<index
+            let folded = String(text[range])
+                .replacingOccurrences(of: "’", with: "'")
+                .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                .lowercased()
+            output.append(Token(folded: folded, range: range))
+        }
+        return output
+    }
+}
+
 struct SpeechRecognitionContext: Codable, Hashable, Sendable {
     var title: String = ""
     var workspace: String = ""
@@ -203,20 +311,33 @@ enum SpeechRecognitionSupport {
 }
 
 final class SpeechAudioBufferSink: @unchecked Sendable {
-    private let lock = NSLock()
+    private final class BufferBox: @unchecked Sendable {
+        let buffer: AVAudioPCMBuffer
+
+        init(_ buffer: AVAudioPCMBuffer) {
+            self.buffer = buffer
+        }
+    }
+
+    /// Recognition segments rotate during long recordings. Serialize both the
+    /// handler swap and delivery without ever blocking the audio render thread.
+    private let queue = DispatchQueue(
+        label: "ai.scribeflow.live-speech-buffer-sink",
+        qos: .userInitiated
+    )
     private var handler: ((AVAudioPCMBuffer) -> Void)?
 
     func replaceHandler(_ handler: ((AVAudioPCMBuffer) -> Void)?) {
-        lock.lock()
-        self.handler = handler
-        lock.unlock()
+        queue.sync {
+            self.handler = handler
+        }
     }
 
-    func append(_ buffer: AVAudioPCMBuffer) {
-        lock.lock()
-        let handler = handler
-        lock.unlock()
-        handler?(buffer)
+    func appendOwned(_ buffer: AVAudioPCMBuffer) {
+        let box = BufferBox(buffer)
+        queue.async { [weak self, box] in
+            self?.handler?(box.buffer)
+        }
     }
 }
 
@@ -281,6 +402,11 @@ enum SpeechRecognitionPipeline {
 
 @MainActor
 private final class LegacyLiveSpeechSession: LiveSpeechTranscribing {
+    private struct RetiredRecognitionSegment {
+        let request: SFSpeechAudioBufferRecognitionRequest
+        let task: SFSpeechRecognitionTask
+    }
+
     nonisolated let audioSink = SpeechAudioBufferSink()
 
     private let recognizer: SFSpeechRecognizer
@@ -293,7 +419,8 @@ private final class LegacyLiveSpeechSession: LiveSpeechTranscribing {
     private var rotationTask: Task<Void, Never>?
     private var finishTimeoutTask: Task<Void, Never>?
     private var finishContinuation: CheckedContinuation<Void, Never>?
-    private var committedTranscript = ""
+    private var completedSegmentTranscripts: [Int: String] = [:]
+    private var retiredSegments: [Int: RetiredRecognitionSegment] = [:]
     private var currentTranscript = ""
     private var generation = 0
     private var isFinishing = false
@@ -325,7 +452,7 @@ private final class LegacyLiveSpeechSession: LiveSpeechTranscribing {
             finishContinuation = continuation
             recognitionRequest?.endAudio()
             finishTimeoutTask = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(2))
+                try? await Task.sleep(for: .seconds(3))
                 guard !Task.isCancelled else { return }
                 self?.completeFinish()
             }
@@ -348,7 +475,12 @@ private final class LegacyLiveSpeechSession: LiveSpeechTranscribing {
     }
 
     private var combinedTranscript: String {
-        Self.joined(committedTranscript, currentTranscript)
+        var combined = ""
+        for segmentGeneration in completedSegmentTranscripts.keys.sorted() {
+            guard let segment = completedSegmentTranscripts[segmentGeneration] else { continue }
+            combined = TranscriptAssembler.joining(combined, segment)
+        }
+        return TranscriptAssembler.joining(combined, currentTranscript)
     }
 
     private func replaceRecognitionSegment() {
@@ -356,6 +488,7 @@ private final class LegacyLiveSpeechSession: LiveSpeechTranscribing {
 
         let oldRequest = recognitionRequest
         let oldTask = recognitionTask
+        let oldGeneration = generation
         commitCurrentTranscript()
         generation += 1
         let currentGeneration = generation
@@ -387,8 +520,18 @@ private final class LegacyLiveSpeechSession: LiveSpeechTranscribing {
             }
         }
 
-        oldRequest?.endAudio()
-        oldTask?.cancel()
+        if let oldRequest, let oldTask, oldGeneration > 0 {
+            retiredSegments[oldGeneration] = RetiredRecognitionSegment(
+                request: oldRequest,
+                task: oldTask
+            )
+            oldRequest.endAudio()
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(4))
+                guard !Task.isCancelled else { return }
+                self?.retireRecognitionSegment(oldGeneration)
+            }
+        }
         scheduleRotation()
     }
 
@@ -398,7 +541,24 @@ private final class LegacyLiveSpeechSession: LiveSpeechTranscribing {
         errorDescription: String?,
         generation: Int
     ) {
-        guard generation == self.generation, !isCancelled else { return }
+        guard !isCancelled else { return }
+
+        if generation < self.generation {
+            let cleaned = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !cleaned.isEmpty {
+                let existing = completedSegmentTranscripts[generation] ?? ""
+                if isFinal || TranscriptAssembler.wordCount(in: cleaned) > TranscriptAssembler.wordCount(in: existing) {
+                    completedSegmentTranscripts[generation] = cleaned
+                    onTranscript(combinedTranscript, isFinal)
+                }
+            }
+            if isFinal || errorDescription != nil {
+                retireRecognitionSegment(generation)
+            }
+            return
+        }
+
+        guard generation == self.generation else { return }
 
         if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             currentTranscript = text
@@ -407,6 +567,8 @@ private final class LegacyLiveSpeechSession: LiveSpeechTranscribing {
 
         if isFinal {
             commitCurrentTranscript()
+            recognitionRequest = nil
+            recognitionTask = nil
             if isFinishing {
                 completeFinish()
             } else {
@@ -438,9 +600,15 @@ private final class LegacyLiveSpeechSession: LiveSpeechTranscribing {
     private func commitCurrentTranscript() {
         let current = currentTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !current.isEmpty else { return }
-        committedTranscript = Self.joined(committedTranscript, current)
+        completedSegmentTranscripts[generation] = current
         currentTranscript = ""
-        onTranscript(committedTranscript, true)
+        onTranscript(combinedTranscript, true)
+    }
+
+    private func retireRecognitionSegment(_ segmentGeneration: Int) {
+        guard let retired = retiredSegments.removeValue(forKey: segmentGeneration) else { return }
+        retired.request.endAudio()
+        retired.task.cancel()
     }
 
     private func completeFinish() {
@@ -462,14 +630,11 @@ private final class LegacyLiveSpeechSession: LiveSpeechTranscribing {
         recognitionTask?.cancel()
         recognitionRequest = nil
         recognitionTask = nil
-    }
-
-    private static func joined(_ leading: String, _ trailing: String) -> String {
-        let leading = leading.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trailing = trailing.trimmingCharacters(in: .whitespacesAndNewlines)
-        if leading.isEmpty { return trailing }
-        if trailing.isEmpty { return leading }
-        return "\(leading) \(trailing)"
+        for retired in retiredSegments.values {
+            retired.request.endAudio()
+            retired.task.cancel()
+        }
+        retiredSegments.removeAll()
     }
 }
 
@@ -485,8 +650,8 @@ private final class AnalyzerLiveSpeechSession: LiveSpeechTranscribing {
     private let onTranscript: @MainActor (String, Bool) -> Void
     private let onError: @MainActor (String) -> Void
     private var resultsTask: Task<Void, Never>?
-    private var finalizedTranscript = AttributedString()
-    private var volatileTranscript = AttributedString()
+    private var finalizedTranscript = ""
+    private var volatileTranscript = ""
     private var isFinished = false
 
     private init(
@@ -547,7 +712,7 @@ private final class AnalyzerLiveSpeechSession: LiveSpeechTranscribing {
 
         let (inputStream, inputContinuation) = AsyncStream.makeStream(
             of: AnalyzerInput.self,
-            bufferingPolicy: .bufferingNewest(192)
+            bufferingPolicy: .bufferingNewest(512)
         )
         let converter = try SpeechPCMBufferConverter(from: inputFormat, to: analyzerFormat)
         let audioPump = AnalyzerAudioBufferPump(
@@ -564,7 +729,7 @@ private final class AnalyzerLiveSpeechSession: LiveSpeechTranscribing {
         )
 
         session.audioSink.replaceHandler { [audioPump] buffer in
-            audioPump.append(buffer)
+            audioPump.appendOwned(buffer)
         }
         session.startResultsTask()
         try await analyzer.start(inputSequence: inputStream)
@@ -597,7 +762,7 @@ private final class AnalyzerLiveSpeechSession: LiveSpeechTranscribing {
 
         await resultsTask?.value
         resultsTask = nil
-        volatileTranscript = AttributedString()
+        volatileTranscript = ""
         onTranscript(combinedTranscript, true)
         return combinedTranscript
     }
@@ -620,9 +785,7 @@ private final class AnalyzerLiveSpeechSession: LiveSpeechTranscribing {
     }
 
     private var combinedTranscript: String {
-        var text = finalizedTranscript
-        text += volatileTranscript
-        return String(text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
+        TranscriptAssembler.joining(finalizedTranscript, volatileTranscript)
     }
 
     private func startResultsTask() {
@@ -630,11 +793,15 @@ private final class AnalyzerLiveSpeechSession: LiveSpeechTranscribing {
             do {
                 for try await result in transcriber.results {
                     guard let self, !Task.isCancelled else { return }
+                    let text = String(result.text.characters)
                     if result.isFinal {
-                        self.finalizedTranscript += result.text
-                        self.volatileTranscript = AttributedString()
+                        self.finalizedTranscript = TranscriptAssembler.joining(
+                            self.finalizedTranscript,
+                            text
+                        )
+                        self.volatileTranscript = ""
                     } else {
-                        self.volatileTranscript = result.text
+                        self.volatileTranscript = text
                     }
                     self.onTranscript(self.combinedTranscript, result.isFinal)
                 }
@@ -722,13 +889,14 @@ enum SpeechAnalyzerFileTranscriber {
             let resultText = String(result.text.characters)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !resultText.isEmpty else { continue }
-            completeText = joined(completeText, resultText)
+            completeText = TranscriptAssembler.joining(completeText, resultText)
 
             var appendedTimedRun = false
             for run in result.text.runs {
                 let runText = String(result.text[run.range].characters)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !runText.isEmpty, let timeRange = run.audioTimeRange else { continue }
+                let timeRange = run[AttributeScopes.SpeechAttributes.TimeRangeAttribute.self]
+                guard !runText.isEmpty, let timeRange else { continue }
                 let start = timeRange.start.seconds
                 let duration = timeRange.duration.seconds
                 guard start.isFinite, duration.isFinite, duration > 0 else { continue }
@@ -759,16 +927,6 @@ enum SpeechAnalyzerFileTranscriber {
         return FileTranscriptionPayload(text: completeText, segments: segments)
     }
 
-    private static func joined(_ leading: String, _ trailing: String) -> String {
-        let leading = leading.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trailing = trailing.trimmingCharacters(in: .whitespacesAndNewlines)
-        if leading.isEmpty { return trailing }
-        if trailing.isEmpty { return leading }
-        if ",.!?:;)]}".contains(trailing.first ?? " ") {
-            return leading + trailing
-        }
-        return "\(leading) \(trailing)"
-    }
 }
 
 @available(iOS 26.0, *)
@@ -785,13 +943,10 @@ private final class AnalyzerAudioBufferPump: @unchecked Sendable {
         label: "ai.scribeflow.speech-analyzer-input",
         qos: .userInitiated
     )
-    private let stateLock = NSLock()
     private let converter: SpeechPCMBufferConverter
     private let continuation: AsyncStream<AnalyzerInput>.Continuation
     private var isAcceptingAudio = true
     private var isCancelled = false
-    private var pendingBufferCount = 0
-    private let maximumPendingBuffers = 256
 
     init(
         converter: SpeechPCMBufferConverter,
@@ -801,72 +956,36 @@ private final class AnalyzerAudioBufferPump: @unchecked Sendable {
         self.continuation = continuation
     }
 
-    func append(_ buffer: AVAudioPCMBuffer) {
-        guard let copy = Self.copy(buffer) else { return }
-        let box = BufferBox(copy)
-        stateLock.lock()
-        guard isAcceptingAudio, pendingBufferCount < maximumPendingBuffers else {
-            stateLock.unlock()
-            return
-        }
-        pendingBufferCount += 1
+    func appendOwned(_ buffer: AVAudioPCMBuffer) {
+        let box = BufferBox(buffer)
         queue.async { [self, box] in
-            defer {
-                stateLock.withLock { pendingBufferCount = max(0, pendingBufferCount - 1) }
-            }
-            guard stateLock.withLock({ !isCancelled }),
+            guard isAcceptingAudio,
+                  !isCancelled,
                   let converted = try? converter.convert(box.buffer)
             else { return }
             continuation.yield(AnalyzerInput(buffer: converted))
         }
-        stateLock.unlock()
     }
 
     func finish() async {
-        stateLock.withLock { isAcceptingAudio = false }
         await withCheckedContinuation { continuation in
-            queue.async {
+            queue.async { [self] in
+                isAcceptingAudio = false
                 continuation.resume()
             }
         }
     }
 
     func cancel() {
-        stateLock.withLock {
+        queue.async { [self] in
             isAcceptingAudio = false
             isCancelled = true
         }
-    }
-
-    private static func copy(_ source: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
-        guard let destination = AVAudioPCMBuffer(
-            pcmFormat: source.format,
-            frameCapacity: source.frameLength
-        ) else { return nil }
-        destination.frameLength = source.frameLength
-
-        let sourceBuffers = UnsafeMutableAudioBufferListPointer(source.mutableAudioBufferList)
-        let destinationBuffers = UnsafeMutableAudioBufferListPointer(destination.mutableAudioBufferList)
-        guard sourceBuffers.count == destinationBuffers.count else { return nil }
-
-        for index in sourceBuffers.indices {
-            guard let sourceData = sourceBuffers[index].mData,
-                  let destinationData = destinationBuffers[index].mData
-            else { continue }
-            let byteCount = min(
-                Int(sourceBuffers[index].mDataByteSize),
-                Int(destinationBuffers[index].mDataByteSize)
-            )
-            memcpy(destinationData, sourceData, byteCount)
-            destinationBuffers[index].mDataByteSize = UInt32(byteCount)
-        }
-        return destination
     }
 }
 
 @available(iOS 26.0, *)
 private final class SpeechPCMBufferConverter: @unchecked Sendable {
-    private let lock = NSLock()
     private var converter: AVAudioConverter
     private var inputFormat: AVAudioFormat
     private let outputFormat: AVAudioFormat
@@ -881,9 +1000,6 @@ private final class SpeechPCMBufferConverter: @unchecked Sendable {
     }
 
     func convert(_ input: AVAudioPCMBuffer) throws -> AVAudioPCMBuffer {
-        lock.lock()
-        defer { lock.unlock() }
-
         if !input.format.isEqual(inputFormat) {
             guard let replacement = AVAudioConverter(from: input.format, to: outputFormat) else {
                 throw SpeechRecognitionPipelineError.unsupportedAudioFormat

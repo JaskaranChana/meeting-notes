@@ -246,7 +246,8 @@ struct MeetingPurposeClassifier {
         let content = normalizedText(([notes] + transcriptParagraphs).joined(separator: " "))
         let metadata = normalizedText([title, workspace, objective].joined(separator: " "))
         let semanticText = [content, metadata].filter { !$0.isEmpty }.joined(separator: " ")
-        let topicText = content.isEmpty ? normalizedText([title, objective].joined(separator: " ")) : content
+        let explicitTopicText = normalizedText([objective, title].joined(separator: " "))
+        let topicText = explicitTopicText.isEmpty ? content : explicitTopicText
         let externalAttendeeCount = attendees.filter { !isSelfLabel($0) }.count
         let hasMultiplePeople = distinctSpeakerCount > 1 || externalAttendeeCount > 0
 
@@ -466,7 +467,10 @@ struct MeetingPurposeClassifier {
             "just", "like", "make", "maybe", "more", "need", "really", "said", "some",
             "something", "that", "their", "them", "then", "there", "these", "they", "thing",
             "think", "this", "those", "today", "very", "want", "what", "when", "where",
-            "which", "will", "with", "would", "your", "youre"
+            "which", "will", "with", "would", "your", "youre",
+            "action", "actions", "attendee", "attendees", "calendar", "capture",
+            "decision", "decisions", "meeting", "notes", "owner", "owners", "prep",
+            "review", "risk", "risks", "speaker", "speakers", "summary", "transcript"
         ]
         let words = content.split(separator: " ").map(String.init).filter {
             $0.count >= 4 && !ignored.contains($0)
