@@ -25,6 +25,7 @@ struct TodayView: View {
     let onSettingsTap: () -> Void
     let onAskTap: () -> Void
     let onTasksTap: () -> Void
+    let onLibraryTap: () -> Void
     @Binding var toast: ToastItem?
     @State private var hasAnimatedIn = false
     @State private var snap = TodaySnapshot()
@@ -225,7 +226,7 @@ struct TodayView: View {
                             }
 
                             if !pinnedMeetings.isEmpty {
-                                HomePinnedSection(meetings: pinnedMeetings, onSeeAll: onTasksTap)
+                                HomePinnedSection(meetings: pinnedMeetings, onSeeAll: onLibraryTap)
                             }
 
                             if !snap.openLoops.isEmpty {
@@ -238,7 +239,7 @@ struct TodayView: View {
                             }
 
                             if !snap.recentHomeMeetings.isEmpty {
-                                EditorialRecent(meetings: snap.recentHomeMeetings, onSeeAll: onTasksTap)
+                                EditorialRecent(meetings: snap.recentHomeMeetings, onSeeAll: onLibraryTap)
                             }
                         }
                         .transition(.opacity)
@@ -3780,34 +3781,15 @@ private struct EditorialHeroCard: View {
             shape.fill(AppPalette.cardBackground)
             shape.fill(
                 LinearGradient(
-                    colors: [AppPalette.accent.opacity(0.10), .clear],
+                    colors: [
+                        AppPalette.accent.opacity(0.12),
+                        AppPalette.cardBackground,
+                        AppPalette.gold.opacity(0.04)
+                    ],
                     startPoint: .topLeading,
-                    endPoint: .center
+                    endPoint: .bottomTrailing
                 )
             )
-            // Slow-drifting accent aurora — gives the primary surface gentle,
-            // living depth. Uses adaptive `accent`, so it reads correctly in
-            // light and dark. Holds still under Reduce Motion.
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [AppPalette.accent.opacity(0.16), .clear],
-                        center: .center, startRadius: 0, endRadius: 120
-                    )
-                )
-                .frame(width: 230, height: 230)
-                .offset(x: 100, y: -80)
-                .blur(radius: 14)
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [AppPalette.accent.opacity(0.09), .clear],
-                        center: .center, startRadius: 0, endRadius: 90
-                    )
-                )
-                .frame(width: 170, height: 170)
-                .offset(x: -60, y: 110)
-                .blur(radius: 20)
         }
         .clipShape(shape)
         .allowsHitTesting(false)

@@ -1093,7 +1093,7 @@ struct MeetingDetailView: View {
             let open    = meeting.commitments.filter { $0.status == .open }
             let atRisk  = meeting.commitments.filter { $0.status == .atRisk }
             let done    = meeting.commitments.filter { $0.status == .fulfilled || $0.status == .superseded }
-            let actions = meetingSignals.actions
+            let actions = meeting.commitments.isEmpty ? meetingSignals.actions : []
 
             tasksStatusStrip(open: open.count, atRisk: atRisk.count, done: done.count)
 

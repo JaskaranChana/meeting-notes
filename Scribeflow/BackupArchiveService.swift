@@ -43,6 +43,7 @@ actor BackupArchiveService {
     /// substantially more memory than the source files. Keep this bounded until
     /// a streaming archive format replaces it.
     private let maximumEmbeddedAudioBytes: Int64 = 64 * 1_024 * 1_024
+    private let maximumRestoreBytes = 128 * 1_024 * 1_024
     private let maximumAutomaticBackups = 7
     private let minimumAutomaticBackupInterval: TimeInterval = 6 * 60 * 60
     private var cachedLatestAutomaticBackupAt: Date?
@@ -54,6 +55,20 @@ actor BackupArchiveService {
         includeAudio: Bool,
         exportedAt: Date = .now
     ) throws -> Data {
+        try makeBackupPayload(
+            meetings: meetings,
+            schemaVersion: schemaVersion,
+            includeAudio: includeAudio,
+            exportedAt: exportedAt
+        ).data
+    }
+
+    func makeBackupPayload(
+        meetings: [Meeting],
+        schemaVersion: Int,
+        includeAudio: Bool,
+        exportedAt: Date = .now
+    ) throws -> ScribeflowBackupPayload {
         let audioFiles: [ScribeflowBackupAudioFile]
         if includeAudio {
             let fileNames = Set(meetings.flatMap { $0.audioRecordings.map(\.fileName) })
@@ -88,7 +103,46 @@ actor BackupArchiveService {
         )
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        return try encoder.encode(package)
+        return ScribeflowBackupPayload(
+            data: try encoder.encode(package),
+            preview: ScribeflowBackupPreview(
+                schemaVersion: schemaVersion,
+                exportedAt: exportedAt,
+                meetingsCount: meetings.count,
+                audioFilesCount: audioFiles.count
+            )
+        )
+    }
+
+    func prepareRestore(
+        from data: Data,
+        supportedSchemaVersion: Int
+    ) throws -> PreparedBackupRestore {
+        PreparedBackupRestore(
+            package: try decodedBackupPackage(
+                from: data,
+                supportedSchemaVersion: supportedSchemaVersion
+            )
+        )
+    }
+
+    func prepareRestore(
+        from url: URL,
+        supportedSchemaVersion: Int
+    ) throws -> PreparedBackupRestore {
+        let values = try url.resourceValues(forKeys: [.fileSizeKey])
+        if let fileSize = values.fileSize, fileSize > maximumRestoreBytes {
+            throw MeetingStore.BackupError.tooLarge
+        }
+        let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+        return try prepareRestore(
+            from: data,
+            supportedSchemaVersion: supportedSchemaVersion
+        )
+    }
+
+    func installRecordingFiles(from preparedRestore: PreparedBackupRestore) throws {
+        try replaceRecordingFiles(with: preparedRestore.package.audioFiles)
     }
 
     @discardableResult
@@ -195,6 +249,94 @@ actor BackupArchiveService {
         try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
     }
 
+    private func decodedBackupPackage(
+        from data: Data,
+        supportedSchemaVersion: Int
+    ) throws -> ScribeflowBackupPackage {
+        guard data.count <= maximumRestoreBytes else {
+            throw MeetingStore.BackupError.tooLarge
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let package: ScribeflowBackupPackage
+        do {
+            package = try decoder.decode(ScribeflowBackupPackage.self, from: data)
+        } catch {
+            throw MeetingStore.BackupError.unreadable
+        }
+
+        guard package.schemaVersion <= supportedSchemaVersion else {
+            throw MeetingStore.BackupError.newerVersion(package.schemaVersion)
+        }
+        guard package.schemaVersion > 0 else {
+            throw MeetingStore.BackupError.invalidContents("invalid schema version")
+        }
+        guard Set(package.meetings.map(\.id)).count == package.meetings.count else {
+            throw MeetingStore.BackupError.invalidContents("duplicate note identifiers")
+        }
+
+        let audioFileNames = package.audioFiles.map(\.fileName)
+        guard Set(audioFileNames).count == audioFileNames.count else {
+            throw MeetingStore.BackupError.invalidContents("duplicate audio files")
+        }
+        guard audioFileNames.allSatisfy(Self.isSafeBackupAudioFileName) else {
+            throw MeetingStore.BackupError.invalidContents("unsafe audio file name")
+        }
+        let embeddedAudioBytes = package.audioFiles.reduce(Int64(0)) {
+            $0 + Int64($1.data.count)
+        }
+        guard embeddedAudioBytes <= maximumEmbeddedAudioBytes else {
+            throw MeetingStore.BackupError.tooLarge
+        }
+        return package
+    }
+
+    private func replaceRecordingFiles(with audioFiles: [ScribeflowBackupAudioFile]) throws {
+        let fileManager = FileManager.default
+        let destination = RecordingFileStore.directoryURL
+        let parent = destination.deletingLastPathComponent()
+        try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+
+        let staging = parent.appendingPathComponent(
+            "Recordings.restore-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let rollback = parent.appendingPathComponent(
+            "Recordings.rollback-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
+
+        do {
+            for audioFile in audioFiles {
+                let url = staging.appendingPathComponent(audioFile.fileName, isDirectory: false)
+                try audioFile.data.write(to: url, options: [.atomic])
+                RecordingFileStore.protectFile(at: url)
+            }
+
+            let hadExistingDirectory = fileManager.fileExists(atPath: destination.path)
+            if hadExistingDirectory {
+                try fileManager.moveItem(at: destination, to: rollback)
+            }
+
+            do {
+                try fileManager.moveItem(at: staging, to: destination)
+                try? fileManager.removeItem(at: rollback)
+                try RecordingFileStore.ensureDirectory()
+            } catch {
+                try? fileManager.removeItem(at: destination)
+                if hadExistingDirectory {
+                    try? fileManager.moveItem(at: rollback, to: destination)
+                }
+                throw error
+            }
+        } catch {
+            try? fileManager.removeItem(at: staging)
+            throw error
+        }
+    }
+
     private var directoryURL: URL {
         let baseDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
@@ -209,6 +351,12 @@ actor BackupArchiveService {
             && URL(fileURLWithPath: fileName).lastPathComponent == fileName
             && fileName.hasPrefix("scribeflow-auto-")
             && fileName.hasSuffix(".json")
+    }
+
+    private static func isSafeBackupAudioFileName(_ fileName: String) -> Bool {
+        !fileName.isEmpty
+            && URL(fileURLWithPath: fileName).lastPathComponent == fileName
+            && !fileName.contains("..")
     }
 
     private static let fileTimestamp: DateFormatter = {

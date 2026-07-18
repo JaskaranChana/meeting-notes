@@ -4,7 +4,7 @@ import CryptoKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-struct StorageRecordingItem: Identifiable, Hashable {
+struct StorageRecordingItem: Identifiable, Hashable, Sendable {
     var id: String { "\(meetingID.uuidString)-\(recordingID.uuidString)" }
     let meetingID: Meeting.ID
     let recordingID: AudioRecordingAttachment.ID
@@ -24,12 +24,20 @@ struct StorageRecordingItem: Identifiable, Hashable {
     }
 }
 
-struct StorageSnapshot: Equatable {
+struct StorageSnapshot: Equatable, Sendable {
     let notesCount: Int
     let recordingsCount: Int
     let audioBytes: Int
     let databaseBytes: Int
     let recordings: [StorageRecordingItem]
+
+    static let empty = StorageSnapshot(
+        notesCount: 0,
+        recordingsCount: 0,
+        audioBytes: 0,
+        databaseBytes: 0,
+        recordings: []
+    )
 
     var totalBytes: Int { audioBytes + databaseBytes }
     var audioFraction: Double { totalBytes > 0 ? Double(audioBytes) / Double(totalBytes) : 0 }
@@ -44,6 +52,52 @@ struct StorageSnapshot: Equatable {
     func recordingsOlderThan(days: Int, now: Date = .now) -> [StorageRecordingItem] {
         let cutoff = Calendar.current.date(byAdding: .day, value: -days, to: now) ?? now
         return recordings.filter { $0.createdAt < cutoff }
+    }
+}
+
+struct StorageRecordingDescriptor: Sendable {
+    let meetingID: Meeting.ID
+    let recordingID: AudioRecordingAttachment.ID
+    let meetingTitle: String
+    let recordingTitle: String
+    let fileName: String
+    let createdAt: Date
+    let durationSeconds: Int
+}
+
+actor StorageSnapshotService {
+    static let shared = StorageSnapshotService()
+
+    func makeSnapshot(
+        notesCount: Int,
+        recordings descriptors: [StorageRecordingDescriptor],
+        databaseURL: URL
+    ) -> StorageSnapshot {
+        let recordings = descriptors.map { descriptor in
+            StorageRecordingItem(
+                meetingID: descriptor.meetingID,
+                recordingID: descriptor.recordingID,
+                meetingTitle: descriptor.meetingTitle,
+                recordingTitle: descriptor.recordingTitle,
+                fileName: descriptor.fileName,
+                createdAt: descriptor.createdAt,
+                durationSeconds: descriptor.durationSeconds,
+                sizeBytes: RecordingFileStore.fileSize(
+                    at: RecordingFileStore.url(for: descriptor.fileName)
+                )
+            )
+        }
+        .sorted { $0.sizeBytes > $1.sizeBytes }
+        let audioBytes = recordings.reduce(0) { $0 + $1.sizeBytes }
+        let databaseBytes = RecordingFileStore.fileSize(at: databaseURL)
+
+        return StorageSnapshot(
+            notesCount: notesCount,
+            recordingsCount: recordings.count,
+            audioBytes: audioBytes,
+            databaseBytes: databaseBytes,
+            recordings: recordings
+        )
     }
 }
 
@@ -86,7 +140,7 @@ enum StorageCleanupAction: Hashable, Identifiable {
     }
 }
 
-struct ScribeflowBackupAudioFile: Codable {
+struct ScribeflowBackupAudioFile: Codable, Sendable {
     var fileName: String
     var data: Data
 }
@@ -98,7 +152,7 @@ struct ScribeflowBackupPackage: Codable {
     var audioFiles: [ScribeflowBackupAudioFile]
 }
 
-struct ScribeflowBackupPreview: Hashable {
+struct ScribeflowBackupPreview: Hashable, Sendable {
     let schemaVersion: Int
     let exportedAt: Date
     let meetingsCount: Int
@@ -115,6 +169,26 @@ struct ScribeflowBackupPreview: Hashable {
     var summary: String {
         "\(meetingsCount) note\(meetingsCount == 1 ? "" : "s")"
             + " and \(audioFilesCount) audio file\(audioFilesCount == 1 ? "" : "s")"
+    }
+}
+
+struct ScribeflowBackupPayload: Sendable {
+    let data: Data
+    let preview: ScribeflowBackupPreview
+}
+
+/// Decoded on the backup actor and then transferred once to the main actor for
+/// an atomic library replacement. No code mutates the package concurrently.
+struct PreparedBackupRestore: @unchecked Sendable {
+    let package: ScribeflowBackupPackage
+
+    var preview: ScribeflowBackupPreview {
+        ScribeflowBackupPreview(
+            schemaVersion: package.schemaVersion,
+            exportedAt: package.exportedAt,
+            meetingsCount: package.meetings.count,
+            audioFilesCount: package.audioFiles.count
+        )
     }
 }
 

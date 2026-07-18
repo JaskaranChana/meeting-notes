@@ -247,7 +247,7 @@ final class MeetingStore {
         didSet {
             revision &+= 1
             save()
-            if shouldRebuildIndex(afterReplacing: oldValue) {
+            if shouldRebuildIndex() {
                 rebuildIndex()
             }
             _recentMeetings = nil
@@ -259,7 +259,7 @@ final class MeetingStore {
             _eventPrepCache.removeAll(keepingCapacity: true)
             _intelligenceReportCache.removeAll(keepingCapacity: true)
             _sourceProofCache.removeAll(keepingCapacity: true)
-            scheduleRetentionEnforcement()
+            scheduleRetentionRecalculation()
         }
     }
 
@@ -342,13 +342,20 @@ final class MeetingStore {
         }
     }
 
-    private func shouldRebuildIndex(afterReplacing oldMeetings: [Meeting]) -> Bool {
+    private func shouldRebuildIndex() -> Bool {
         defer { forceIndexRebuildAfterMutation = false }
-        if forceIndexRebuildAfterMutation { return true }
-        guard oldMeetings.count == meetings.count else { return true }
-        if oldMeetings.first?.id != meetings.first?.id { return true }
-        if oldMeetings.last?.id != meetings.last?.id { return true }
-        return false
+        return forceIndexRebuildAfterMutation || indexByID.count != meetings.count
+    }
+
+    private func index(for id: Meeting.ID) -> Int? {
+        if let index = indexByID[id],
+           meetings.indices.contains(index),
+           meetings[index].id == id {
+            return index
+        }
+
+        rebuildIndex()
+        return indexByID[id]
     }
 
     @ObservationIgnored
@@ -372,6 +379,9 @@ final class MeetingStore {
 
     @ObservationIgnored
     private var retentionTask: Task<Void, Never>?
+
+    @ObservationIgnored
+    private var retentionRecalculationTask: Task<Void, Never>?
 
     @ObservationIgnored
     private var aiProcessingTasks: [Meeting.ID: Task<Void, Never>] = [:]
@@ -482,6 +492,7 @@ final class MeetingStore {
         saveTask?.cancel()
         derivedMigrationTask?.cancel()
         retentionTask?.cancel()
+        retentionRecalculationTask?.cancel()
     }
 
     private static func needsDerivedDataRefresh(_ meeting: Meeting) -> Bool {
@@ -502,7 +513,7 @@ final class MeetingStore {
             guard !Task.isCancelled, let self else { return }
             for id in meetingIDs {
                 guard !Task.isCancelled,
-                      let index = self.meetings.firstIndex(where: { $0.id == id }),
+                      let index = self.index(for: id),
                       Self.needsDerivedDataRefresh(self.meetings[index])
                 else { continue }
                 self.refreshSummariesIfNeeded(
@@ -538,12 +549,13 @@ final class MeetingStore {
     static func loadMeetings(mainURL: URL, backupURL: URL) -> LoadOutcome {
         let fileManager = FileManager.default
 
-        if let data = try? Data(contentsOf: mainURL), !data.isEmpty {
+        if let data = try? Data(contentsOf: mainURL, options: .mappedIfSafe), !data.isEmpty {
             if let meetings = decodeMeetings(data) {
                 return LoadOutcome(meetings: meetings, loadFailed: false, recoveredFromBackup: false)
             }
             // Main is present but unreadable. Try the backup, then quarantine main.
-            if let backupData = try? Data(contentsOf: backupURL), let meetings = decodeMeetings(backupData) {
+            if let backupData = try? Data(contentsOf: backupURL, options: .mappedIfSafe),
+               let meetings = decodeMeetings(backupData) {
                 quarantine(mainURL, fileManager: fileManager)
                 return LoadOutcome(meetings: meetings, loadFailed: false, recoveredFromBackup: true)
             }
@@ -552,7 +564,7 @@ final class MeetingStore {
         }
 
         // No usable main file — fall back to the backup if one survived.
-        if let backupData = try? Data(contentsOf: backupURL),
+        if let backupData = try? Data(contentsOf: backupURL, options: .mappedIfSafe),
            let meetings = decodeMeetings(backupData), !meetings.isEmpty {
             return LoadOutcome(meetings: meetings, loadFailed: false, recoveredFromBackup: true)
         }
@@ -1071,15 +1083,8 @@ final class MeetingStore {
     }
 
     func meeting(withID id: Meeting.ID) -> Meeting? {
-        if let idx = indexByID[id], meetings.indices.contains(idx) {
-            return meetings[idx]
-        }
-        if let match = meetings.first(where: { $0.id == id }) {
-            storeLog.warning("Index miss for meeting \(id.uuidString, privacy: .public) — rebuilding")
-            rebuildIndex()
-            return match
-        }
-        return nil
+        guard let index = index(for: id) else { return nil }
+        return meetings[index]
     }
 
     func meeting(linkedTo event: CalendarEventSnapshot) -> Meeting? {
@@ -1102,7 +1107,7 @@ final class MeetingStore {
     }
 
     func updateNotes(for id: Meeting.ID, notes: String) {
-        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = index(for: id) else { return }
         meetings[index].rawNotes = notes
         // Typing stays smooth: the raw text + autosave land immediately, but the
         // heavy summary/evidence/commitment regeneration is debounced so it runs
@@ -1115,7 +1120,7 @@ final class MeetingStore {
         regenTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(450))
             guard !Task.isCancelled, let self else { return }
-            guard let index = self.meetings.firstIndex(where: { $0.id == id }) else { return }
+            guard let index = self.index(for: id) else { return }
             self.refreshSummariesIfNeeded(at: index)
             try? await Task.sleep(for: .milliseconds(550))
             guard !Task.isCancelled else { return }
@@ -1125,37 +1130,40 @@ final class MeetingStore {
 
     func updateTitle(_ title: String, for id: Meeting.ID) {
         let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty, let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        guard !cleaned.isEmpty, let index = index(for: id) else { return }
         meetings[index].title = cleaned
         refreshSummariesIfNeeded(at: index)
         scheduleAIProcessing(for: id)
     }
 
     func updateMeetingMode(_ mode: MeetingMode, for id: Meeting.ID) {
-        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = index(for: id) else { return }
         meetings[index].meetingMode = mode
         refreshSummariesIfNeeded(at: index)
         scheduleAIProcessing(for: id)
     }
 
     func updateConsentState(_ state: ConsentState, for id: Meeting.ID) {
-        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = index(for: id) else { return }
         meetings[index].consentState = state
         refreshSummariesIfNeeded(at: index)
         scheduleAIProcessing(for: id)
     }
 
     func updateRetentionPolicy(_ policy: RetentionPolicy, for id: Meeting.ID) {
-        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = index(for: id) else { return }
         meetings[index].retentionPolicy = policy
         meetings[index].retentionPolicyUpdatedAt = .now
         if policy == .notesOnly, meetings[index].status != .processing, meetings[index].status != .live {
             purgeRetainedSources(for: id, stage: "Source media deleted by retention policy")
         }
+        // A user extending retention near the previous deadline must cancel the
+        // old timer immediately; ordinary meeting mutations use the coalesced path.
+        scheduleRetentionEnforcement()
     }
 
     func setTranscriptVisibility(_ isVisible: Bool, for id: Meeting.ID) {
-        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = index(for: id) else { return }
         meetings[index].transcriptVisibilityEnabled = isVisible
     }
 
@@ -1191,7 +1199,7 @@ final class MeetingStore {
         stage: String,
         now: Date = .now
     ) {
-        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = index(for: id) else { return }
         var meeting = meetings[index]
         let fileNames = meeting.audioRecordings.map(\.fileName)
 
@@ -1212,7 +1220,23 @@ final class MeetingStore {
         !meeting.transcript.isEmpty || !meeting.audioRecordings.isEmpty
     }
 
+    private func scheduleRetentionRecalculation() {
+        retentionRecalculationTask?.cancel()
+        retentionRecalculationTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(500))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, let self else { return }
+            self.retentionRecalculationTask = nil
+            self.scheduleRetentionEnforcement()
+        }
+    }
+
     private func scheduleRetentionEnforcement(now: Date = .now) {
+        retentionRecalculationTask?.cancel()
+        retentionRecalculationTask = nil
         retentionTask?.cancel()
         retentionTask = nil
 
@@ -1241,7 +1265,7 @@ final class MeetingStore {
     }
 
     func deleteEvidenceItem(for meetingID: Meeting.ID, evidenceID: EvidenceItem.ID) {
-        guard let index = meetings.firstIndex(where: { $0.id == meetingID }) else { return }
+        guard let index = index(for: meetingID) else { return }
         let oldCount = meetings[index].evidenceItems.count
         meetings[index].evidenceItems.removeAll { $0.id == evidenceID }
         if meetings[index].evidenceItems.count != oldCount {
@@ -1251,7 +1275,7 @@ final class MeetingStore {
     }
 
     func updateCommitmentStatus(_ status: CommitmentStatus, commitmentID: Commitment.ID, for meetingID: Meeting.ID) {
-        guard let index = meetings.firstIndex(where: { $0.id == meetingID }) else { return }
+        guard let index = index(for: meetingID) else { return }
         guard let commitmentIndex = meetings[index].commitments.firstIndex(where: { $0.id == commitmentID }) else { return }
         meetings[index].commitments[commitmentIndex].status = status
         if status == .fulfilled || status == .superseded {
@@ -1269,7 +1293,7 @@ final class MeetingStore {
         dueDateOverride: Date?
     ) {
         let cleanedOwner = owner.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let index = meetings.firstIndex(where: { $0.id == meetingID }) else { return }
+        guard let index = index(for: meetingID) else { return }
         guard let commitmentIndex = meetings[index].commitments.firstIndex(where: { $0.id == commitmentID }) else { return }
         meetings[index].commitments[commitmentIndex].owner = cleanedOwner.isEmpty ? "Owner not named" : cleanedOwner
         meetings[index].commitments[commitmentIndex].dueDateOverride = dueDateOverride
@@ -1281,7 +1305,7 @@ final class MeetingStore {
         identifier: String,
         fireDate: Date
     ) {
-        guard let index = meetings.firstIndex(where: { $0.id == meetingID }) else { return }
+        guard let index = index(for: meetingID) else { return }
         guard let commitmentIndex = meetings[index].commitments.firstIndex(where: { $0.id == commitmentID }) else { return }
         meetings[index].commitments[commitmentIndex].reminderID = identifier
         meetings[index].commitments[commitmentIndex].reminderFireDate = fireDate
@@ -1289,7 +1313,7 @@ final class MeetingStore {
     }
 
     func clearCommitmentReminder(commitmentID: Commitment.ID, for meetingID: Meeting.ID) {
-        guard let index = meetings.firstIndex(where: { $0.id == meetingID }) else { return }
+        guard let index = index(for: meetingID) else { return }
         guard let commitmentIndex = meetings[index].commitments.firstIndex(where: { $0.id == commitmentID }) else { return }
         ReminderScheduler.cancel(meetingID: meetingID, commitmentID: commitmentID)
         meetings[index].commitments[commitmentIndex].reminderID = nil
@@ -1298,7 +1322,7 @@ final class MeetingStore {
     }
 
     func selectTemplate(_ template: NoteTemplate, for id: Meeting.ID) {
-        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = index(for: id) else { return }
         guard meetings[index].selectedTemplate != template else { return }
         meetings[index].selectedTemplate = template
         refreshSummariesIfNeeded(at: index)
@@ -1306,25 +1330,25 @@ final class MeetingStore {
     }
 
     func selectPrompt(_ promptID: AIResponse.ID, for id: Meeting.ID) {
-        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = index(for: id) else { return }
         meetings[index].selectedPromptID = promptID
     }
 
     func markShared(for id: Meeting.ID) {
-        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = index(for: id) else { return }
         meetings[index].status = .shared
         meetings[index].stage = "Shared from iPhone"
     }
 
     func togglePinned(for id: Meeting.ID) {
-        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = index(for: id) else { return }
         meetings[index].isPinned.toggle()
     }
 
     // MARK: - Context Mode (Tier 2)
 
     func updateContextMode(_ mode: MeetingContextMode, for id: Meeting.ID) {
-        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = index(for: id) else { return }
         guard meetings[index].contextMode != mode else { return }
         meetings[index].contextMode = mode
         // Re-tailor the model brief to the chosen lens (no-op without the model).
@@ -1332,7 +1356,7 @@ final class MeetingStore {
     }
 
     func updatePurposeOverride(_ purpose: CapturePurposeKind?, for id: Meeting.ID) {
-        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = index(for: id) else { return }
         guard meetings[index].purposeOverride != purpose else { return }
         meetings[index].purposeOverride = purpose
 
@@ -1356,7 +1380,7 @@ final class MeetingStore {
     // MARK: - Meeting Score (Tier 2)
 
     func scoreAndSave(for id: Meeting.ID) {
-        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = index(for: id) else { return }
         let meeting = meetings[index]
         guard meeting.allowsAccountabilityExtraction else {
             meetings[index].score = nil
@@ -1427,7 +1451,7 @@ final class MeetingStore {
         guard !cleanedCurrent.isEmpty,
               !cleanedNew.isEmpty,
               cleanedCurrent.caseInsensitiveCompare(cleanedNew) != .orderedSame,
-              let index = meetings.firstIndex(where: { $0.id == meetingID })
+              let index = index(for: meetingID)
         else { return }
 
         for lineIndex in meetings[index].transcript.indices
@@ -1470,7 +1494,7 @@ final class MeetingStore {
     ) {
         let cleanedName = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanedName.isEmpty,
-              let meetingIndex = meetings.firstIndex(where: { $0.id == meetingID }),
+              let meetingIndex = index(for: meetingID),
               let lineIndex = meetings[meetingIndex].transcript.firstIndex(where: { $0.id == lineID }),
               meetings[meetingIndex].transcript[lineIndex].speaker
                 .caseInsensitiveCompare(cleanedName) != .orderedSame
@@ -1494,31 +1518,25 @@ final class MeetingStore {
 
     // MARK: - Storage, Backup, and Privacy Controls
 
-    func storageSnapshot() -> StorageSnapshot {
+    func storageSnapshot() async -> StorageSnapshot {
         let recordings = meetings.flatMap { meeting in
             meeting.audioRecordings.map { recording in
-                StorageRecordingItem(
+                StorageRecordingDescriptor(
                     meetingID: meeting.id,
                     recordingID: recording.id,
                     meetingTitle: meeting.title,
                     recordingTitle: recording.title,
                     fileName: recording.fileName,
                     createdAt: recording.createdAt,
-                    durationSeconds: recording.durationSeconds,
-                    sizeBytes: RecordingFileStore.fileSize(at: RecordingFileStore.url(for: recording.fileName))
+                    durationSeconds: recording.durationSeconds
                 )
             }
         }
 
-        let audioBytes = recordings.reduce(0) { $0 + $1.sizeBytes }
-        let databaseBytes = fileSize(at: saveURL)
-
-        return StorageSnapshot(
+        return await StorageSnapshotService.shared.makeSnapshot(
             notesCount: meetings.count,
-            recordingsCount: recordings.count,
-            audioBytes: audioBytes,
-            databaseBytes: databaseBytes,
-            recordings: recordings
+            recordings: recordings,
+            databaseURL: saveURL
         )
     }
 
@@ -1542,19 +1560,9 @@ final class MeetingStore {
         }
     }
 
-    func backupPreview(from data: Data) throws -> ScribeflowBackupPreview {
-        let package = try decodedBackupPackage(from: data)
-        return ScribeflowBackupPreview(
-            schemaVersion: package.schemaVersion,
-            exportedAt: package.exportedAt,
-            meetingsCount: package.meetings.count,
-            audioFilesCount: package.audioFiles.count
-        )
-    }
-
-    func makeBackupData(includeAudio: Bool) async throws -> Data {
+    func makeBackup(includeAudio: Bool) async throws -> ScribeflowBackupPayload {
         let snapshot = meetings
-        return try await BackupArchiveService.shared.makeBackupData(
+        return try await BackupArchiveService.shared.makeBackupPayload(
             meetings: snapshot,
             schemaVersion: Self.currentSchemaVersion,
             includeAudio: includeAudio
@@ -1581,22 +1589,41 @@ final class MeetingStore {
         try await BackupArchiveService.shared.data(for: snapshot)
     }
 
-    func restoreBackupData(_ data: Data) throws {
-        let package = try decodedBackupPackage(from: data)
-
-        // Best-effort safety snapshot of the CURRENT library before the
-        // destructive restore, so the user can recover their pre-restore state
-        // if anything below fails.
-        if let currentData = try? encodedMeetings() {
-            try? currentData.write(to: backupURL, options: .atomic)
+    func restorePreparedBackup(_ preparedRestore: PreparedBackupRestore) async throws {
+        // Commit the current in-memory state first. The persistence writer then
+        // preserves it as the rollback file when the restored library is saved.
+        await flushPersistence()
+        guard !lastSaveFailed else {
+            throw BackupError.invalidContents("the current library could not be protected before restore")
         }
 
-        try replaceRecordingFiles(with: package.audioFiles)
+        try await BackupArchiveService.shared.installRecordingFiles(from: preparedRestore)
 
-        for meeting in meetings {
+        // Nothing from the replaced library should finish into the restored
+        // one after the atomic audio swap.
+        await MeetingProcessingCoordinator.shared.discardAll()
+        aiProcessingTasks.values.forEach { $0.cancel() }
+        aiProcessingTasks.removeAll()
+        aiProcessingRunIDs.removeAll()
+        aiProcessingIDs.removeAll()
+        regenTask?.cancel()
+        regenTask = nil
+        derivedMigrationTask?.cancel()
+        derivedMigrationTask = nil
+        retentionTask?.cancel()
+        retentionTask = nil
+        retentionRecalculationTask?.cancel()
+        retentionRecalculationTask = nil
+
+        // Capture any completion that landed while audio was staged so the
+        // rollback file represents the latest pre-restore library.
+        await flushPersistence()
+        let currentMeetings = meetings
+        for meeting in currentMeetings {
             cancelReminders(for: meeting)
         }
 
+        let package = preparedRestore.package
         forceIndexRebuildAfterMutation = true
         let restoredAudioFileNames = Set(package.audioFiles.map(\.fileName))
         meetings = package.meetings.map { restored in
@@ -1612,91 +1639,11 @@ final class MeetingStore {
             return normalized
         }
 
-        for index in meetings.indices {
-            refreshSummariesIfNeeded(at: index)
-        }
-    }
-
-    private func decodedBackupPackage(from data: Data) throws -> ScribeflowBackupPackage {
-        guard data.count <= 750_000_000 else { throw BackupError.tooLarge }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let package: ScribeflowBackupPackage
-        do {
-            package = try decoder.decode(ScribeflowBackupPackage.self, from: data)
-        } catch {
-            throw BackupError.unreadable
-        }
-        // Refuse a backup written by a future schema rather than silently
-        // mis-reading it.
-        guard package.schemaVersion <= Self.currentSchemaVersion else {
-            throw BackupError.newerVersion(package.schemaVersion)
-        }
-        guard package.schemaVersion > 0 else {
-            throw BackupError.invalidContents("invalid schema version")
-        }
-        guard Set(package.meetings.map(\.id)).count == package.meetings.count else {
-            throw BackupError.invalidContents("duplicate note identifiers")
-        }
-        let audioFileNames = package.audioFiles.map(\.fileName)
-        guard Set(audioFileNames).count == audioFileNames.count else {
-            throw BackupError.invalidContents("duplicate audio files")
-        }
-        guard audioFileNames.allSatisfy(Self.isSafeBackupAudioFileName) else {
-            throw BackupError.invalidContents("unsafe audio file name")
-        }
-        return package
-    }
-
-    private static func isSafeBackupAudioFileName(_ fileName: String) -> Bool {
-        !fileName.isEmpty
-            && URL(fileURLWithPath: fileName).lastPathComponent == fileName
-            && !fileName.contains("..")
-    }
-
-    private func replaceRecordingFiles(with audioFiles: [ScribeflowBackupAudioFile]) throws {
-        let fileManager = FileManager.default
-        let destination = RecordingFileStore.directoryURL
-        let parent = destination.deletingLastPathComponent()
-        try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
-
-        let staging = parent.appendingPathComponent("Recordings.restore-\(UUID().uuidString)", isDirectory: true)
-        let rollback = parent.appendingPathComponent("Recordings.rollback-\(UUID().uuidString)", isDirectory: true)
-        try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
-
-        do {
-            for audioFile in audioFiles {
-                let url = staging.appendingPathComponent(audioFile.fileName, isDirectory: false)
-                try audioFile.data.write(to: url, options: [.atomic])
-                RecordingFileStore.protectFile(at: url)
-            }
-
-            let hadExistingDirectory = fileManager.fileExists(atPath: destination.path)
-            if hadExistingDirectory {
-                try fileManager.moveItem(at: destination, to: rollback)
-            }
-
-            do {
-                try fileManager.moveItem(at: staging, to: destination)
-                try? fileManager.removeItem(at: rollback)
-                try RecordingFileStore.ensureDirectory()
-            } catch {
-                try? fileManager.removeItem(at: destination)
-                if hadExistingDirectory {
-                    try? fileManager.moveItem(at: rollback, to: destination)
-                }
-                throw error
-            }
-        } catch {
-            try? fileManager.removeItem(at: staging)
-            throw error
-        }
-    }
-
-    private func encodedMeetings() throws -> Data {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        return try encoder.encode(meetings)
+        let rowsNeedingMigration = meetings
+            .filter(Self.needsDerivedDataRefresh)
+            .map(\.id)
+        await flushPersistence()
+        scheduleDerivedDataMigration(for: rowsNeedingMigration)
     }
 
     func deleteAllUserData() async {
@@ -1850,7 +1797,7 @@ final class MeetingStore {
     /// files to `finalizeDelete(_:)`. Returns the snapshot + original index so
     /// the caller can offer Undo and put it back in place.
     func softDeleteMeeting(_ id: Meeting.ID) -> (Meeting, Int)? {
-        guard let idx = meetings.firstIndex(where: { $0.id == id }) else { return nil }
+        guard let idx = index(for: id) else { return nil }
         MeetingProcessingCoordinator.shared.suspend(id)
         aiProcessingTasks[id]?.cancel()
         aiProcessingTasks[id] = nil
@@ -2181,7 +2128,7 @@ final class MeetingStore {
     }
 
     func deleteTranscriptLine(for meetingID: Meeting.ID, lineID: TranscriptLine.ID) {
-        guard let index = meetings.firstIndex(where: { $0.id == meetingID }) else { return }
+        guard let index = index(for: meetingID) else { return }
         let oldCount = meetings[index].transcript.count
         meetings[index].transcript.removeAll { $0.id == lineID }
 
@@ -2481,7 +2428,7 @@ final class MeetingStore {
             calendarStartDate: recovery.calendarStartDate,
             calendarEndDate: recovery.calendarEndDate
         )
-        if let index = meetings.firstIndex(where: { $0.id == id }),
+        if let index = index(for: id),
            !pendingNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             meetings[index].rawNotes = pendingNotes
         }
@@ -2489,7 +2436,7 @@ final class MeetingStore {
     }
 
     func updateMeetingProcessingStage(_ stage: String, for id: Meeting.ID) {
-        guard let index = meetings.firstIndex(where: { $0.id == id }),
+        guard let index = index(for: id),
               meetings[index].status == .processing
         else { return }
         meetings[index].stage = stage
@@ -2502,7 +2449,7 @@ final class MeetingStore {
         pendingNotes: String,
         moments: [String]
     ) async -> Bool {
-        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return false }
+        guard let index = index(for: id) else { return false }
 
         let normalizedSegments = SpeakerIdentityResolver.normalizedSegments(result.segments)
         let transcriptLines: [TranscriptLine]
@@ -2536,7 +2483,7 @@ final class MeetingStore {
         refreshSummariesIfNeeded(at: index)
 
         _ = await rewriteMeetingNotes(for: id)
-        guard let finalIndex = meetings.firstIndex(where: { $0.id == id }) else { return false }
+        guard let finalIndex = self.index(for: id) else { return false }
 
         meetings[finalIndex].status = .ready
         let speakerCount = result.diarizationAvailable
@@ -2554,7 +2501,7 @@ final class MeetingStore {
     }
 
     func finishPendingMeetingWithLiveTranscript(_ id: Meeting.ID, message: String) {
-        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = index(for: id) else { return }
         meetings[index].status = .ready
         meetings[index].stage = message
         refreshSummariesIfNeeded(at: index)
@@ -2562,7 +2509,7 @@ final class MeetingStore {
     }
 
     func updatePendingLiveTranscript(_ id: Meeting.ID, transcript: String) {
-        guard let index = meetings.firstIndex(where: { $0.id == id }),
+        guard let index = index(for: id),
               meetings[index].status == .processing
         else { return }
         let cleaned = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2582,7 +2529,7 @@ final class MeetingStore {
         recovery: PendingMeetingRecoveryPayload?,
         message: String
     ) -> Bool {
-        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return false }
+        guard let index = index(for: id) else { return false }
         let fileName = RecordingFileStore.fileName(for: recordingURL)
         if !meetings[index].audioRecordings.contains(where: { $0.fileName == fileName }) {
             meetings[index].audioRecordings.append(AudioRecordingAttachment(
@@ -2638,7 +2585,9 @@ final class MeetingStore {
             audioRecordings: [recording]
         )
 
-        _ = await rewriteMeetingNotes(for: meetingID)
+        Task { @MainActor [weak self] in
+            _ = await self?.rewriteMeetingNotes(for: meetingID)
+        }
         return meetingID
     }
 
@@ -2647,7 +2596,7 @@ final class MeetingStore {
         to meetingID: Meeting.ID,
         appendTranscriptToNotes: Bool
     ) {
-        guard let index = meetings.firstIndex(where: { $0.id == meetingID }) else { return }
+        guard let index = index(for: meetingID) else { return }
         if !meetings[index].audioRecordings.contains(where: { $0.id == recording.id }) {
             meetings[index].audioRecordings.append(recording)
         }
@@ -2690,7 +2639,7 @@ final class MeetingStore {
     func updateRecordingTitle(_ title: String, recordingID: AudioRecordingAttachment.ID, in meetingID: Meeting.ID) {
         let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty,
-              let meetingIndex = meetings.firstIndex(where: { $0.id == meetingID }),
+              let meetingIndex = index(for: meetingID),
               let recordingIndex = meetings[meetingIndex].audioRecordings.firstIndex(where: { $0.id == recordingID })
         else { return }
 
@@ -2698,7 +2647,7 @@ final class MeetingStore {
     }
 
     func deleteRecording(_ recordingID: AudioRecordingAttachment.ID, from meetingID: Meeting.ID) {
-        guard let meetingIndex = meetings.firstIndex(where: { $0.id == meetingID }),
+        guard let meetingIndex = index(for: meetingID),
               let recording = meetings[meetingIndex].audioRecordings.first(where: { $0.id == recordingID })
         else { return }
 
@@ -2750,7 +2699,7 @@ final class MeetingStore {
         recordingID: AudioRecordingAttachment.ID,
         meetingID: Meeting.ID
     ) -> Bool {
-        guard let meetingIndex = meetings.firstIndex(where: { $0.id == meetingID }),
+        guard let meetingIndex = index(for: meetingID),
               let recordingIndex = meetings[meetingIndex].audioRecordings.firstIndex(where: { $0.id == recordingID })
         else { return false }
 
@@ -2816,7 +2765,7 @@ final class MeetingStore {
     }
 
     func rewriteMeetingNotes(for id: Meeting.ID, style: NoteRewriteStyle = .concise) async -> String {
-        guard let index = meetings.firstIndex(where: { $0.id == id }) else {
+        guard let index = index(for: id) else {
             return "Meeting not found."
         }
 
@@ -2831,7 +2780,7 @@ final class MeetingStore {
             purpose: meeting.purpose.kind
         )
 
-        guard let currentIndex = meetings.firstIndex(where: { $0.id == id }) else {
+        guard let currentIndex = self.index(for: id) else {
             return "Meeting was removed before note polishing finished."
         }
         let current = meetings[currentIndex]
@@ -2901,7 +2850,7 @@ final class MeetingStore {
                 let result = try await AppleIntelligenceBriefExtractor.extract(meeting: meeting)
                 try Task.checkCancellation()
                 guard aiProcessingRunIDs[id] == runID else { return }
-                guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+                guard let index = index(for: id) else { return }
                 var brief = result.brief
                 let inferredPurpose = brief.capturePurpose
                     ?? MeetingPurposeClassifier.standard.classify(meeting).kind
@@ -2944,11 +2893,11 @@ final class MeetingStore {
     }
 
     private func save() {
-        let snapshot = meetings
         saveTask?.cancel()
         saveTask = Task(priority: .utility) { [weak self] in
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled, let self else { return }
+            let snapshot = self.meetings
             await self.persist(snapshot)
         }
     }
@@ -3406,11 +3355,6 @@ final class MeetingStore {
             .first(where: { !$0.isEmpty })
     }
 
-    private func fileSize(at url: URL) -> Int {
-        let values = try? url.resourceValues(forKeys: [.fileSizeKey])
-        return values?.fileSize ?? 0
-    }
-
     private func mergedNotesWithMoments(_ notes: String, moments: [String]) -> String {
         guard !moments.isEmpty else { return notes }
 
@@ -3436,7 +3380,7 @@ final class MeetingStore {
 
     private func appendMoments(to id: Meeting.ID, moments: [String]) {
         guard !moments.isEmpty else { return }
-        guard let index = meetings.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = index(for: id) else { return }
 
         let existingNotes = meetings[index].rawNotes
         meetings[index].rawNotes = mergedNotesWithMoments(existingNotes, moments: moments)

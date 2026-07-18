@@ -80,7 +80,7 @@ overwritten and verifies downloaded data with SHA-256.
 
 ## Continuous Integration
 
-`.github/workflows/ios-build.yml` compiles the unsigned simulator app on pushes
-to `main` and pull requests. It intentionally does not run tests or screenshots.
-Add those jobs only when the project owner requests them and the CI environment
-has the required simulator and service configuration.
+`.github/workflows/ios-build.yml` compiles unsigned Debug and Release simulator
+apps and runs the core test target on pushes to `main` and pull requests. It
+does not capture screenshots or run device-only microphone, notification,
+accessibility, performance, archive, or restore certification.

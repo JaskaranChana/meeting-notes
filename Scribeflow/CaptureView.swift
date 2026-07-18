@@ -1012,42 +1012,19 @@ struct CaptureView: View {
     @ViewBuilder
     private var recordPanelBackground: some View {
         ZStack {
-            // Near-black stage
             Color(red: 0.059, green: 0.067, blue: 0.082) // #0F1115
 
-            // Cinematic aurora — two soft color fields slowly drifting in
-            // opposition for depth that never sits still.
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [AppPalette.accent.opacity(0.30), .clear],
-                        center: .center, startRadius: 0, endRadius: 150
-                    )
-                )
-                .frame(width: 300, height: 300)
-                .blur(radius: 44)
-                .offset(x: 50, y: -110)
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [stageTint.opacity(0.18), .clear],
-                        center: .center, startRadius: 0, endRadius: 130
-                    )
-                )
-                .frame(width: 240, height: 240)
-                .blur(radius: 46)
-                .offset(x: -40, y: 130)
-                .animation(AppMotion.smooth, value: stageTint)
+            LinearGradient(
+                colors: [
+                    AppPalette.accent.opacity(coordinator.isRecording ? 0.16 : 0.10),
+                    .clear,
+                    AppPalette.coral.opacity(coordinator.isRecording ? 0.06 : 0.02)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .animation(AppMotion.smooth, value: coordinator.isRecording)
 
-            // Voice-reactive halo — brightens and swells with the live input
-            // level so the stage breathes with the speaker. Isolated leaf so
-            // the level updates don't re-render the whole stage background.
-            if coordinator.isRecording {
-                ReactiveHalo(coordinator: coordinator)
-            }
-
-            // Edge vignette — focuses the eye on the timer/controls and reads
-            // as a finished, cinematic surface.
             RadialGradient(
                 colors: [.clear, .black.opacity(0.28)],
                 center: .center, startRadius: 130, endRadius: 360
@@ -1549,25 +1526,6 @@ private struct LiveWaveform: View {
             bars: 36,
             maxHeight: 36
         )
-    }
-}
-
-/// Voice-reactive background halo, isolated from the stage so level updates
-/// don't re-render the whole panel background.
-private struct ReactiveHalo: View {
-    let coordinator: LiveMeetingCoordinator
-    var body: some View {
-        Circle()
-            .fill(
-                RadialGradient(
-                    colors: [CaptureView.captureGreen.opacity(0.08 + coordinator.inputLevel * 0.30), .clear],
-                    center: .center, startRadius: 0, endRadius: 150
-                )
-            )
-            .frame(width: 300, height: 260)
-            .scaleEffect(0.85 + coordinator.inputLevel * 0.45)
-            .blur(radius: 26)
-            .offset(y: -120)
     }
 }
 

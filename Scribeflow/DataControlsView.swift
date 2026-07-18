@@ -20,18 +20,20 @@ struct DataControlsView: View {
     @State private var resultMessage: String?
     @State private var largeFileThresholdMB = 25.0
     @State private var pendingCleanupAction: StorageCleanupAction?
-    @State private var pendingRestoreData: Data?
-    @State private var pendingRestorePreview: ScribeflowBackupPreview?
+    @State private var pendingRestore: PreparedBackupRestore?
+    @State private var storageSnapshot: StorageSnapshot?
     @State private var currentExportIncludesAudio = false
     @State private var cloudAccountState: CloudBackupAccountState = .unknown
     @State private var isUploadingCloudBackup = false
     @State private var isDownloadingCloudBackup = false
     @State private var isPreparingExport = false
+    @State private var isPreparingRestore = false
+    @State private var isRestoring = false
     @State private var isCreatingAutomaticBackup = false
     @State private var automaticBackups: [AutomaticBackupSnapshot] = []
 
     private var snapshot: StorageSnapshot {
-        store.storageSnapshot()
+        storageSnapshot ?? .empty
     }
 
     private var lastBackupDate: Date? {
@@ -69,7 +71,14 @@ struct DataControlsView: View {
     }
 
     private var cloudActionsDisabled: Bool {
-        !cloudAccountState.isAvailable || isUploadingCloudBackup || isDownloadingCloudBackup
+        !cloudAccountState.isAvailable
+            || isUploadingCloudBackup
+            || isDownloadingCloudBackup
+            || isRestoreBusy
+    }
+
+    private var isRestoreBusy: Bool {
+        isPreparingRestore || isRestoring
     }
 
     private var latestAutomaticBackup: AutomaticBackupSnapshot? {
@@ -77,10 +86,10 @@ struct DataControlsView: View {
     }
 
     private var restoreConfirmationMessage: String {
-        guard let pendingRestorePreview else {
+        guard let preview = pendingRestore?.preview else {
             return "This will replace the local Scribeflow library on this device."
         }
-        return "Backup from \(pendingRestorePreview.exportedAtLabel) contains \(pendingRestorePreview.summary). Restoring replaces the local Scribeflow library on this device."
+        return "Backup from \(preview.exportedAtLabel) contains \(preview.summary). Restoring replaces the local Scribeflow library on this device."
     }
 
     var body: some View {
@@ -102,6 +111,7 @@ struct DataControlsView: View {
                 .padding(.top, 18)
                 .padding(.bottom, 36)
             }
+            .disabled(isRestoreBusy)
             .background(AppPalette.background.ignoresSafeArea())
             .navigationTitle("Storage & backup")
             .navigationBarTitleDisplayMode(.inline)
@@ -110,6 +120,7 @@ struct DataControlsView: View {
                     Button("Done") { dismiss() }
                         .fontWeight(.semibold)
                         .tint(AppPalette.ink)
+                        .disabled(isRestoreBusy)
                 }
             }
             .fileExporter(
@@ -175,19 +186,44 @@ struct DataControlsView: View {
                     confirmRestore()
                 }
                 Button("Cancel", role: .cancel) {
-                    pendingRestoreData = nil
-                    pendingRestorePreview = nil
+                    pendingRestore = nil
                 }
             } message: {
                 Text(restoreConfirmationMessage)
             }
         }
         .modifier(ScribeflowChrome())
+        .interactiveDismissDisabled(isRestoreBusy)
+        .overlay {
+            if isRestoreBusy {
+                ZStack {
+                    AppPalette.background.opacity(0.20)
+                        .ignoresSafeArea()
+                    ProgressView(isRestoring ? "Restoring backup" : "Checking backup")
+                        .font(.subheadline.weight(.semibold))
+                        .tint(AppPalette.accent)
+                        .padding(.horizontal, 22)
+                        .padding(.vertical, 18)
+                        .background(
+                            .regularMaterial,
+                            in: RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
+                        )
+                }
+                .transition(.opacity)
+            }
+        }
         .task {
             if ScribeflowCloudBackupService.isConfigured {
                 await refreshCloudAccountState()
             }
             await refreshAutomaticBackups()
+        }
+        .task(id: store.revision) {
+            if storageSnapshot != nil {
+                try? await Task.sleep(for: .milliseconds(350))
+            }
+            guard !Task.isCancelled else { return }
+            await refreshStorageSnapshot()
         }
         .onChange(of: automaticBackupsEnabled) { _, isEnabled in
             guard isEnabled else { return }
@@ -359,9 +395,24 @@ struct DataControlsView: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 HStack(spacing: 10) {
-                    backupAction("Notes only", icon: "doc.text", action: { exportBackup(includeAudio: false) })
-                    backupAction("Full copy", icon: "externaldrive.fill", action: { exportBackup(includeAudio: true) })
-                    backupAction("Restore", icon: "arrow.counterclockwise", action: { showingImporter = true })
+                    backupAction(
+                        "Notes only",
+                        icon: "doc.text",
+                        isDisabled: isPreparingExport || isRestoreBusy,
+                        action: { exportBackup(includeAudio: false) }
+                    )
+                    backupAction(
+                        "Full copy",
+                        icon: "externaldrive.fill",
+                        isDisabled: isPreparingExport || isRestoreBusy,
+                        action: { exportBackup(includeAudio: true) }
+                    )
+                    backupAction(
+                        isPreparingRestore ? "Checking" : "Restore",
+                        icon: "arrow.counterclockwise",
+                        isDisabled: isPreparingExport || isRestoreBusy,
+                        action: { showingImporter = true }
+                    )
                 }
             }
         }
@@ -425,7 +476,7 @@ struct DataControlsView: View {
                     }
                     .buttonStyle(.bordered)
                     .tint(AppPalette.accent)
-                    .disabled(latestAutomaticBackup == nil)
+                    .disabled(latestAutomaticBackup == nil || isRestoreBusy)
                 }
             }
         }
@@ -457,6 +508,7 @@ struct DataControlsView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(AppPalette.accent)
+            .disabled(isRestoreBusy)
             .accessibilityLabel("Restore snapshot from \(backup.createdAt.formatted(date: .abbreviated, time: .shortened))")
         }
         .padding(.vertical, 9)
@@ -562,7 +614,7 @@ struct DataControlsView: View {
                 EmptyStateCard(title: "No local audio", subtitle: "Voice recordings you save will appear here with file sizes.")
             } else {
                 VStack(spacing: 10) {
-                    ForEach(snapshot.recordings.sorted { $0.sizeBytes > $1.sizeBytes }) { item in
+                    ForEach(snapshot.recordings) { item in
                         recordingStorageRow(item)
                     }
                 }
@@ -601,15 +653,20 @@ struct DataControlsView: View {
         }
     }
 
-    private func backupAction(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+    private func backupAction(
+        _ title: String,
+        icon: String,
+        isDisabled: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
             VStack(spacing: 7) {
                 Image(systemName: icon)
                     .font(.subheadline.weight(.medium))
-                    .foregroundStyle(AppPalette.accent)
+                    .foregroundStyle(isDisabled ? AppPalette.tertiaryInk : AppPalette.accent)
                 Text(title)
                     .font(.caption2.weight(.medium))
-                    .foregroundStyle(AppPalette.secondaryInk)
+                    .foregroundStyle(isDisabled ? AppPalette.tertiaryInk : AppPalette.secondaryInk)
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
             }
@@ -619,6 +676,7 @@ struct DataControlsView: View {
             .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(AppPalette.border.opacity(0.25), lineWidth: 0.5))
         }
         .buttonStyle(PressScaleButtonStyle())
+        .disabled(isDisabled)
     }
 
     private func cloudAction(
@@ -716,9 +774,9 @@ struct DataControlsView: View {
             defer { isPreparingExport = false }
             do {
                 currentExportIncludesAudio = includeAudio
-                let data = try await store.makeBackupData(includeAudio: includeAudio)
+                let backup = try await store.makeBackup(includeAudio: includeAudio)
                 guard !Task.isCancelled else { return }
-                backupDocument = ScribeflowBackupDocument(data: data)
+                backupDocument = ScribeflowBackupDocument(data: backup.data)
                 showingExporter = true
             } catch {
                 resultMessage = "Backup failed: \(error.localizedDescription)"
@@ -750,11 +808,17 @@ struct DataControlsView: View {
     }
 
     private func prepareAutomaticRestore(_ backup: AutomaticBackupSnapshot) {
+        guard !isRestoreBusy else { return }
+        isPreparingRestore = true
+        resultMessage = "Checking backup..."
         Task { @MainActor in
+            defer { isPreparingRestore = false }
             do {
                 let data = try await store.automaticBackupData(for: backup)
-                pendingRestorePreview = try store.backupPreview(from: data)
-                pendingRestoreData = data
+                pendingRestore = try await BackupArchiveService.shared.prepareRestore(
+                    from: data,
+                    supportedSchemaVersion: MeetingStore.currentSchemaVersion
+                )
                 showingRestoreConfirmation = true
             } catch {
                 resultMessage = "Restore failed: \(error.localizedDescription)"
@@ -779,11 +843,10 @@ struct DataControlsView: View {
             defer { isUploadingCloudBackup = false }
 
             do {
-                let data = try await store.makeBackupData(includeAudio: includeAudio)
-                let preview = try store.backupPreview(from: data)
+                let backup = try await store.makeBackup(includeAudio: includeAudio)
                 let receipt = try await ScribeflowCloudBackupService.upload(
-                    data: data,
-                    preview: preview,
+                    data: backup.data,
+                    preview: backup.preview,
                     includesAudio: includeAudio
                 )
                 lastCloudBackupAt = receipt.exportedAt.timeIntervalSince1970
@@ -804,12 +867,16 @@ struct DataControlsView: View {
             }
 
             isDownloadingCloudBackup = true
+            isPreparingRestore = true
             defer { isDownloadingCloudBackup = false }
+            defer { isPreparingRestore = false }
 
             do {
                 let cloudBackup = try await ScribeflowCloudBackupService.download()
-                pendingRestorePreview = try store.backupPreview(from: cloudBackup.data)
-                pendingRestoreData = cloudBackup.data
+                pendingRestore = try await BackupArchiveService.shared.prepareRestore(
+                    from: cloudBackup.data,
+                    supportedSchemaVersion: MeetingStore.currentSchemaVersion
+                )
                 resultMessage = "Downloaded iCloud backup: \(cloudBackup.receipt.summary)."
                 showingRestoreConfirmation = true
             } catch {
@@ -828,45 +895,63 @@ struct DataControlsView: View {
     }
 
     private func restore(from result: Result<URL, Error>) {
-        do {
-            let url = try result.get()
-            let hasAccess = url.startAccessingSecurityScopedResource()
-            defer {
-                if hasAccess {
-                    url.stopAccessingSecurityScopedResource()
+        guard !isRestoreBusy else { return }
+        isPreparingRestore = true
+        resultMessage = "Checking backup..."
+
+        Task { @MainActor in
+            defer { isPreparingRestore = false }
+            do {
+                let url = try result.get()
+                let hasAccess = url.startAccessingSecurityScopedResource()
+                defer {
+                    if hasAccess {
+                        url.stopAccessingSecurityScopedResource()
+                    }
                 }
+                pendingRestore = try await BackupArchiveService.shared.prepareRestore(
+                    from: url,
+                    supportedSchemaVersion: MeetingStore.currentSchemaVersion
+                )
+                showingRestoreConfirmation = true
+            } catch {
+                resultMessage = "Restore failed: \(error.localizedDescription)"
             }
-            let values = try url.resourceValues(forKeys: [.fileSizeKey])
-            if let fileSize = values.fileSize, fileSize > 750_000_000 {
-                throw MeetingStore.BackupError.tooLarge
-            }
-            let data = try Data(contentsOf: url, options: [.mappedIfSafe])
-            pendingRestorePreview = try store.backupPreview(from: data)
-            pendingRestoreData = data
-            showingRestoreConfirmation = true
-        } catch {
-            resultMessage = "Restore failed: \(error.localizedDescription)"
         }
     }
 
     private func confirmRestore() {
-        guard let pendingRestoreData else {
+        guard !isRestoreBusy, let pendingRestore else {
             resultMessage = "Restore failed: no backup file was loaded."
             return
         }
 
-        do {
-            try store.restoreBackupData(pendingRestoreData)
-            resultMessage = pendingRestorePreview.map {
-                "Restored \($0.summary) from backup."
-            } ?? "Backup restored."
-            Task { await refreshAutomaticBackups() }
-        } catch {
-            resultMessage = "Restore failed: \(error.localizedDescription)"
-        }
+        let preview = pendingRestore.preview
+        isRestoring = true
+        resultMessage = "Restoring \(preview.summary)..."
 
-        self.pendingRestoreData = nil
-        pendingRestorePreview = nil
+        Task { @MainActor in
+            defer {
+                isRestoring = false
+                self.pendingRestore = nil
+            }
+            do {
+                try await store.restorePreparedBackup(pendingRestore)
+                resultMessage = store.lastSaveFailed
+                    ? "Restored \(preview.summary), but the local save needs another attempt."
+                    : "Restored \(preview.summary) from backup."
+                await refreshAutomaticBackups()
+                await refreshStorageSnapshot()
+            } catch {
+                resultMessage = "Restore failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func refreshStorageSnapshot() async {
+        let refreshedSnapshot = await store.storageSnapshot()
+        guard !Task.isCancelled else { return }
+        storageSnapshot = refreshedSnapshot
     }
 }
 

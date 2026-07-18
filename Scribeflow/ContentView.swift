@@ -246,6 +246,7 @@ struct ContentView: View {
                         onSettingsTap: { showingSettings = true },
                         onAskTap: { activateRootTab(.ask) },
                         onTasksTap: { activateRootTab(.tasks) },
+                        onLibraryTap: { activateRootTab(.library) },
                         toast: $toast
                     )
                     .toolbar(.hidden, for: .tabBar)

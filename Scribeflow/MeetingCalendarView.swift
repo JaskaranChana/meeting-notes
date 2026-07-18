@@ -765,6 +765,8 @@ struct MeetingCalendarView: View {
     }
 
     private func createNote(on date: Date) {
+        let startDate = plannedStartDate(on: date)
+        let endDate = Calendar.current.date(byAdding: .minute, value: 30, to: startDate)
         let title = "Meeting · \(date.formatted(.dateTime.month(.abbreviated).day()))"
         let id = store.addMeeting(
             title: title,
@@ -772,14 +774,24 @@ struct MeetingCalendarView: View {
             attendees: ["You"],
             objective: "Planned from calendar view",
             notes: "- Agenda:\n- Decisions:\n- Risks:\n- Next steps:",
-            when: date,
+            when: startDate,
             stage: "Created from calendar",
             durationMinutes: 30,
-            audioRecordings: []
+            audioRecordings: [],
+            calendarStartDate: startDate,
+            calendarEndDate: endDate
         )
-        selectedMeetingID = id
+        openMeeting(id)
         HapticEngine.notify(.success)
         toast = ToastItem(message: "Note added for \(date.formatted(.dateTime.month(.abbreviated).day()))", icon: "square.and.pencil")
+    }
+
+    private func plannedStartDate(on date: Date) -> Date {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) {
+            return .now
+        }
+        return calendar.date(bySettingHour: 9, minute: 0, second: 0, of: date) ?? date
     }
 
     private func moveVisiblePeriod(by delta: Int) {

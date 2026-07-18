@@ -1,6 +1,6 @@
 # Scribeflow Professional iOS Product Audit
 
-Audit date: 15 July 2026  
+Audit date: 17 July 2026
 Target reviewed: Scribeflow 1.0 (build 2), iPhone, iOS 17+  
 Original audit decision: **NO-GO before repository remediation**  
 Current repository decision: **GO for signed device certification; NO-GO for public submission until the external release gates below are complete**  
@@ -41,6 +41,64 @@ targeted strict-concurrency checking, and Debug-test plus Release-build CI.
 The audit's device, signing, legal, App Store Connect, and measured-performance
 gates remain intentionally open. No repository change can honestly certify
 those external conditions.
+
+### 17 July Static Re-Audit
+
+This pass concentrated on frequently repeated interactions rather than adding
+more product surface:
+
+- Persistence now snapshots the meeting library after its debounce window
+  instead of retaining a full array copy on every edit.
+- ID lookups validate and repair their index while note editing and delayed
+  regeneration use the constant-time path.
+- Retention deadline calculation is coalesced instead of rescanning the full
+  library and replacing its timer on every meeting mutation.
+- Standalone voice-note Save returns after the durable meeting is created;
+  optional note rewriting continues in the background.
+- The live capture stage and Today hero no longer use large blurred decorative
+  layers in always-visible surfaces.
+- Calendar-created notes receive a useful start and end time, retain calendar
+  context, and open immediately.
+- Today routes pinned and recent "View all" actions to Library, while open-loop
+  actions continue to route to Tasks.
+- Meeting Tasks no longer repeat extracted follow-ups when the same items are
+  already represented by stored commitments.
+- Storage totals and recording sizes are computed by an actor and cached in
+  view state; opening or redrawing Data Controls no longer performs synchronous
+  file-system reads from `body`.
+- Backup export returns its encoded data and preview together, while restore
+  decodes and validates the archive once, off the main actor, with a 128 MB
+  package ceiling and the same 64 MB embedded-audio ceiling used by export.
+- Restored audio is installed through a staged atomic swap with rollback.
+  Before replacing the library, Scribeflow durably flushes the current state,
+  cancels work owned by the old library, removes stale reminder identifiers,
+  and then persists the restored state before rebuilding derived data.
+- The restore UI remains dismiss-safe, reports preparation and installation
+  progress, and debounces storage refreshes after library mutations.
+- Root meeting mutations, transcript recovery, note polishing, and AI
+  completions now use the store's validated constant-time ID index instead of
+  repeatedly scanning the complete library.
+- Derived-data migration only visits stale rows and uses the same indexed
+  lookup, avoiding quadratic launch work as a library grows.
+- Main and recovery JSON files use mapped reads where the platform can provide
+  them, reducing unnecessary copy pressure for larger libraries.
+
+The highest remaining performance risk is architectural: launch still decodes
+a whole-library JSON document before the first usable store is available.
+Restore preparation and file installation are now actor-isolated, bounded, and
+transactional, but the eventual scalability project remains record-level
+persistence with a staged migration and paged queries. That is a storage
+architecture change, not a safe last-minute release tweak.
+
+The largest source files also remain maintainability risks. Splitting them
+should follow feature boundaries already documented in `Scribeflow/SOURCE_MAP.md`
+and should be protected by the existing characterization tests.
+
+The final compile-only Debug simulator build succeeded for arm64 and x86_64.
+This re-audit did not run tests, screenshots, Instruments, or physical-device
+sessions, following the requested verification scope. Its performance
+conclusions remain static code assessments until the device certification
+checklist is completed.
 
 ## Original Audit Verdict
 
