@@ -9,7 +9,7 @@ enum RecordingCompliance {
 
     static let localAudioStorage = "Voice notes are stored in the app container with iOS file protection and are excluded from device backups. Delete a note or recording to remove its local audio file."
 
-    static let speechRecognition = "Transcription uses Apple's Speech framework when permission is granted. Availability and accuracy depend on language, device, and system conditions."
+    static let speechRecognition = "Transcription prefers on-device recognition. If Apple Speech fallback is enabled and local recognition is unavailable, Apple may process speech under its service terms."
 
-    static let releasePrivacySummary = "Scribeflow does not track users or sell data. Audio stays local unless you export it or explicitly enable a configured remote transcription service."
+    static let releasePrivacySummary = "Scribeflow does not track users or sell data. Scribeflow remote transcription is opt-in; Apple Speech fallback is controlled separately below."
 }

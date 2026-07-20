@@ -263,9 +263,7 @@ struct DiagnosticsAndReadinessView: View {
                     readinessSection
                     diagnosticsSection
                 }
-                .padding(20)
-                .padding(.bottom, 28)
-                .readingWidth()
+                .appScreenContent(top: AppSpacing.lg, bottom: AppLayout.sheetBottomPadding)
             }
             .background(AppPalette.background.ignoresSafeArea())
             .navigationTitle(AppStrings.Screen.appHealth)

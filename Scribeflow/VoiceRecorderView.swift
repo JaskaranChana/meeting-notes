@@ -11,6 +11,7 @@ struct VoiceRecorderView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Binding var selectedMeetingID: Meeting.ID?
     let presentationMode: VoiceRecorderPresentationMode
 
@@ -38,9 +39,7 @@ struct VoiceRecorderView: View {
                     recordingSafetyCard
                     notesAndTranscriptCard
                 }
-                .padding(.horizontal, 20)
-                .padding(.top, 16)
-                .padding(.bottom, 112)
+                .appScreenContent(top: AppSpacing.md, bottom: AppSpacing.xl)
             }
             .scrollDismissesKeyboard(.interactively)
             .background(AppPalette.background.ignoresSafeArea())
@@ -51,13 +50,6 @@ struct VoiceRecorderView: View {
                     Button("Close") {
                         close()
                     }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(saveButtonTitle) {
-                        save()
-                    }
-                    .fontWeight(.semibold)
-                    .disabled(!viewModel.canSave || viewModel.phase == .saving)
                 }
             }
             .safeAreaInset(edge: .bottom) {
@@ -97,6 +89,11 @@ struct VoiceRecorderView: View {
             }
         }
         .modifier(ScribeflowChrome())
+        .interactiveDismissDisabled(
+            viewModel.phase == .recording
+                || viewModel.phase == .paused
+                || viewModel.phase == .saving
+        )
     }
 
     private var recorderHero: some View {
@@ -191,8 +188,8 @@ struct VoiceRecorderView: View {
             }
         }
         .padding(16)
-        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(AppPalette.border.opacity(0.7)))
+        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: AppRadius.xl, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: AppRadius.xl, style: .continuous).strokeBorder(AppPalette.border.opacity(0.7)))
     }
 
     private var recordingControls: some View {
@@ -201,55 +198,68 @@ struct VoiceRecorderView: View {
                 VoiceRecordingLevelBars(viewModel: viewModel)
                     .frame(maxWidth: .infinity, alignment: .center)
 
-                HStack(spacing: 12) {
-                    if viewModel.phase == .recording {
-                        Button {
-                            viewModel.pause()
-                        } label: {
-                            controlLabel("Pause", icon: "pause.fill", tint: AppPalette.gold)
+                Group {
+                    if dynamicTypeSize.isAccessibilitySize {
+                        VStack(spacing: 12) {
+                            recorderControlButtons
                         }
-                        .buttonStyle(.plain)
-
-                        Button {
-                            Task { await viewModel.stopAndTranscribe() }
-                        } label: {
-                            primaryControlLabel("Stop", icon: "stop.fill", tint: AppPalette.coral)
-                        }
-                        .buttonStyle(.plain)
-                    } else if viewModel.phase == .paused {
-                        Button {
-                            viewModel.resume()
-                        } label: {
-                            primaryControlLabel("Resume", icon: "play.fill", tint: AppPalette.accent)
-                        }
-                        .buttonStyle(.plain)
-
-                        Button {
-                            Task { await viewModel.stopAndTranscribe() }
-                        } label: {
-                            controlLabel("Finish", icon: "checkmark", tint: AppPalette.ink)
-                        }
-                        .buttonStyle(.plain)
-                    } else if viewModel.phase == .processing {
-                        ProgressView()
-                            .tint(AppPalette.accent)
-                        Text("Transcribing…")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(AppPalette.secondaryInk)
                     } else {
-                        Button {
-                            focusedField = nil
-                            Task { await viewModel.start() }
-                        } label: {
-                            primaryControlLabel(viewModel.completedRecording == nil ? "Record" : "Record again", icon: "mic.fill", tint: AppPalette.accent)
+                        HStack(spacing: 12) {
+                            recorderControlButtons
                         }
-                        .buttonStyle(.plain)
-                        .disabled(!viewModel.canRecord || viewModel.phase == .saving)
-                        .opacity(viewModel.canRecord ? 1 : 0.5)
                     }
                 }
             }
             .frame(maxWidth: .infinity)
+        }
+    }
+
+    @ViewBuilder
+    private var recorderControlButtons: some View {
+        if viewModel.phase == .recording {
+            Button {
+                viewModel.pause()
+            } label: {
+                controlLabel("Pause", icon: "pause.fill", tint: AppPalette.gold)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                Task { await viewModel.stopAndTranscribe() }
+            } label: {
+                primaryControlLabel("Stop", icon: "stop.fill", tint: AppPalette.coral)
+            }
+            .buttonStyle(.plain)
+        } else if viewModel.phase == .paused {
+            Button {
+                viewModel.resume()
+            } label: {
+                primaryControlLabel("Resume", icon: "play.fill", tint: AppPalette.accent)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                Task { await viewModel.stopAndTranscribe() }
+            } label: {
+                controlLabel("Finish", icon: "checkmark", tint: AppPalette.ink)
+            }
+            .buttonStyle(.plain)
+        } else if viewModel.phase == .processing {
+            ProgressView()
+                .tint(AppPalette.accent)
+            Text("Transcribing…")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(AppPalette.secondaryInk)
+        } else {
+            Button {
+                focusedField = nil
+                Task { await viewModel.start() }
+            } label: {
+                primaryControlLabel(viewModel.completedRecording == nil ? "Record" : "Record again", icon: "mic.fill", tint: AppPalette.accent)
+            }
+            .buttonStyle(.plain)
+            .disabled(!viewModel.canRecord || viewModel.phase == .saving)
+            .opacity(viewModel.canRecord ? 1 : 0.5)
         }
     }
 
@@ -364,7 +374,7 @@ struct VoiceRecorderView: View {
     }
 
     private var bottomBar: some View {
-        HStack(spacing: 10) {
+        AdaptiveActionStack(spacing: AppSpacing.sm) {
             Button { close() } label: {
                 Text("Cancel")
                     .font(.subheadline.weight(.medium))
@@ -395,6 +405,7 @@ struct VoiceRecorderView: View {
         .padding(.horizontal, 20)
         .padding(.top, 12)
         .padding(.bottom, 14)
+        .readingWidth()
         .background(.regularMaterial)
     }
 

@@ -96,6 +96,28 @@ struct WrappingHStack: Layout {
     }
 }
 
+/// Keeps groups of peer actions horizontal at normal text sizes and stacks
+/// them when accessibility text would otherwise force labels to truncate.
+struct AdaptiveActionStack<Content: View>: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    var spacing: CGFloat = AppSpacing.sm
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        Group {
+            if dynamicTypeSize.isAccessibilitySize {
+                VStack(spacing: spacing) {
+                    content
+                }
+            } else {
+                HStack(spacing: spacing) {
+                    content
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Empty / section components
 
 struct EmptyStateCard: View {
@@ -149,6 +171,7 @@ struct EmptyStateCard: View {
             RoundedRectangle(cornerRadius: AppRadius.xl, style: .continuous)
                 .strokeBorder(AppPalette.border.opacity(0.25), lineWidth: 0.5)
         )
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -159,10 +182,10 @@ struct SectionHeaderRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title)
-                .font(.system(.title2, design: .serif).weight(.semibold))
+                .font(AppType.section(.semibold))
                 .foregroundStyle(AppPalette.ink)
             Text(subtitle)
-                .font(.subheadline)
+                .font(AppType.caption)
                 .foregroundStyle(AppPalette.tertiaryInk)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -186,13 +209,13 @@ struct SurfaceCard<Content: View>: View {
             }
             content
         }
-        .padding(20)
+        .padding(AppSpacing.lg)
         .background(
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
+            RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
                 .fill(AppPalette.cardBackground)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
+            RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
                 .strokeBorder(AppPalette.border.opacity(0.28), lineWidth: 0.5)
                 .allowsHitTesting(false)
         )
@@ -307,10 +330,15 @@ struct MotionEntranceModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .opacity(active ? 1 : 0)
-            .offset(y: reduceMotion ? 0 : (active ? 0 : 12))
-            .scaleEffect(reduceMotion ? 1 : (active ? 1 : 0.97))
-            .animation(reduceMotion ? nil : animation, value: active)
+            .opacity(animatesEntrance ? (active ? 1 : 0) : 1)
+            .offset(y: animatesEntrance && !active ? 6 : 0)
+            .animation(animatesEntrance ? animation : nil, value: active)
+    }
+
+    /// Feed rows should be ready for interaction immediately. Only the first
+    /// three pieces of screen chrome receive a short entrance transition.
+    private var animatesEntrance: Bool {
+        !reduceMotion && step < 3
     }
 
     private var animation: Animation {
@@ -539,6 +567,7 @@ struct EditorialChip: View {
                 Capsule().strokeBorder(AppPalette.border, lineWidth: 1)
             }
         }
+        .accessibilityElement(children: .combine)
     }
 }
 

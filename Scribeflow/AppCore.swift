@@ -1202,8 +1202,18 @@ enum LocalRAG {
     /// Retrieves raw note and transcript chunks. Generated summaries are
     /// deliberately excluded so an AI claim can never become evidence for a
     /// later AI claim.
-    static func search(_ query: String, in meetings: [Meeting], limit: Int = 5) -> [RAGResult] {
-        search(query, in: makeIndex(from: meetings), limit: limit)
+    static func search(
+        _ query: String,
+        in meetings: [Meeting],
+        limit: Int = 5,
+        maxChunksPerMeeting: Int = 2
+    ) -> [RAGResult] {
+        search(
+            query,
+            in: makeIndex(from: meetings),
+            limit: limit,
+            maxChunksPerMeeting: maxChunksPerMeeting
+        )
     }
 
     static func makeIndex(from meetings: [Meeting]) -> Index {
@@ -1233,7 +1243,8 @@ enum LocalRAG {
         in index: Index,
         limit: Int = 5,
         allowedMeetingIDs: Set<Meeting.ID>? = nil,
-        includeTranscripts: Bool = true
+        includeTranscripts: Bool = true,
+        maxChunksPerMeeting: Int = 2
     ) -> [RAGResult] {
         let queryTokens = tokenize(query)
         guard !queryTokens.isEmpty, !index.documents.isEmpty else { return [] }
@@ -1275,7 +1286,9 @@ enum LocalRAG {
         var seenSourceText: Set<String> = []
         for candidate in scored.sorted(by: { $0.score > $1.score }) {
             guard selected.count < max(1, limit) else { break }
-            guard perMeetingCount[candidate.chunk.meetingID, default: 0] < 2 else { continue }
+            guard perMeetingCount[candidate.chunk.meetingID, default: 0] < max(1, maxChunksPerMeeting) else {
+                continue
+            }
             let fingerprint = sourceFingerprint(candidate.chunk.text)
             guard !fingerprint.isEmpty, seenSourceText.insert(fingerprint).inserted else { continue }
             selected.append(candidate)
@@ -1296,13 +1309,83 @@ enum LocalRAG {
         }
     }
 
+    /// Combines semantic matches with evenly distributed transcript coverage.
+    /// Generic prompts such as "write a recap" still see the beginning, middle,
+    /// and end of a long capture instead of only whichever lines rank first.
+    static func diverseSources(
+        for meeting: Meeting,
+        query: String,
+        limit: Int = 12
+    ) -> [RAGResult] {
+        let boundedLimit = max(1, limit)
+        let semanticLimit = max(3, boundedLimit - min(6, boundedLimit / 2))
+        var selected = search(
+            query,
+            in: [meeting],
+            limit: semanticLimit,
+            maxChunksPerMeeting: semanticLimit
+        )
+        var fingerprints = Set(selected.map { sourceFingerprint($0.snippet) })
+
+        let chunks = makeSourceChunks(for: meeting)
+        let authoredChunks = chunks.filter { $0.kind == .note }
+        for chunk in authoredChunks.prefix(2) where selected.count < boundedLimit {
+            let fingerprint = sourceFingerprint(chunk.text)
+            guard !fingerprint.isEmpty, fingerprints.insert(fingerprint).inserted else { continue }
+            selected.append(result(from: chunk, score: 0))
+        }
+
+        let transcriptChunks = chunks.filter {
+            $0.kind == .transcript || $0.kind == .audioTranscript
+        }
+        let remaining = boundedLimit - selected.count
+        if remaining > 0, !transcriptChunks.isEmpty {
+            let coverageCount = min(remaining, transcriptChunks.count)
+            let denominator = max(coverageCount - 1, 1)
+            for slot in 0..<coverageCount where selected.count < boundedLimit {
+                let progress = Double(slot) / Double(denominator)
+                let index = Int((progress * Double(transcriptChunks.count - 1)).rounded())
+                let chunk = transcriptChunks[index]
+                let fingerprint = sourceFingerprint(chunk.text)
+                guard !fingerprint.isEmpty, fingerprints.insert(fingerprint).inserted else { continue }
+                selected.append(result(from: chunk, score: 0))
+            }
+        }
+
+        return selected.prefix(boundedLimit).enumerated().map { offset, source in
+            RAGResult(
+                sourceID: "S\(offset + 1)",
+                meetingID: source.meetingID,
+                meetingTitle: source.meetingTitle,
+                kind: source.kind,
+                speaker: source.speaker,
+                lineIndex: source.lineIndex,
+                snippet: source.snippet,
+                score: source.score
+            )
+        }
+    }
+
+    private static func result(from chunk: SourceChunk, score: Double) -> RAGResult {
+        RAGResult(
+            sourceID: "",
+            meetingID: chunk.meetingID,
+            meetingTitle: chunk.meetingTitle,
+            kind: chunk.kind,
+            speaker: chunk.speaker,
+            lineIndex: chunk.lineIndex,
+            snippet: String(chunk.text.prefix(420)),
+            score: score
+        )
+    }
+
     private static func makeSourceChunks(for meeting: Meeting) -> [SourceChunk] {
         var chunks: [SourceChunk] = []
         let context = [meeting.title, meeting.objective]
             .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .joined(separator: " ")
 
-        let notes = meeting.rawNotes
+        let notes = meeting.trustedSourceNotes
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -1595,6 +1678,9 @@ final class AnalyticsLog {
     private let optInKey = "analyticsOptIn"
     private(set) var events: [AnalyticsEvent] = []
     private var saveTask: Task<Void, Never>?
+    private var initialLoadTask: Task<Void, Never>?
+    private var hasCompletedInitialLoad = false
+    private var shouldSaveAfterInitialLoad = false
 
     init() {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -1603,9 +1689,13 @@ final class AnalyticsLog {
         let folder = base.appendingPathComponent("Scribeflow", isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         self.fileURL = folder.appendingPathComponent("analytics.json")
-        load()
         if UserDefaults.standard.object(forKey: optInKey) == nil {
             UserDefaults.standard.set(false, forKey: optInKey)
+        }
+        if UserDefaults.standard.bool(forKey: optInKey) {
+            startInitialLoad()
+        } else {
+            hasCompletedInitialLoad = true
         }
     }
 
@@ -1613,7 +1703,11 @@ final class AnalyticsLog {
         get { UserDefaults.standard.bool(forKey: optInKey) }
         set {
             UserDefaults.standard.set(newValue, forKey: optInKey)
-            if !newValue { clear() }
+            if newValue {
+                hasCompletedInitialLoad = true
+            } else {
+                clear()
+            }
         }
     }
 
@@ -1623,21 +1717,59 @@ final class AnalyticsLog {
         events.append(event)
         // Cap log to 2,000 events so it stays bounded.
         if events.count > 2_000 { events.removeFirst(events.count - 2_000) }
-        save()
+        if hasCompletedInitialLoad {
+            save()
+        } else {
+            shouldSaveAfterInitialLoad = true
+        }
     }
 
     func clear() {
+        initialLoadTask?.cancel()
+        initialLoadTask = nil
         saveTask?.cancel()
         saveTask = nil
+        hasCompletedInitialLoad = true
+        shouldSaveAfterInitialLoad = false
         events.removeAll()
         try? FileManager.default.removeItem(at: fileURL)
     }
 
-    private func load() {
-        guard let data = try? Data(contentsOf: fileURL) else { return }
+    func loadedEvents() async -> [AnalyticsEvent] {
+        if let initialLoadTask {
+            await initialLoadTask.value
+        }
+        return events
+    }
+
+    private func startInitialLoad() {
+        let sourceURL = fileURL
+        initialLoadTask = Task { [weak self] in
+            let loadedEvents = await Task.detached(priority: .utility) {
+                Self.loadEvents(from: sourceURL)
+            }.value
+            guard !Task.isCancelled, let self else { return }
+
+            let pendingEvents = self.events
+            let loadedIDs = Set(loadedEvents.map(\.id))
+            self.events = loadedEvents + pendingEvents.filter { !loadedIDs.contains($0.id) }
+            if self.events.count > 2_000 {
+                self.events.removeFirst(self.events.count - 2_000)
+            }
+            self.hasCompletedInitialLoad = true
+            self.initialLoadTask = nil
+            if self.shouldSaveAfterInitialLoad {
+                self.shouldSaveAfterInitialLoad = false
+                self.save()
+            }
+        }
+    }
+
+    nonisolated private static func loadEvents(from fileURL: URL) -> [AnalyticsEvent] {
+        guard let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else { return [] }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        events = (try? decoder.decode([AnalyticsEvent].self, from: data)) ?? []
+        return (try? decoder.decode([AnalyticsEvent].self, from: data)) ?? []
     }
 
     private func save() {

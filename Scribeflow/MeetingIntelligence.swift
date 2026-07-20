@@ -134,6 +134,7 @@ struct MeetingIntelligenceReport: Equatable {
     let decisions: [String]
     let actionItems: [String]
     let structuredActionItems: [ExtractedActionItem]
+    let risks: [String]
     let openQuestions: [String]
     let followUps: [String]
     let speakerSegments: [SpeakerSegment]
@@ -141,6 +142,20 @@ struct MeetingIntelligenceReport: Equatable {
     let confidenceLabel: String
     let mode: MeetingIntelligenceMode
     let speakerDetectionNote: String
+}
+
+struct MeetingAnalysisBundle {
+    let purpose: CapturePurpose
+    let report: MeetingIntelligenceReport
+    let signals: MeetingSignals
+    let evidenceNoteLines: [IndexedSourceNoteLine]
+    let sourceReferencesByClaim: [String: [SourceReference]]
+    let sensitiveFlags: [SensitiveFlag]
+}
+
+struct IndexedSourceNoteLine {
+    let index: Int
+    let text: String
 }
 
 enum SpeakerTranscriptParser {
@@ -216,33 +231,114 @@ enum SpeakerTranscriptParser {
 }
 
 enum MeetingIntelligenceEngine {
+    static func analysis(for meeting: Meeting) -> MeetingAnalysisBundle {
+        let purpose = meeting.purpose
+        let report = report(for: meeting, purpose: purpose)
+        return MeetingAnalysisBundle(
+            purpose: purpose,
+            report: report,
+            signals: signals(for: meeting, report: report, purpose: purpose),
+            evidenceNoteLines: representativeEvidenceNoteLines(
+                from: meeting.trustedSourceNotes
+            ),
+            sourceReferencesByClaim: [:],
+            sensitiveFlags: meeting.sensitiveFlags
+        )
+    }
+
+    private static func representativeEvidenceNoteLines(
+        from notes: String,
+        limit: Int = 120
+    ) -> [IndexedSourceNoteLine] {
+        let allLines = notes
+            .components(separatedBy: .newlines)
+            .enumerated()
+            .compactMap { index, line -> IndexedSourceNoteLine? in
+                let cleaned = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !cleaned.isEmpty else { return nil }
+                return IndexedSourceNoteLine(index: index, text: cleaned)
+            }
+        guard allLines.count > limit else { return allLines }
+
+        var selectedIndices = Set<Int>()
+        selectedIndices.reserveCapacity(limit)
+        for line in allLines.prefix(30) { selectedIndices.insert(line.index) }
+        for line in allLines.suffix(20) { selectedIndices.insert(line.index) }
+
+        let signalTerms = [
+            "decision", "decided", "agreed", "action", "owner", "will", "need to",
+            "risk", "blocked", "concern", "question", "follow up", "due", "deadline"
+        ]
+        for line in allLines where selectedIndices.count < limit {
+            let lower = line.text.lowercased()
+            if line.text.contains("?") || signalTerms.contains(where: lower.contains) {
+                selectedIndices.insert(line.index)
+            }
+        }
+
+        if selectedIndices.count < limit {
+            let remainingSlots = limit - selectedIndices.count
+            let step = max(1, allLines.count / max(1, remainingSlots))
+            var offset = step / 2
+            while selectedIndices.count < limit, offset < allLines.count {
+                selectedIndices.insert(allLines[offset].index)
+                offset += step
+            }
+        }
+
+        return allLines.filter { selectedIndices.contains($0.index) }
+    }
+
     static func report(for meeting: Meeting) -> MeetingIntelligenceReport {
+        report(for: meeting, purpose: meeting.purpose)
+    }
+
+    private static func report(
+        for meeting: Meeting,
+        purpose: CapturePurpose
+    ) -> MeetingIntelligenceReport {
         let source = sourceLines(for: meeting)
         let corpus = source.map(\.text)
-        let allowsMeetingSignals = meeting.allowsMeetingSignalExtraction
+        let allowsMeetingSignals = purpose.allowsMeetingSignals
         let decisions = allowsMeetingSignals
             ? extractDecisions(from: corpus, limit: 4)
             : []
-        let structuredActions = meeting.allowsAccountabilityExtraction
+        let structuredActions = purpose.allowsAccountabilityExtraction
             ? extractStructuredActions(from: source, attendees: meeting.attendees, limit: 5)
+            : []
+        let risks = allowsMeetingSignals
+            ? extractRisks(from: source, limit: 4)
             : []
         // One definition of "an action": the strict, distilled structured set.
         let actions = structuredActions.map(\.text)
         let questions = extractQuestions(from: corpus, limit: 4)
-        let followUps = meeting.allowsAccountabilityExtraction
+        let followUps = purpose.allowsAccountabilityExtraction
             ? followUps(from: actions, structuredActions: structuredActions, questions: questions, decisions: decisions)
             : []
-        let summary = summary(from: meeting, corpus: corpus, decisions: decisions, structuredActions: structuredActions)
+        let summary = summary(
+            from: meeting,
+            purpose: purpose,
+            corpus: corpus,
+            decisions: decisions,
+            structuredActions: structuredActions
+        )
         let speakers = speakerSegments(for: meeting)
         let speakerDetection = speakerDetectionSummary(for: meeting, speakers: speakers)
         let usedBackend = meeting.audioRecordings.contains { $0.transcriptionProvider == .backend }
 
         return MeetingIntelligenceReport(
-            headline: headline(for: meeting, decisions: decisions, actions: actions, questions: questions),
+            headline: headline(
+                for: meeting,
+                purpose: purpose,
+                decisions: decisions,
+                actions: actions,
+                questions: questions
+            ),
             suggestedSummary: summary,
             decisions: decisions,
             actionItems: actions,
             structuredActionItems: structuredActions,
+            risks: risks,
             openQuestions: questions,
             followUps: followUps,
             speakerSegments: speakers,
@@ -250,6 +346,39 @@ enum MeetingIntelligenceEngine {
             confidenceLabel: confidenceLabel(corpusCount: corpus.count, speakerCount: speakers.count),
             mode: usedBackend ? .backendReady : .localHeuristic,
             speakerDetectionNote: speakerDetection.detail
+        )
+    }
+
+    static func signals(
+        for meeting: Meeting,
+        report existingReport: MeetingIntelligenceReport? = nil,
+        purpose existingPurpose: CapturePurpose? = nil
+    ) -> MeetingSignals {
+        let purpose = existingPurpose ?? meeting.purpose
+        guard purpose.allowsMeetingSignals else {
+            return MeetingSignals(decisions: [], actions: [], risks: [], questions: [])
+        }
+
+        if let brief = meeting.aiBrief {
+            if !brief.makesSense {
+                return MeetingSignals(decisions: [], actions: [], risks: [], questions: [])
+            }
+            if !brief.isEmpty {
+                return MeetingSignals(
+                    decisions: brief.decisions,
+                    actions: brief.actions.map(actionSentence),
+                    risks: brief.risks,
+                    questions: brief.openQuestions
+                )
+            }
+        }
+
+        let resolvedReport = existingReport ?? report(for: meeting)
+        return MeetingSignals(
+            decisions: resolvedReport.decisions,
+            actions: resolvedReport.structuredActionItems.map(commitmentSentence),
+            risks: resolvedReport.risks,
+            questions: resolvedReport.openQuestions
         )
     }
 
@@ -350,22 +479,143 @@ enum MeetingIntelligenceEngine {
     }
 
     private static func sourceLines(for meeting: Meeting) -> [IntelligenceSourceLine] {
-        let noteLines = meeting.rawNotes
-            .components(separatedBy: .newlines)
-            .map(cleanLine)
-            .filter { !$0.isEmpty }
+        let allNoteLines = sourceFragments(from: meeting.trustedSourceNotes)
+        let noteLines = representativeTextLines(allNoteLines)
             .map { IntelligenceSourceLine(text: $0, speaker: nil) }
-        let transcriptLines = meeting.transcript.map {
-            IntelligenceSourceLine(text: "\($0.speaker): \($0.text)", speaker: $0.speaker)
+        let allTranscriptLines = meeting.transcript.flatMap { line in
+            sourceFragments(from: line.text).map {
+                IntelligenceSourceLine(
+                    text: "\(line.speaker): \($0)",
+                    speaker: line.speaker
+                )
+            }
         }
-        let recordingLines = meeting.audioRecordings.flatMap { recording in
-            [recording.linkedNote, recording.transcript]
-                .flatMap { $0.components(separatedBy: .newlines) }
-                .map(cleanLine)
-                .filter { !$0.isEmpty }
+        let transcriptLines = representativeSourceLines(allTranscriptLines, limit: 480)
+        let allRecordingLines = meeting.audioRecordings.flatMap { recording in
+            let sources = meeting.transcript.isEmpty
+                ? [recording.linkedNote, recording.transcript]
+                : [recording.linkedNote]
+            return sources
+                .flatMap { sourceFragments(from: $0) }
                 .map { IntelligenceSourceLine(text: $0, speaker: recording.source.title) }
         }
-        return noteLines + transcriptLines + recordingLines
+        let recordingLines = representativeSourceLines(allRecordingLines)
+
+        var seen: Set<String> = []
+        return (noteLines + transcriptLines + recordingLines).filter { line in
+            let key = fingerprint(line.text)
+            return !key.isEmpty && seen.insert(key).inserted
+        }
+    }
+
+    private static func sourceFragments(
+        from text: String,
+        maximumLength: Int = 800,
+        overlap: Int = 120
+    ) -> [String] {
+        let step = max(1, maximumLength - overlap)
+        var fragments: [String] = []
+
+        for rawLine in text.components(separatedBy: .newlines) {
+            guard !Task.isCancelled else { break }
+            let cleaned = cleanLine(rawLine)
+            guard !cleaned.isEmpty else { continue }
+            let source = cleaned as NSString
+            guard source.length > maximumLength else {
+                fragments.append(cleaned)
+                continue
+            }
+
+            var location = 0
+            while location < source.length {
+                let length = min(maximumLength, source.length - location)
+                fragments.append(
+                    cleanLine(source.substring(with: NSRange(location: location, length: length)))
+                )
+                if location + length == source.length { break }
+                location += step
+            }
+        }
+        return fragments.filter { !$0.isEmpty }
+    }
+
+    private static func representativeSourceLines(
+        _ lines: [IntelligenceSourceLine],
+        limit: Int = 240
+    ) -> [IntelligenceSourceLine] {
+        guard lines.count > limit else { return lines }
+        let selectedFingerprints = Set(
+            representativeTextLines(lines.map(\.text), limit: limit).map(fingerprint)
+        )
+        var seen: Set<String> = []
+        var selected: [IntelligenceSourceLine] = []
+        selected.reserveCapacity(limit)
+
+        for line in lines {
+            let key = fingerprint(line.text)
+            guard selectedFingerprints.contains(key), seen.insert(key).inserted else { continue }
+            selected.append(line)
+            if selected.count == limit { break }
+        }
+        return selected
+    }
+
+    private static func representativeTextLines(
+        _ lines: [String],
+        limit: Int = 480
+    ) -> [String] {
+        guard lines.count > limit else { return lines }
+
+        var selected = Set<Int>()
+        selected.reserveCapacity(limit)
+        selected.formUnion(lines.indices.prefix(60))
+        selected.formUnion(lines.indices.suffix(60))
+
+        let signalIndices = lines.indices.filter { index in
+            let text = lines[index]
+            return text.contains("?")
+                || looksActionable(text)
+                || containsAffirmedDecisionCue(in: text)
+                || hasAffirmedRiskSignal(in: text)
+        }
+        addDistributedIndices(
+            signalIndices,
+            maximumCount: min(280, limit - selected.count),
+            to: &selected
+        )
+        if selected.count < limit {
+            addDistributedIndices(
+                Array(lines.indices),
+                maximumCount: limit - selected.count,
+                to: &selected
+            )
+        }
+
+        return lines.indices.compactMap { index in
+            selected.contains(index) ? lines[index] : nil
+        }
+    }
+
+    private static func addDistributedIndices(
+        _ indices: [Int],
+        maximumCount: Int,
+        to selected: inout Set<Int>
+    ) {
+        guard maximumCount > 0, !indices.isEmpty else { return }
+        if indices.count <= maximumCount {
+            selected.formUnion(indices)
+            return
+        }
+        if maximumCount == 1 {
+            selected.insert(indices[indices.count / 2])
+            return
+        }
+
+        let step = Double(indices.count - 1) / Double(maximumCount - 1)
+        for position in 0..<maximumCount {
+            let offset = Int((Double(position) * step).rounded())
+            selected.insert(indices[min(offset, indices.count - 1)])
+        }
     }
 
     private static func extract(
@@ -630,6 +880,7 @@ enum MeetingIntelligenceEngine {
 
     private static func summary(
         from meeting: Meeting,
+        purpose: CapturePurpose,
         corpus: [String],
         decisions: [String],
         structuredActions: [ExtractedActionItem]
@@ -637,7 +888,7 @@ enum MeetingIntelligenceEngine {
         var bullets: [String] = []
         var used: Set<String> = []
 
-        if meeting.allowsMeetingSignalExtraction {
+        if purpose.allowsMeetingSignals {
             // Lead with the outcome and the next move. These are the two facts a
             // reader most often needs when reopening a meeting note.
             if let decision = decisions.first {
@@ -662,7 +913,7 @@ enum MeetingIntelligenceEngine {
             let key = fingerprint(clause)
             guard !clause.isEmpty, !used.contains(key) else { continue }
             used.insert(key)
-            bullets.append(meeting.isPersonalCapture ? clause : "What matters: \(lowerFirst(clause))")
+            bullets.append(purpose.isPersonalCapture ? clause : "What matters: \(lowerFirst(clause))")
             if bullets.count == 4 { break }
         }
 
@@ -680,6 +931,34 @@ enum MeetingIntelligenceEngine {
             return "\(action.owner) — \(lowerFirst(core))\(due)"
         }
         return "\(core)\(due)"
+    }
+
+    private static func actionSentence(_ action: AIActionItem) -> String {
+        let core = action.task.hasSuffix(".") ? String(action.task.dropLast()) : action.task
+        let due = action.due.isEmpty ? "" : " (by \(action.due))"
+        if !action.owner.isEmpty, action.owner != "Owner not named" {
+            return "\(action.owner) — \(lowerFirst(core))\(due)"
+        }
+        return "\(core)\(due)"
+    }
+
+    private static func extractRisks(
+        from source: [IntelligenceSourceLine],
+        limit: Int
+    ) -> [String] {
+        var results: [String] = []
+        var seen: Set<String> = []
+        for line in source {
+            guard hasAffirmedRiskSignal(in: line.text),
+                  !looksActionable(line.text)
+            else { continue }
+            let value = polished(line.text)
+            let key = fingerprint(value)
+            guard !value.isEmpty, seen.insert(key).inserted else { continue }
+            results.append(value)
+            if results.count == limit { break }
+        }
+        return results
     }
 
     /// Capitalize/expand a raw due marker for display (model keeps the raw form).
@@ -729,18 +1008,19 @@ enum MeetingIntelligenceEngine {
 
     private static func headline(
         for meeting: Meeting,
+        purpose: CapturePurpose,
         decisions: [String],
         actions: [String],
         questions: [String]
     ) -> String {
-        if !meeting.allowsMeetingSignalExtraction {
+        if !purpose.allowsMeetingSignals {
             let modelSummary = meeting.aiBrief?.summary
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !modelSummary.isEmpty { return modelSummary }
-            if let topic = meeting.purpose.topic {
-                return "\(meeting.purpose.displayTitle): \(lowerFirst(topic))"
+            if let topic = purpose.topic {
+                return "\(purpose.displayTitle): \(lowerFirst(topic))"
             }
-            return "Organized as \(meeting.purpose.displayTitle.lowercased())."
+            return "Organized as \(purpose.displayTitle.lowercased())."
         }
         if let decision = decisions.first {
             return "Decision captured: \(lowerFirst(decision))"
@@ -778,6 +1058,7 @@ enum MeetingIntelligenceEngine {
                 .map { SpeakerIdentityResolver.canonicalKey(for: $0.speaker) }
                 .filter { !$0.isEmpty }
         )
+        let persistedSeparation = meeting.speakerSeparationConfidence ?? .unverified
 
         if detected == 0 {
             return SpeakerDetectionSummary(
@@ -791,13 +1072,33 @@ enum MeetingIntelligenceEngine {
             )
         }
 
-        if !diarizedSpeakerKeys.isEmpty, diarizedSpeakerKeys == speakerKeys {
+        if persistedSeparation == .strong, detected > 1 {
             return SpeakerDetectionSummary(
                 detectedCount: detected,
                 expectedCount: expectedPeople,
                 method: .diarized,
-                title: "\(detected) voice\(detected == 1 ? "" : "s") separated",
-                detail: "The transcription service separated the speakers. Review names before sharing."
+                title: "\(detected) voice patterns separated",
+                detail: "Multiple sustained voice patterns supported this separation. Review names before sharing."
+            )
+        }
+
+        if persistedSeparation == .tentative, detected > 1 {
+            return SpeakerDetectionSummary(
+                detectedCount: detected,
+                expectedCount: expectedPeople,
+                method: .partiallyDiarized,
+                title: "\(detected) likely speakers",
+                detail: "Automatic voice clusters suggest this count, but the evidence is limited. Review labels before sharing."
+            )
+        }
+
+        if diarizedSpeakerKeys.count > 1, diarizedSpeakerKeys == speakerKeys {
+            return SpeakerDetectionSummary(
+                detectedCount: detected,
+                expectedCount: expectedPeople,
+                method: .partiallyDiarized,
+                title: "\(detected) likely speakers",
+                detail: "An earlier automatic separation created these labels without a saved confidence level. Review them before sharing."
             )
         }
 

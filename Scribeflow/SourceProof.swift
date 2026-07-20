@@ -149,6 +149,7 @@ struct SourceProofButton: View {
             .frame(height: 26)
             .background(proof.confidence.tint.opacity(0.10), in: Capsule())
             .overlay(Capsule().strokeBorder(proof.confidence.tint.opacity(0.18), lineWidth: 0.5))
+            .appTapTarget()
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(proof.confidence.title) source proof")
@@ -168,8 +169,7 @@ struct SourceProofInspectorView: View {
                     confidenceSection
                     sourcesSection
                 }
-                .padding(20)
-                .padding(.bottom, 24)
+                .appScreenContent(top: AppSpacing.lg)
             }
             .background(AppPalette.background.ignoresSafeArea())
             .navigationTitle("Source proof")
@@ -279,7 +279,7 @@ struct SourceProofInspectorView: View {
                     HapticEngine.tap(.light)
                 } label: {
                     Image(systemName: "doc.on.doc")
-                        .frame(width: 30, height: 30)
+                        .appTapTarget()
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(AppPalette.secondaryInk)

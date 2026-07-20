@@ -22,6 +22,7 @@ struct AudioPlaybackControls: View {
                         .foregroundStyle(.white)
                         .frame(width: 40, height: 40)
                         .background(isPlaying ? AppPalette.coral : AppPalette.accent, in: Circle())
+                        .appTapTarget()
                 }
                 .buttonStyle(PressScaleButtonStyle(scale: 0.92))
                 .accessibilityLabel(isPlaying ? "Pause recording" : "Play recording")

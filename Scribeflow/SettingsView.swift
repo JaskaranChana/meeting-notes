@@ -370,6 +370,7 @@ struct SettingsView: View {
                     .padding(.horizontal, 20)
                     .padding(.bottom, 40)
                 }
+                .readingWidth()
             }
             .background(AppPalette.background.ignoresSafeArea())
             .navigationTitle(AppStrings.Screen.settings)
@@ -379,7 +380,7 @@ struct SettingsView: View {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button(AppStrings.Action.done) { dismiss() }
                             .fontWeight(.semibold)
-                            .tint(AppPalette.ink)
+                            .tint(AppPalette.accent)
                     }
                 }
             }
@@ -422,7 +423,7 @@ struct SettingsView: View {
                     authSession.logout()
                     HapticEngine.notify(.warning)
                 }
-                .presentationDetents([.height(370)])
+                .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
             }
             .sheet(isPresented: $showingIntegrations) {
@@ -723,7 +724,7 @@ struct SettingsView: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 Text("Require app unlock")
-                    .font(.body.weight(.medium))
+                    .font(.subheadline.weight(.medium))
                     .foregroundStyle(AppPalette.ink)
                 Text("Ask for secure sign-in when Scribeflow opens")
                     .font(.footnote)
@@ -882,38 +883,41 @@ private struct LogoutConfirmationSheet: View {
     let onConfirm: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(spacing: 14) {
-                ZStack {
-                    Circle()
-                        .fill(AppPalette.coral.opacity(0.12))
-                    Image(systemName: "rectangle.portrait.and.arrow.right")
-                        .font(.title3.weight(.bold))
-                        .foregroundStyle(AppPalette.coral)
+        ScrollView(showsIndicators: false) {
+            VStack(alignment: .leading, spacing: AppSpacing.lg) {
+                HStack(spacing: AppSpacing.md) {
+                    ZStack {
+                        Circle()
+                            .fill(AppPalette.coral.opacity(0.12))
+                        Image(systemName: "rectangle.portrait.and.arrow.right")
+                            .font(.title3.weight(.bold))
+                            .foregroundStyle(AppPalette.coral)
+                    }
+                    .frame(width: 54, height: 54)
+
+                    VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                        Text("Log out?")
+                            .font(.title2.weight(.bold))
+                            .foregroundStyle(AppPalette.ink)
+                        Text("Your secure session ends on this device.")
+                            .font(.subheadline)
+                            .foregroundStyle(AppPalette.secondaryInk)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
-                .frame(width: 54, height: 54)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Log out?")
-                        .font(.title2.weight(.bold))
-                        .foregroundStyle(AppPalette.ink)
-                    Text("Your secure session ends on this device.")
-                        .font(.subheadline)
-                        .foregroundStyle(AppPalette.secondaryInk)
+                VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                    logoutPoint("Keychain session token will be removed.", icon: "key.fill")
+                    logoutPoint("Your local notes and recordings stay saved.", icon: "doc.text.fill")
+                    logoutPoint("You can sign in again anytime.", icon: "arrow.clockwise")
                 }
+                .padding(AppSpacing.md)
+                .background(AppPalette.softSurface, in: RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous))
             }
-
-            VStack(alignment: .leading, spacing: 10) {
-                logoutPoint("Keychain session token will be removed.", icon: "key.fill")
-                logoutPoint("Your local notes and recordings stay saved.", icon: "doc.text.fill")
-                logoutPoint("You can sign in again anytime.", icon: "arrow.clockwise")
-            }
-            .padding(14)
-            .background(AppPalette.softSurface, in: RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous))
-
-            Spacer(minLength: 0)
-
-            HStack(spacing: 12) {
+            .appScreenContent(top: AppSpacing.lg, bottom: AppSpacing.sm)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            AdaptiveActionStack(spacing: AppSpacing.sm) {
                 Button {
                     dismiss()
                 } label: {
@@ -937,8 +941,10 @@ private struct LogoutConfirmationSheet: View {
                 .buttonStyle(.borderedProminent)
                 .tint(AppPalette.coral)
             }
+            .padding(.horizontal, AppLayout.screenHorizontalPadding)
+            .padding(.vertical, AppSpacing.sm)
+            .background(.ultraThinMaterial)
         }
-        .padding(22)
         .background(AppPalette.background.ignoresSafeArea())
     }
 
@@ -1016,6 +1022,9 @@ private struct IntegrationsSheet: View {
                       Text("Webhook secrets are kept in Keychain. Nothing is sent until you tap Send from a meeting.")
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(AppPalette.background.ignoresSafeArea())
+            .tint(AppPalette.accent)
             .navigationTitle("Integrations")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -1033,7 +1042,7 @@ private struct IntegrationsSheet: View {
             }
             .sheet(isPresented: $showingAdd) {
                 AddWebhookSheet()
-                    .presentationDetents([.medium])
+                    .presentationDetents([.medium, .large])
                     .presentationDragIndicator(.visible)
             }
         }
@@ -1076,6 +1085,9 @@ private struct AddWebhookSheet: View {
                         .autocorrectionDisabled()
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(AppPalette.background.ignoresSafeArea())
+            .tint(AppPalette.accent)
             .navigationTitle("Add webhook")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -1167,12 +1179,18 @@ private struct ActivityLogSheet: View {
                     }
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(AppPalette.background.ignoresSafeArea())
+            .tint(AppPalette.accent)
             .navigationTitle("Activity log")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
                 }
+            }
+            .task {
+                events = await AnalyticsLog.shared.loadedEvents()
             }
         }
     }

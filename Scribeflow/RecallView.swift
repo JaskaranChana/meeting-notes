@@ -1,12 +1,10 @@
 import SwiftUI
-#if canImport(FoundationModels)
-import FoundationModels
-#endif
 
 // MARK: - Source Cited Chat (Tier 1)
 
 struct SourceCitedChatView: View {
     let meeting: Meeting
+    @Environment(MeetingStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var messages: [ChatMessage] = []
@@ -24,15 +22,14 @@ struct SourceCitedChatView: View {
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: 16) {
                                 ForEach(messages) { msg in
-                                    ChatBubble(message: msg, transcript: meeting.transcript)
+                                    ChatBubble(message: msg)
                                         .id(msg.id)
                                 }
                                 if isLoading {
                                     loadingBubble
                                 }
                             }
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 12)
+                            .appScreenContent(top: AppSpacing.sm, bottom: AppSpacing.sm)
                         }
                         .onChange(of: messages.count) {
                             withAnimation { proxy.scrollTo(messages.last?.id) }
@@ -106,6 +103,7 @@ struct SourceCitedChatView: View {
                                 .foregroundStyle(AppPalette.ink)
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 8)
+                                .frame(minHeight: AppLayout.minimumTapTarget)
                                 .background(AppPalette.cardBackground, in: Capsule())
                                 .overlay(Capsule().strokeBorder(AppPalette.border.opacity(0.5), lineWidth: 0.8))
                         }
@@ -140,6 +138,7 @@ struct SourceCitedChatView: View {
                             .foregroundStyle(AppPalette.secondaryInk)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 7)
+                            .frame(minHeight: AppLayout.minimumTapTarget)
                             .background(AppPalette.softSurface, in: Capsule())
                     }
                     .buttonStyle(.plain)
@@ -164,12 +163,14 @@ struct SourceCitedChatView: View {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.title)
                     .foregroundStyle(query.trimmingCharacters(in: .whitespaces).isEmpty ? AppPalette.border : AppPalette.accent)
+                    .appTapTarget()
             }
             .disabled(query.trimmingCharacters(in: .whitespaces).isEmpty || isLoading)
             .accessibilityLabel("Send")
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, AppLayout.screenHorizontalPadding)
         .padding(.vertical, 12)
+        .readingWidth()
         .adaptiveMaterial(solid: AppPalette.dockBackground)
         .overlay(Rectangle().frame(height: 0.5), alignment: .top)
     }
@@ -206,76 +207,12 @@ struct SourceCitedChatView: View {
         }
     }
 
-    private func generateAnswer(for question: String) async -> (String, [TranscriptCitation]) {
-        let transcriptText = meeting.transcript.isEmpty
-            ? meeting.rawNotes
-            : meeting.transcript.enumerated().map { "\($0.offset + 1). [\($0.element.speaker)]: \($0.element.text)" }.joined(separator: "\n")
-
-        let prompt = """
-        Meeting: \(meeting.title)
-        Objective: \(meeting.objective)
-        Notes: \(meeting.rawNotes)
-        Transcript (numbered lines):
-        \(transcriptText)
-
-        Question: \(question)
-
-        Answer the question directly and concisely. Reference specific numbered transcript lines when possible using [Line N] format. Be precise and factual — only reference what was actually said.
-        """
-
-        if #available(iOS 26.0, *) {
-            #if canImport(FoundationModels)
-            do {
-                let session = LanguageModelSession(instructions: "You are a precise meeting assistant. Answer questions about the provided meeting content accurately and concisely. When referencing specific transcript lines, use [Line N] format.")
-                let response = try await session.respond(to: prompt)
-                let answer = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
-                let citations = extractCitations(from: answer, transcript: meeting.transcript)
-                return (answer, citations)
-            } catch {
-                return (fallbackAnswer(for: question), [])
-            }
-            #endif
-        }
-        return (fallbackAnswer(for: question), [])
-    }
-
-    private func fallbackAnswer(for question: String) -> String {
-        let q = question.lowercased()
-        if q.contains("decided") || q.contains("decision") {
-            guard meeting.allowsAccountabilityExtraction else {
-                return "This is saved as a personal note, so Scribeflow is keeping it as notes instead of meeting decisions."
-            }
-            let decisions = meeting.commitments.filter { $0.status != .superseded }.prefix(3)
-            if decisions.isEmpty { return "No clear decisions were recorded in this meeting." }
-            return "Decisions made:\n" + decisions.map { "• \($0.statement)" }.joined(separator: "\n")
-        }
-        if q.contains("action") || q.contains("next") {
-            guard meeting.allowsAccountabilityExtraction else {
-                return "This is saved as a personal note, so Scribeflow won't turn it into meeting action items."
-            }
-            let actions = meeting.commitments.filter { $0.status == .open }.prefix(4)
-            if actions.isEmpty { return "No open action items found in this meeting." }
-            return "Open actions:\n" + actions.map { "• \($0.statement) — \($0.owner)" }.joined(separator: "\n")
-        }
-        if q.contains("risk") || q.contains("concern") {
-            guard meeting.allowsAccountabilityExtraction else {
-                return "This is saved as a personal note, so Scribeflow won't label personal writing as meeting risks."
-            }
-            return "Review the transcript above for risks and concerns raised in this meeting."
-        }
-        return "Based on the notes for \(meeting.title): \(meeting.objective)"
-    }
-
-    private func extractCitations(from text: String, transcript: [TranscriptLine]) -> [TranscriptCitation] {
-        var citations: [TranscriptCitation] = []
-        let pattern = /\[Line (\d+)\]/
-        for match in text.matches(of: pattern) {
-            if let lineNum = Int(match.1), lineNum > 0, lineNum <= transcript.count {
-                let line = transcript[lineNum - 1]
-                citations.append(TranscriptCitation(lineNumber: lineNum, speaker: line.speaker, text: line.text))
-            }
-        }
-        return citations
+    private func generateAnswer(for question: String) async -> (String, [RAGResult]) {
+        let answer = await store.groundedAnswerMeetingPrompt(
+            for: meeting.id,
+            prompt: question
+        )
+        return (answer.text, answer.citations)
     }
 }
 
@@ -284,19 +221,11 @@ struct ChatMessage: Identifiable {
     let id = UUID()
     let role: Role
     let text: String
-    let citations: [TranscriptCitation]
-}
-
-struct TranscriptCitation: Identifiable {
-    let id = UUID()
-    let lineNumber: Int
-    let speaker: String
-    let text: String
+    let citations: [RAGResult]
 }
 
 private struct ChatBubble: View {
     let message: ChatMessage
-    let transcript: [TranscriptLine]
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -340,15 +269,15 @@ private struct ChatBubble: View {
                 .foregroundStyle(AppPalette.secondaryInk.opacity(0.6))
             ForEach(message.citations) { citation in
                 HStack(alignment: .top, spacing: 6) {
-                    Text("L\(citation.lineNumber)")
+                    Text(citation.sourceID)
                         .font(.caption2.weight(.bold))
                         .foregroundStyle(AppPalette.accent)
                         .frame(width: 28, alignment: .leading)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(citation.speaker)
+                        Text(citation.sourceLabel)
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(AppPalette.secondaryInk)
-                        Text(citation.text)
+                        Text(citation.snippet)
                             .font(.caption2)
                             .foregroundStyle(AppPalette.ink)
                             .lineLimit(2)
@@ -367,14 +296,19 @@ private struct ChatBubble: View {
 
 struct MeetingScoreCard: View {
     let meeting: Meeting
+    let allowsAccountability: Bool
 
     private var score: MeetingScore? {
-        guard meeting.allowsAccountabilityExtraction else { return nil }
-        return meeting.score ?? MeetingScorer.score(for: meeting)
+        allowsAccountability ? meeting.score : nil
     }
 
     var body: some View {
-        if let score {
+        if !allowsAccountability {
+            unavailableCard(
+                eyebrow: "PERSONAL NOTE",
+                detail: "Scribeflow keeps personal captures as notes instead of scoring them like meetings."
+            )
+        } else if let score {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 6) {
                     Image(systemName: "chart.bar.fill")
@@ -405,22 +339,29 @@ struct MeetingScoreCard: View {
                     .strokeBorder(AppPalette.border.opacity(0.5), lineWidth: 0.8)
             )
         } else {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("PERSONAL NOTE")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(AppPalette.secondaryInk)
-                Text("Scribeflow keeps personal captures as notes instead of scoring them like meetings.")
-                    .font(.subheadline)
-                    .foregroundStyle(AppPalette.secondaryInk)
-            }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder(AppPalette.border.opacity(0.5), lineWidth: 0.8)
+            unavailableCard(
+                eyebrow: "MEETING QUALITY",
+                detail: "Add more notes, transcript detail, or a clear commitment to calculate this score."
             )
         }
+    }
+
+    private func unavailableCard(eyebrow: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(eyebrow)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(AppPalette.secondaryInk)
+            Text(detail)
+                .font(.subheadline)
+                .foregroundStyle(AppPalette.secondaryInk)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(AppPalette.border.opacity(0.5), lineWidth: 0.8)
+        )
     }
 
     private func scoreRing(_ score: MeetingScore) -> some View {
@@ -473,9 +414,18 @@ struct MeetingScoreCard: View {
 struct MeetingContextPickerView: View {
     @Binding var selectedMode: MeetingContextMode
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var hasAnimatedIn = false
 
-    private let columns = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
+    private var columns: [GridItem] {
+        if dynamicTypeSize.isAccessibilitySize {
+            return [GridItem(.flexible())]
+        }
+        return [
+            GridItem(.flexible(), spacing: AppSpacing.sm),
+            GridItem(.flexible(), spacing: AppSpacing.sm)
+        ]
+    }
 
     var body: some View {
         NavigationStack {
@@ -493,7 +443,7 @@ struct MeetingContextPickerView: View {
                         }
                     }
                 }
-                .padding(18)
+                .appScreenContent(top: AppSpacing.lg)
             }
             .background(AppPalette.background.ignoresSafeArea())
             .navigationTitle("Meeting mode")
@@ -547,11 +497,11 @@ struct MeetingContextPickerView: View {
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
                     .fill(isSelected ? AppPalette.accent.opacity(0.05) : AppPalette.cardBackground)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
                     .strokeBorder(isSelected ? AppPalette.accent.opacity(0.30) : AppPalette.border.opacity(0.25), lineWidth: isSelected ? 1 : 0.5)
             )
             .appShadow(isSelected ? AppShadow.soft : AppShadow.hairline)
@@ -641,7 +591,7 @@ struct PeopleIntelligenceCard: View {
                     Text("TOP TOPICS")
                         .font(.caption2.weight(.bold))
                         .foregroundStyle(AppPalette.secondaryInk.opacity(0.6))
-                    HStack(spacing: 6) {
+                    WrappingHStack(spacing: 6) {
                         ForEach(person.topTopics.prefix(3), id: \.self) { topic in
                             Text(topic)
                                 .font(.caption.weight(.medium))

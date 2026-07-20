@@ -27,20 +27,32 @@ struct LibrarySnapshot: Equatable {
     var openLoopCount = 0
     var isMeetingStoreEmpty = true
     var segmentCounts: [LibrarySegment: Int] = [:]
+    var dateGroups: [LibraryDateGroup] = []
+}
+
+struct LibraryDateGroup: Equatable {
+    let title: String
+    let meetings: [Meeting]
 }
 
 actor LibrarySnapshotBuilder {
     func snapshot(for key: LibrarySnapshotKey, meetings: [Meeting]) -> LibrarySnapshot {
         let recentMeetings = meetings.sorted(by: Meeting.sortDescending)
         let pinnedMeetings = recentMeetings.filter(\.isPinned)
+        let accountabilityMeetingIDs = Set(meetings.compactMap { meeting in
+            meeting.allowsAccountabilityExtraction ? meeting.id : nil
+        })
         let scopedMeetings = scopedMeetings(
             from: recentMeetings,
-            key: key
+            key: key,
+            accountabilityMeetingIDs: accountabilityMeetingIDs
         )
         let pinnedIDs = Set(pinnedMeetings.map(\.id))
         var segmentCounts: [LibrarySegment: Int] = [:]
         for meeting in scopedMeetings {
-            for segment in LibrarySegment.allCases where segment.matches(meeting) {
+            let allowsAccountability = accountabilityMeetingIDs.contains(meeting.id)
+            for segment in LibrarySegment.allCases
+            where segment.matches(meeting, allowsAccountability: allowsAccountability) {
                 segmentCounts[segment, default: 0] += 1
             }
         }
@@ -62,12 +74,18 @@ actor LibrarySnapshotBuilder {
         if key.segment == .all, !pinnedResults.isEmpty {
             baseResults = scopedMeetings.filter { !pinnedIDs.contains($0.id) }
         } else {
-            baseResults = scopedMeetings.filter(key.segment.matches)
+            baseResults = scopedMeetings.filter {
+                key.segment.matches(
+                    $0,
+                    allowsAccountability: accountabilityMeetingIDs.contains($0.id)
+                )
+            }
         }
 
+        let libraryResults = sorted(baseResults, mode: key.sortMode)
         return LibrarySnapshot(
             pinnedResults: pinnedResults,
-            libraryResults: sorted(baseResults, mode: key.sortMode),
+            libraryResults: libraryResults,
             // The current Library surface renders meetings only. Folder and
             // collection aggregation used to run on every search keystroke even
             // though no view consumed it.
@@ -75,14 +93,56 @@ actor LibrarySnapshotBuilder {
             smartCollections: [],
             totalMeetingsCount: meetings.count,
             pinnedCount: pinnedMeetings.count,
-            openLoopCount: openLoopCount(from: recentMeetings),
+            openLoopCount: openLoopCount(
+                from: recentMeetings,
+                accountabilityMeetingIDs: accountabilityMeetingIDs
+            ),
             isMeetingStoreEmpty: meetings.isEmpty,
-            segmentCounts: segmentCounts
+            segmentCounts: segmentCounts,
+            dateGroups: dateGroups(from: libraryResults)
         )
     }
 
-    private func scopedMeetings(from meetings: [Meeting], key: LibrarySnapshotKey) -> [Meeting] {
-        let collectionScoped = meetingsMatching(key.collection, in: meetings)
+    private func dateGroups(from meetings: [Meeting]) -> [LibraryDateGroup] {
+        let calendar = Calendar.current
+        let startOfToday = calendar.startOfDay(for: .now)
+        let weekAgo = calendar.date(byAdding: .day, value: -7, to: startOfToday) ?? startOfToday
+        let monthAgo = calendar.date(byAdding: .day, value: -30, to: startOfToday) ?? startOfToday
+        var today: [Meeting] = []
+        var week: [Meeting] = []
+        var month: [Meeting] = []
+        var earlier: [Meeting] = []
+
+        for meeting in meetings {
+            if meeting.when >= startOfToday {
+                today.append(meeting)
+            } else if meeting.when >= weekAgo {
+                week.append(meeting)
+            } else if meeting.when >= monthAgo {
+                month.append(meeting)
+            } else {
+                earlier.append(meeting)
+            }
+        }
+
+        var groups: [LibraryDateGroup] = []
+        if !today.isEmpty { groups.append(LibraryDateGroup(title: "Today", meetings: today)) }
+        if !week.isEmpty { groups.append(LibraryDateGroup(title: "This week", meetings: week)) }
+        if !month.isEmpty { groups.append(LibraryDateGroup(title: "This month", meetings: month)) }
+        if !earlier.isEmpty { groups.append(LibraryDateGroup(title: "Earlier", meetings: earlier)) }
+        return groups
+    }
+
+    private func scopedMeetings(
+        from meetings: [Meeting],
+        key: LibrarySnapshotKey,
+        accountabilityMeetingIDs: Set<Meeting.ID>
+    ) -> [Meeting] {
+        let collectionScoped = meetingsMatching(
+            key.collection,
+            in: meetings,
+            accountabilityMeetingIDs: accountabilityMeetingIDs
+        )
             .filter { matchesTypeFilter(key.typeFilter, meeting: $0) }
             .filter { matchesDateFilter(key.dateFilter, meeting: $0) }
 
@@ -103,12 +163,22 @@ actor LibrarySnapshotBuilder {
         }
     }
 
-    private func meetingsMatching(_ collection: SmartCollectionKind, in meetings: [Meeting]) -> [Meeting] {
+    private func meetingsMatching(
+        _ collection: SmartCollectionKind,
+        in meetings: [Meeting],
+        accountabilityMeetingIDs: Set<Meeting.ID>
+    ) -> [Meeting] {
         switch collection {
         case .all:
             meetings
         case .followUp:
-            meetings.filter { $0.status != .shared && openLoopCount(for: $0) > 0 }
+            meetings.filter {
+                $0.status != .shared
+                    && openLoopCount(
+                        for: $0,
+                        accountabilityMeetingIDs: accountabilityMeetingIDs
+                    ) > 0
+            }
         case .calls:
             meetings.filter(\.isCallMeeting)
         case .pinned:
@@ -176,15 +246,14 @@ actor LibrarySnapshotBuilder {
         }
     }
 
-    private func smartCollections(from meetings: [Meeting]) -> [SmartCollectionCard] {
-        SmartCollectionKind.allCases.map { kind in
-            SmartCollectionCard(kind: kind, count: self.meetingsMatching(kind, in: meetings).count)
-        }
-    }
-
-    private func openLoopCount(from meetings: [Meeting]) -> Int {
+    private func openLoopCount(
+        from meetings: [Meeting],
+        accountabilityMeetingIDs: Set<Meeting.ID>
+    ) -> Int {
         meetings.reduce(into: 0) { count, meeting in
-            guard meeting.status != .shared, meeting.allowsAccountabilityExtraction else { return }
+            guard meeting.status != .shared,
+                  accountabilityMeetingIDs.contains(meeting.id)
+            else { return }
             count += meeting.commitments.reduce(into: 0) { commitmentCount, commitment in
                 if commitment.status == .open || commitment.status == .atRisk {
                     commitmentCount += 1
@@ -193,8 +262,11 @@ actor LibrarySnapshotBuilder {
         }
     }
 
-    private func openLoopCount(for meeting: Meeting) -> Int {
-        guard meeting.allowsAccountabilityExtraction else { return 0 }
+    private func openLoopCount(
+        for meeting: Meeting,
+        accountabilityMeetingIDs: Set<Meeting.ID>
+    ) -> Int {
+        guard accountabilityMeetingIDs.contains(meeting.id) else { return 0 }
         return meeting.commitments
             .filter { $0.status == .open || $0.status == .atRisk }
             .count

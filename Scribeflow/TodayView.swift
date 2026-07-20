@@ -34,6 +34,7 @@ struct TodayView: View {
     @Binding var toast: ToastItem?
     @State private var hasAnimatedIn = false
     @State private var snap = TodaySnapshot()
+    @State private var hasLoadedSnapshot = false
     @State private var showingMicDiagnostics = false
     @State private var showingAudioImporter = false
     @State private var showingPalette = false
@@ -69,7 +70,10 @@ struct TodayView: View {
     private var heroModel: HeroModel { heroModelCache }
 
     private func rebuildHeroModel() {
-        heroModelCache = computeHeroModel()
+        let nextModel = computeHeroModel()
+        if heroModelCache != nextModel {
+            heroModelCache = nextModel
+        }
     }
 
     /// Builds the data the hero variants render from the snapshot + calendar.
@@ -260,6 +264,25 @@ struct TodayView: View {
                     .motionEntrance(step: 6, active: hasAnimatedIn)
                 }
             }
+            .opacity(hasLoadedSnapshot ? 1 : 0)
+            .allowsHitTesting(hasLoadedSnapshot)
+            .accessibilityHidden(!hasLoadedSnapshot)
+            .overlay(alignment: .top) {
+                if !hasLoadedSnapshot {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(AppPalette.accent)
+                        Text("Preparing today")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(AppPalette.secondaryInk)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 48)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Preparing today")
+                }
+            }
             .sheet(isPresented: $showingMicDiagnostics) {
                 AudioDiagnosticsView().presentationDragIndicator(.visible)
             }
@@ -270,10 +293,7 @@ struct TodayView: View {
             ) { result in
                 handleAudioImport(result)
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 8)
-            .padding(.bottom, AppDockMetrics.scrollEndPadding)
-            .readingWidth()
+            .appScreenContent(top: AppSpacing.xs, bottom: AppDockMetrics.scrollEndPadding)
         }
         .refreshable {
             HapticEngine.tap(.light)
@@ -360,7 +380,9 @@ struct TodayView: View {
         }
         .task(id: isActive ? store.revision : nil) {
             guard isActive else { return }
-            try? await Task.sleep(for: .milliseconds(90))
+            if hasLoadedSnapshot {
+                try? await Task.sleep(for: .milliseconds(90))
+            }
             guard !Task.isCancelled else { return }
             await refreshSnapshot(from: store.meetings)
         }
@@ -414,25 +436,27 @@ struct TodayView: View {
                 Button {
                     HapticEngine.tap(.medium)
                     showingInvestorPresentation = true
-                } label: {
-                    Image(systemName: "play.fill")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(AppPalette.accent)
-                        .frame(width: 30, height: 30)
-                        .background(AppPalette.paper.opacity(0.72), in: Circle())
-                }
+                    } label: {
+                        Image(systemName: "play.fill")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(AppPalette.accent)
+                            .frame(width: 30, height: 30)
+                            .background(AppPalette.paper.opacity(0.72), in: Circle())
+                            .appTapTarget()
+                    }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Start investor presentation")
 
                 Button {
                     onSettingsTap()
-                } label: {
-                    Image(systemName: "slider.horizontal.3")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(AppPalette.secondaryInk)
-                        .frame(width: 30, height: 30)
-                        .background(AppPalette.paper.opacity(0.72), in: Circle())
-                }
+                    } label: {
+                        Image(systemName: "slider.horizontal.3")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(AppPalette.secondaryInk)
+                            .frame(width: 30, height: 30)
+                            .background(AppPalette.paper.opacity(0.72), in: Circle())
+                            .appTapTarget()
+                    }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Demo mode settings")
             }
@@ -613,6 +637,7 @@ struct TodayView: View {
             Label("All tasks", systemImage: "arrow.right")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(AppPalette.accent)
+                .appTapTarget()
         }
         .buttonStyle(PressScaleButtonStyle(scale: 0.95))
     }
@@ -930,7 +955,7 @@ struct TodayView: View {
                             .font(.caption2.weight(.bold))
                             .foregroundStyle(AppPalette.tertiaryInk)
                             .frame(width: 28, height: 28)
-                            .contentShape(Rectangle())
+                            .appTapTarget()
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Dismiss")
@@ -955,6 +980,7 @@ struct TodayView: View {
                     .padding(.horizontal, 14)
                     .padding(.vertical, 9)
                     .background(AppPalette.coral, in: Capsule())
+                    .appTapTarget()
                 }
                 .buttonStyle(PressScaleButtonStyle(scale: 0.96))
             }
@@ -1191,9 +1217,14 @@ struct TodayView: View {
     private func refreshSnapshot(from meetings: [Meeting]) async {
         let nextSnapshot = await snapshotBuilder.make(from: meetings)
         guard !Task.isCancelled else { return }
-        snap = nextSnapshot
-        savedPrepEvent = nextSnapshot.savedPrepEvent
-        rebuildHeroModel()
+        if snap != nextSnapshot {
+            snap = nextSnapshot
+            if savedPrepEvent != nextSnapshot.savedPrepEvent {
+                savedPrepEvent = nextSnapshot.savedPrepEvent
+            }
+            rebuildHeroModel()
+        }
+        hasLoadedSnapshot = true
     }
 }
 
@@ -1205,7 +1236,7 @@ private actor TodaySnapshotBuilder {
     }
 }
 
-struct TodaySnapshot {
+struct TodaySnapshot: Equatable {
     var processingMeetings: [Meeting] = []
     var recentHomeMeetings: [Meeting] = []
     var openLoops: [OpenLoop] = []
@@ -1231,13 +1262,22 @@ struct TodaySnapshot {
         let readyMeetings = recentMeetings.filter { $0.status != .processing }
         let pinned = Array(readyMeetings.lazy.filter(\.isPinned).prefix(3))
         let pinnedIDs = Set(pinned.map(\.id))
-        let openLoopSummary = Self.openLoopSummary(from: readyMeetings)
+        let accountabilityMeetingIDs = Set(meetings.compactMap { meeting in
+            meeting.allowsAccountabilityExtraction ? meeting.id : nil
+        })
+        let openLoopSummary = Self.openLoopSummary(
+            from: readyMeetings,
+            accountabilityMeetingIDs: accountabilityMeetingIDs
+        )
         let windows = Self.rollingCaptureWindows(in: meetings)
         recentHomeMeetings = Array(
             readyMeetings.lazy.filter { !pinnedIDs.contains($0.id) }.prefix(4)
         )
         openLoops = openLoopSummary.preview
-        dailyPlan = Self.dailyPlan(from: readyMeetings)
+        dailyPlan = Self.dailyPlan(
+            from: readyMeetings,
+            accountabilityMeetingIDs: accountabilityMeetingIDs
+        )
         pinnedMeetings = pinned
         totalOpenLoopsCount = openLoopSummary.count
         continueMeeting = readyMeetings.first
@@ -1252,7 +1292,8 @@ struct TodaySnapshot {
             from: readyMeetings,
             openLoopCount: openLoopSummary.count,
             todayCount: todayCaptureCount,
-            streak: longestStreakDays
+            streak: longestStreakDays,
+            accountabilityMeetingIDs: accountabilityMeetingIDs
         )
         if let meetingID = nextMove?.meetingID,
            let meeting = meetings.first(where: { $0.id == meetingID }) {
@@ -1263,10 +1304,16 @@ struct TodaySnapshot {
             .compactMap(CalendarEventSnapshot.init(preparedMeeting:))
             .filter { $0.endDate > now }
             .min { $0.startDate < $1.startDate }
-        followThroughPct = Self.followThroughPercent(in: meetings)
+        followThroughPct = Self.followThroughPercent(
+            in: meetings,
+            accountabilityMeetingIDs: accountabilityMeetingIDs
+        )
     }
 
-    private static func dailyPlan(from meetings: [Meeting]) -> [DailyPlanItem] {
+    private static func dailyPlan(
+        from meetings: [Meeting],
+        accountabilityMeetingIDs: Set<Meeting.ID>
+    ) -> [DailyPlanItem] {
         let now = Date()
         let cal = Calendar.current
         let tomorrow = cal.date(byAdding: .day, value: 1, to: now) ?? now
@@ -1301,7 +1348,7 @@ struct TodaySnapshot {
         var best: [DailyPlanItem] = []
         best.reserveCapacity(3)
 
-        for meeting in meetings where !meeting.isPersonalCapture {
+        for meeting in meetings where accountabilityMeetingIDs.contains(meeting.id) {
             for commitment in meeting.commitments {
                 guard let classification = classify(commitment, capturedAt: meeting.when) else { continue }
                 let candidate = DailyPlanItem(
@@ -1346,10 +1393,13 @@ struct TodaySnapshot {
         return (current, previous)
     }
 
-    private static func followThroughPercent(in meetings: [Meeting]) -> Int {
+    private static func followThroughPercent(
+        in meetings: [Meeting],
+        accountabilityMeetingIDs: Set<Meeting.ID>
+    ) -> Int {
         var total = 0
         var done = 0
-        for meeting in meetings where !meeting.isPersonalCapture {
+        for meeting in meetings where accountabilityMeetingIDs.contains(meeting.id) {
             for commitment in meeting.commitments {
                 total += 1
                 if commitment.status == .fulfilled || commitment.status == .superseded {
@@ -1368,10 +1418,13 @@ struct TodaySnapshot {
         from meetings: [Meeting],
         openLoopCount: Int,
         todayCount: Int,
-        streak: Int
+        streak: Int,
+        accountabilityMeetingIDs: Set<Meeting.ID>
     ) -> NextMove? {
         guard !meetings.isEmpty else { return nil }
-        let active = meetings.filter { $0.status != .shared && !$0.isPersonalCapture }
+        let active = meetings.filter {
+            $0.status != .shared && accountabilityMeetingIDs.contains($0.id)
+        }
 
         // 1. An at-risk commitment is the most urgent thing on the board.
         if let meeting = active.first(where: { $0.commitments.contains { $0.status == .atRisk } }),
@@ -1464,11 +1517,15 @@ struct TodaySnapshot {
         var count = 0
     }
 
-    private static func openLoopSummary(from meetings: [Meeting]) -> OpenLoopSummary {
+    private static func openLoopSummary(
+        from meetings: [Meeting],
+        accountabilityMeetingIDs: Set<Meeting.ID>
+    ) -> OpenLoopSummary {
         var summary = OpenLoopSummary()
         summary.preview.reserveCapacity(3)
 
-        for meeting in meetings where meeting.status != .shared && !meeting.isPersonalCapture {
+        for meeting in meetings
+        where meeting.status != .shared && accountabilityMeetingIDs.contains(meeting.id) {
             var meetingActionCount = 0
             for commitment in meeting.commitments
             where commitment.status == .open || commitment.status == .atRisk {
@@ -1507,7 +1564,6 @@ struct TodaySnapshot {
     }
 
     private static func firstRiskLine(from meeting: Meeting) -> String? {
-        guard !meeting.isPersonalCapture else { return nil }
         if let line = firstRiskLine(in: meeting.rawNotes) { return line }
         if let line = firstRiskLine(in: meeting.objective) { return line }
 
@@ -1639,7 +1695,7 @@ private struct HomeProcessingSection: View {
 /// The single highest-value action Scribeflow suggests right now. Pure data —
 /// presentation (tint, icon, routing) is derived in `NextMoveCard`.
 struct NextMove: Hashable, Identifiable {
-    enum Kind: Hashable {
+    enum Kind: String, Hashable {
         case resolveRisk
         case dueCommitment
         case summarize
@@ -1647,12 +1703,14 @@ struct NextMove: Hashable, Identifiable {
         case keepStreak
     }
 
-    var id = UUID()
     var kind: Kind
     var title: String
     var subtitle: String
     /// Set when the move opens a specific meeting; `nil` routes to capture/tasks.
     var meetingID: Meeting.ID?
+    var id: String {
+        "\(kind.rawValue)|\(meetingID?.uuidString ?? "workspace")"
+    }
 
     var eyebrow: String { "NEXT MOVE" }
 
@@ -2159,6 +2217,8 @@ struct HowItWorksSheet: View {
                             }
                             .accessibilityHidden(true)
                         }
+                        .accessibilityAction(named: "Previous step") { stepBack() }
+                        .accessibilityAction(named: "Next step") { stepForward() }
 
                     captionBlock
                         .padding(.horizontal, 24)
@@ -2194,6 +2254,7 @@ struct HowItWorksSheet: View {
                         .padding(.vertical, 5)
                         .background(stage.tint.opacity(0.12), in: Capsule())
                         .overlay(Capsule().strokeBorder(stage.tint.opacity(0.22), lineWidth: 0.6))
+                        .appTapTarget()
                     }
                     .buttonStyle(PressScaleButtonStyle(scale: 0.90))
                     .accessibilityLabel("Replay demo")
@@ -2221,26 +2282,8 @@ struct HowItWorksSheet: View {
     }
 
     private var ambientBackdrop: some View {
-        ZStack {
-            Circle()
-                .fill(stage.tint.opacity(0.20))
-                .frame(width: 420, height: 420)
-                .blur(radius: 44)
-                .offset(x: -110, y: -240)
-            Circle()
-                .fill(AppPalette.gold.opacity(0.10))
-                .frame(width: 340, height: 340)
-                .blur(radius: 44)
-                .offset(x: 150, y: 240)
-            Circle()
-                .fill(stage.tint.opacity(0.08))
-                .frame(width: 240, height: 240)
-                .blur(radius: 34)
-                .offset(x: 60, y: -40)
-
-            AmbientParticleField(tint: stage.tint)
-        }
-        .drawingGroup()
+        Rectangle()
+            .fill(stage.tint.opacity(0.035))
         .animation(reduceMotion ? .linear(duration: 0.01) : .easeInOut(duration: 0.9), value: stage)
         .allowsHitTesting(false)
     }
@@ -4075,7 +4118,7 @@ enum HeroStyle: String, CaseIterable, Identifiable {
 }
 
 /// Data the hero variants render. Built from the Today snapshot + calendar.
-struct HeroModel {
+struct HeroModel: Equatable {
     var today: Int
     var open: Int
     var streak: Int
@@ -4565,9 +4608,7 @@ struct CommandPaletteSheet: View {
                             .padding(.vertical, 36)
                         }
                     }
-                    .padding(.horizontal, 20)
-                    .padding(.top, 14)
-                    .padding(.bottom, 28)
+                    .appScreenContent(top: 14, bottom: 28)
                 }
             }
             .background(AppPalette.background.ignoresSafeArea())
@@ -4605,6 +4646,7 @@ struct CommandPaletteSheet: View {
             if !query.isEmpty {
                 Button { HapticEngine.tap(.light); query = "" } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(AppPalette.tertiaryInk)
+                        .appTapTarget()
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Clear")
@@ -4616,6 +4658,7 @@ struct CommandPaletteSheet: View {
         .overlay(RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous).strokeBorder(AppPalette.border, lineWidth: 1))
         .padding(.horizontal, 20)
         .padding(.top, 10)
+        .readingWidth()
     }
 
     @ViewBuilder

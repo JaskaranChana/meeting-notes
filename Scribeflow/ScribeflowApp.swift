@@ -1,10 +1,24 @@
 import SwiftUI
 
+@MainActor
+final class ScribeflowRuntime {
+    static let shared = ScribeflowRuntime()
+
+    let store: MeetingStore
+
+    private init() {
+        let store = MeetingStore()
+        self.store = store
+        MeetingProcessingCoordinator.shared.attach(store)
+    }
+}
+
 @main
+@MainActor
 struct ScribeflowApp: App {
     @UIApplicationDelegateAdaptor(ScribeflowAppDelegate.self) private var appDelegate
     @Environment(\.scenePhase) private var scenePhase
-    @State private var store = MeetingStore()
+    @State private var store: MeetingStore
     @State private var authSession = AuthSessionStore()
     @State private var showingSplash = !UserDefaults.standard.bool(forKey: "hasCompletedLaunchOnboarding")
     @AppStorage("hasCompletedLaunchOnboarding") private var hasCompletedLaunchOnboarding = false
@@ -12,6 +26,7 @@ struct ScribeflowApp: App {
     @AppStorage("scribeflow.requireAppUnlock") private var requireAppUnlock = false
 
     init() {
+        _store = State(initialValue: ScribeflowRuntime.shared.store)
         NotificationRouter.shared.configure()
         MetricsSubscriber.shared.start()
         AnalyticsLog.shared.log("app.launch")
@@ -21,26 +36,30 @@ struct ScribeflowApp: App {
         WindowGroup {
             ZStack {
                 Group {
-                    #if DEBUG
-                    ContentView()
-                        .environment(store)
-                      #else
-                      if hasCompletedLaunchOnboarding {
-                          if requireAppUnlock {
-                              AuthGateView {
-                                  ContentView()
-                                      .environment(store)
-                              }
-                          } else {
-                              ContentView()
-                                  .environment(store)
-                          }
+                    if store.isLoadingLibrary {
+                        LibraryLaunchProgressView(stage: store.libraryLoadingStage)
                     } else {
-                        LaunchOnboardingView {
-                            hasCompletedLaunchOnboarding = true
+                        #if DEBUG
+                        ContentView()
+                            .environment(store)
+                        #else
+                        if hasCompletedLaunchOnboarding {
+                            if requireAppUnlock {
+                                AuthGateView {
+                                    ContentView()
+                                        .environment(store)
+                                }
+                            } else {
+                                ContentView()
+                                    .environment(store)
+                            }
+                        } else {
+                            LaunchOnboardingView {
+                                hasCompletedLaunchOnboarding = true
+                            }
                         }
+                        #endif
                     }
-                    #endif
                 }
                 .environment(authSession)
                 .preferredColorScheme(AppearancePreference(rawValue: appearanceRaw)?.colorScheme)
@@ -56,14 +75,14 @@ struct ScribeflowApp: App {
                 }
             }
             .task {
-                MeetingProcessingCoordinator.shared.attach(store)
+                await store.loadLibraryIfNeeded()
                 await MeetingProcessingCoordinator.shared.resume(using: store)
                 store.enforceRetentionPolicies()
             }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .background, requireAppUnlock {
                     authSession.lock()
-                } else if phase == .active {
+                } else if phase == .active, store.hasLoadedLibrary {
                     store.enforceRetentionPolicies()
                 }
             }
@@ -95,6 +114,32 @@ struct ScribeflowApp: App {
                 }
                 .keyboardShortcut("k", modifiers: .command)
             }
+        }
+    }
+}
+
+private struct LibraryLaunchProgressView: View {
+    let stage: String
+
+    var body: some View {
+        ZStack {
+            AppPalette.background
+                .ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                ScribeflowBrandMark(size: 58)
+
+                ProgressView()
+                    .controlSize(.regular)
+                    .tint(AppPalette.accent)
+
+                Text(stage)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(AppPalette.secondaryInk)
+                    .contentTransition(.opacity)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(stage)
         }
     }
 }
@@ -146,6 +191,7 @@ private struct LaunchOnboardingView: View {
                     }
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(AppPalette.secondaryInk)
+                    .appTapTarget()
                 }
                 .padding(.horizontal, 24)
                 .padding(.top, 18)

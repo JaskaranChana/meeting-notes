@@ -25,6 +25,16 @@ struct MeetingSavedSheet: View {
     let onOpen: () -> Void
 
     @State private var revealedSteps: Int = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private static let burstParticles: [(size: CGFloat, x: CGFloat, y: CGFloat, color: Color)] = [
+        (6, -82, -48, AppPalette.accent),
+        (5, -46, 22, AppPalette.gold),
+        (7, -12, -30, AppPalette.success),
+        (5, 28, 30, AppPalette.coral),
+        (6, 58, -18, AppPalette.accent),
+        (4, 86, 12, AppPalette.gold)
+    ]
 
     private var meeting: Meeting? { store.meeting(withID: meetingID) }
     private var signals: MeetingSignals? {
@@ -64,59 +74,54 @@ struct MeetingSavedSheet: View {
             confettiBurst
                 .allowsHitTesting(false)
 
-            VStack(alignment: .leading, spacing: 0) {
-                Spacer(minLength: 24)
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: AppSpacing.xl) {
+                    VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                        Text("SAVED")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(AppPalette.tertiaryInk)
+                            .opacity(revealedSteps >= 1 ? 1 : 0)
+                            .offset(y: revealedSteps >= 1 ? 0 : 10)
 
-                Text("SAVED")
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(AppPalette.tertiaryInk)
-                    .opacity(revealedSteps >= 1 ? 1 : 0)
-                    .offset(y: revealedSteps >= 1 ? 0 : 10)
+                        Text(meeting?.title ?? "Meeting")
+                            .font(.system(.largeTitle, design: .serif).weight(.semibold))
+                            .foregroundStyle(AppPalette.ink)
+                            .lineLimit(3)
+                            .multilineTextAlignment(.leading)
+                            .opacity(revealedSteps >= 1 ? 1 : 0)
+                            .offset(y: revealedSteps >= 1 ? 0 : 14)
 
-                // Title — the meeting name in serif. The single anchor.
-                Text(meeting?.title ?? "Meeting")
-                    .font(.system(.largeTitle, design: .serif).weight(.semibold))
-                    .foregroundStyle(AppPalette.ink)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                    .padding(.top, 6)
-                    .opacity(revealedSteps >= 1 ? 1 : 0)
-                    .offset(y: revealedSteps >= 1 ? 0 : 14)
+                        if let meeting {
+                            Text("\(meeting.workspace) · \(meeting.durationMinutes) min")
+                                .font(.subheadline)
+                                .foregroundStyle(AppPalette.secondaryInk)
+                                .opacity(revealedSteps >= 1 ? 1 : 0)
+                        }
+                    }
 
-                // Subtle metadata line
-                if let meeting {
-                    Text("\(meeting.workspace) · \(meeting.durationMinutes) min")
-                        .font(.subheadline)
-                        .foregroundStyle(AppPalette.secondaryInk)
-                        .padding(.top, 6)
-                        .opacity(revealedSteps >= 1 ? 1 : 0)
-                }
-
-                Spacer(minLength: 36)
-
-                // Highlights — what was extracted
-                if highlights.isEmpty {
-                    placeholderRow
-                        .opacity(revealedSteps >= 2 ? 1 : 0)
-                } else {
-                    VStack(alignment: .leading, spacing: 18) {
-                        ForEach(Array(highlights.enumerated()), id: \.offset) { idx, h in
-                            highlightRow(h)
-                                .opacity(revealedSteps >= idx + 2 ? 1 : 0)
-                                .offset(y: revealedSteps >= idx + 2 ? 0 : 8)
+                    if highlights.isEmpty {
+                        placeholderRow
+                            .opacity(revealedSteps >= 2 ? 1 : 0)
+                    } else {
+                        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+                            ForEach(Array(highlights.enumerated()), id: \.offset) { idx, h in
+                                highlightRow(h)
+                                    .opacity(revealedSteps >= idx + 2 ? 1 : 0)
+                                    .offset(y: revealedSteps >= idx + 2 ? 0 : 8)
+                            }
                         }
                     }
                 }
-
-                Spacer(minLength: 24)
-
-                // Actions
-                actionRow
-                    .opacity(revealedSteps >= 4 ? 1 : 0)
-                    .offset(y: revealedSteps >= 4 ? 0 : 12)
+                .appScreenContent(top: AppSpacing.xl, bottom: AppSpacing.lg)
             }
-            .padding(.horizontal, 28)
-            .padding(.bottom, 16)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            actionRow
+                .padding(.horizontal, AppLayout.screenHorizontalPadding)
+                .padding(.vertical, AppSpacing.sm)
+                .background(.ultraThinMaterial)
+                .opacity(revealedSteps >= 4 ? 1 : 0)
+                .offset(y: revealedSteps >= 4 ? 0 : 12)
         }
         .task { await runReveal() }
     }
@@ -126,6 +131,10 @@ struct MeetingSavedSheet: View {
     private func runReveal() async {
         // Signature haptic on open — single, soft success notification.
         HapticEngine.notify(.success)
+        if reduceMotion {
+            revealedSteps = 4
+            return
+        }
 
         // Step 1 — title block
         try? await Task.sleep(for: .milliseconds(120))
@@ -184,7 +193,7 @@ struct MeetingSavedSheet: View {
     }
 
     private var actionRow: some View {
-        HStack(spacing: 12) {
+        AdaptiveActionStack(spacing: AppSpacing.sm) {
             Button {
                 HapticEngine.tap(.light)
                 dismiss()
@@ -216,25 +225,28 @@ struct MeetingSavedSheet: View {
             }
             .buttonStyle(PressScaleButtonStyle(scale: 0.97))
         }
+        .readingWidth()
     }
 
     private var confettiBurst: some View {
         GeometryReader { geo in
             let center = CGPoint(x: geo.size.width / 2, y: geo.size.height * 0.3)
-            ForEach(0..<6, id: \.self) { i in
+            ForEach(Array(Self.burstParticles.enumerated()), id: \.offset) { index, particle in
                 Circle()
-                    .fill([AppPalette.accent, AppPalette.gold, AppPalette.success, AppPalette.coral, AppPalette.accent, AppPalette.gold][i])
-                    .frame(width: CGFloat.random(in: 4...8), height: CGFloat.random(in: 4...8))
+                    .fill(particle.color)
+                    .frame(width: particle.size, height: particle.size)
                     .position(center)
                     .offset(
-                        x: revealedSteps >= 1 ? CGFloat.random(in: -90...90) : 0,
-                        y: revealedSteps >= 1 ? CGFloat.random(in: -60...40) : 0
+                        x: revealedSteps >= 1 ? particle.x : 0,
+                        y: revealedSteps >= 1 ? particle.y : 0
                     )
                     .opacity(revealedSteps >= 1 ? 0 : 1)
-                    .animation(.easeOut(duration: 1.2).delay(Double(i) * 0.04), value: revealedSteps)
+                    .animation(
+                        reduceMotion ? nil : .easeOut(duration: 1.2).delay(Double(index) * 0.04),
+                        value: revealedSteps
+                    )
             }
         }
-        .drawingGroup()
     }
 
     private struct Highlight {

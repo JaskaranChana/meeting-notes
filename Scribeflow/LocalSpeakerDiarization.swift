@@ -124,22 +124,34 @@ actor LocalSpeakerDiarizationService {
                 .sorted { $0.startTimeSeconds < $1.startTimeSeconds }
             guard !orderedTurns.isEmpty else { return coalesced(result) }
 
+            let credibleTurns = credibleSpeakerTurns(
+                from: orderedTurns,
+                hasExplicitSpeakerCount: constrainedSpeakerCount != nil
+            )
+            let credibleSpeakerIDs = Set(credibleTurns.map(\.speakerId))
+            guard credibleSpeakerIDs.count > 1 else { return coalesced(result) }
+
             var displayNames: [String: String] = [:]
-            for turn in orderedTurns where displayNames[turn.speakerId] == nil {
+            for turn in credibleTurns where displayNames[turn.speakerId] == nil {
                 displayNames[turn.speakerId] = "Speaker \(displayNames.count + 1)"
             }
 
             let aligned = result.segments.flatMap { segment in
                 alignedSegments(
                     for: segment,
-                    turns: orderedTurns,
+                    turns: credibleTurns,
                     displayNames: displayNames
                 )
             }
 
             var enriched = result
             enriched.segments = Self.coalesce(aligned)
-            enriched.diarizationAvailable = true
+            enriched.diarizationAvailable = Set(enriched.segments.map {
+                SpeakerIdentityResolver.canonicalKey(for: $0.speaker)
+            }).filter { !$0.isEmpty }.count > 1
+            enriched.speakerSeparationConfidence = enriched.diarizationAvailable
+                ? separationConfidence(turns: credibleTurns, speakerIDs: credibleSpeakerIDs)
+                : .unverified
             return enriched
         } catch {
             return coalesced(result)
@@ -152,6 +164,13 @@ actor LocalSpeakerDiarizationService {
     private func coalesced(_ result: TranscriptionResult) -> TranscriptionResult {
         var revised = result
         revised.segments = Self.coalesce(result.segments)
+        let distinctSpeakers = Set(revised.segments.map {
+            SpeakerIdentityResolver.canonicalKey(for: $0.speaker)
+        }).filter { !$0.isEmpty }.count
+        if distinctSpeakers < 2 {
+            revised.diarizationAvailable = false
+            revised.speakerSeparationConfidence = .unverified
+        }
         return revised
     }
 
@@ -163,6 +182,42 @@ actor LocalSpeakerDiarizationService {
     }
 
     #if canImport(FluidAudio)
+    private func credibleSpeakerTurns(
+        from turns: [TimedSpeakerSegment],
+        hasExplicitSpeakerCount: Bool
+    ) -> [TimedSpeakerSegment] {
+        let totalDuration = turns.reduce(0.0) {
+            $0 + max(0, Double($1.endTimeSeconds - $1.startTimeSeconds))
+        }
+        let minimumDuration = hasExplicitSpeakerCount
+            ? 0.35
+            : min(1.5, max(0.60, totalDuration * 0.015))
+        let durationBySpeaker = Dictionary(grouping: turns, by: \.speakerId).mapValues { speakerTurns in
+            speakerTurns.reduce(0.0) {
+                $0 + max(0, Double($1.endTimeSeconds - $1.startTimeSeconds))
+            }
+        }
+        let credibleIDs = Set(durationBySpeaker.compactMap { speakerID, duration in
+            duration >= minimumDuration ? speakerID : nil
+        })
+        return turns.filter { credibleIDs.contains($0.speakerId) }
+    }
+
+    private func separationConfidence(
+        turns: [TimedSpeakerSegment],
+        speakerIDs: Set<String>
+    ) -> SpeakerSeparationConfidence {
+        let grouped = Dictionary(grouping: turns, by: \.speakerId)
+        let hasRepeatedEvidence = speakerIDs.allSatisfy { (grouped[$0]?.count ?? 0) >= 2 }
+        let hasSustainedEvidence = speakerIDs.allSatisfy { speakerID in
+            let duration = grouped[speakerID, default: []].reduce(0.0) {
+                $0 + max(0, Double($1.endTimeSeconds - $1.startTimeSeconds))
+            }
+            return duration >= 2.5
+        }
+        return hasRepeatedEvidence && hasSustainedEvidence ? .strong : .tentative
+    }
+
     private func alignedSegments(
         for segment: TranscriptionSegment,
         turns: [TimedSpeakerSegment],

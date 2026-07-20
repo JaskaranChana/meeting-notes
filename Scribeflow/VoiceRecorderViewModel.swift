@@ -328,15 +328,15 @@ final class VoiceRecorderViewModel {
                 await TranscriptionRetryQueue.shared.remove(id: job.id)
             }
             phase = .readyToSave
-            let speakerCount = Set(result.segments.map {
-                SpeakerIdentityResolver.canonicalKey(for: $0.speaker)
-            }).filter { !$0.isEmpty }.count
+            let speakerCount = result.distinctSpeakerCount
             if transcript.isEmpty {
                 statusMessage = "Audio ready"
-            } else if result.diarizationAvailable, speakerCount > 0 {
-                statusMessage = "Transcript ready · \(speakerCount) voice\(speakerCount == 1 ? "" : "s") separated"
+            } else if result.diarizationAvailable, speakerCount > 1 {
+                statusMessage = result.effectiveSpeakerSeparationConfidence == .strong
+                    ? "Transcript ready · \(speakerCount) voice patterns separated"
+                    : "Transcript ready · \(speakerCount) likely speakers · review labels"
             } else {
-                statusMessage = "Transcript ready via \(result.provider.title) · speaker separation unavailable"
+                statusMessage = "Transcript ready via \(result.provider.title) · speaker count unconfirmed"
             }
         } catch {
             job.markFailed(error.localizedDescription)

@@ -75,6 +75,7 @@ struct CaptureView: View {
                     if mode == .record, showCopilotRail {
                         MeetingCopilotRail(
                             meetings: store.meetings,
+                            libraryRevision: store.revision,
                             attendees: attendeeList,
                             paragraphs: coordinator.transcriptParagraphs,
                             purpose: coordinator.currentPurpose,
@@ -94,9 +95,7 @@ struct CaptureView: View {
                             .transition(.opacity)
                     }
                 }
-                .padding(.horizontal, 20)
-                .padding(.top, 16)
-                .padding(.bottom, 40)
+                .appScreenContent(top: AppSpacing.md, bottom: 40)
             }
             .scrollDismissesKeyboard(.interactively)
             .background(AppPalette.background.ignoresSafeArea())
@@ -143,6 +142,7 @@ struct CaptureView: View {
             }
         }
         .modifier(ScribeflowChrome())
+        .interactiveDismissDisabled(coordinator.isRecording || isSaving || coordinator.isFinalizingSpeech)
         .sensoryFeedback(trigger: coordinator.isRecording) { _, new in
             new ? .impact(weight: .heavy) : .impact(weight: .light)
         }
@@ -249,6 +249,7 @@ struct CaptureView: View {
             .foregroundStyle(mode == pill ? .white : AppPalette.secondaryInk)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 10)
+            .frame(minHeight: AppLayout.minimumTapTarget)
             .background(
                 ZStack {
                     if mode == pill {
@@ -313,6 +314,7 @@ struct CaptureView: View {
                                 .font(.caption.weight(.semibold))
                         }
                         .foregroundStyle(AppPalette.accent)
+                        .appTapTarget()
                     }
                     .buttonStyle(.plain)
                 }
@@ -381,7 +383,7 @@ struct CaptureView: View {
     static let captureGreen = Color(red: 0.490, green: 0.820, blue: 0.639) // #7DD1A3
 
     private var transcribedWordCount: Int {
-        coordinator.transcriptParagraphs.reduce(0) { $0 + $1.split(whereSeparator: { $0 == " " }).count }
+        coordinator.transcriptWordCount
     }
 
     /// Most recent meaningful spoken line, for the on-stage live caption.
@@ -698,6 +700,7 @@ struct CaptureView: View {
                                 .font(.subheadline.weight(.semibold))
                                 .frame(width: 32, height: 32)
                                 .background(Color.white.opacity(0.10), in: Circle())
+                                .appTapTarget()
                         }
                         .buttonStyle(.plain)
                         .foregroundStyle(recordingContinues ? AppPalette.gold : AppPalette.coral)
@@ -873,6 +876,7 @@ struct CaptureView: View {
                             }
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
+                            .frame(minHeight: AppLayout.minimumTapTarget)
                             .background(Color.white.opacity(0.05), in: Capsule())
                             .overlay(Capsule().strokeBorder(.white.opacity(0.10), lineWidth: 0.8))
                         }
@@ -903,6 +907,7 @@ struct CaptureView: View {
                     Image(systemName: "xmark.circle.fill")
                         .font(.subheadline)
                         .foregroundStyle(.white.opacity(0.35))
+                        .appTapTarget()
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Dismiss catch-up")
@@ -1006,7 +1011,6 @@ struct CaptureView: View {
                     .contentTransition(.symbolEffect(.replace))
                     .symbolEffect(.bounce, value: coordinator.isRecording)
             }
-            .drawingGroup()
     }
 
     @ViewBuilder
@@ -1245,6 +1249,7 @@ struct CaptureView: View {
                 .foregroundStyle(selected ? .white : AppPalette.secondaryInk)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 9)
+                .frame(minHeight: AppLayout.minimumTapTarget)
                 .background {
                     if selected {
                         Capsule().fill(AppPalette.accentButton)
@@ -1320,6 +1325,11 @@ struct CaptureView: View {
             )
         }
 
+        if hasAudio {
+            Task {
+                _ = await ScribeflowNotificationAuthorization.shared.requestIfNeeded()
+            }
+        }
         isSaving = false
         savedMeetingID = id
     }
@@ -1381,6 +1391,7 @@ struct SmartNotesPreview: View, Equatable {
 
     @State private var decisions: [String] = []
     @State private var actions: [ExtractedActionItem] = []
+    @State private var analysisWorker = SmartNotesAnalysisWorker()
 
     static func == (lhs: SmartNotesPreview, rhs: SmartNotesPreview) -> Bool {
         lhs.notes == rhs.notes
@@ -1454,9 +1465,10 @@ struct SmartNotesPreview: View, Equatable {
             // every keystroke (which hung the keyboard).
             try? await Task.sleep(for: .milliseconds(350))
             guard !Task.isCancelled else { return }
-            let m = meeting
-            decisions = MeetingIntelligenceEngine.decisions(for: m, limit: 3)
-            actions = MeetingIntelligenceEngine.structuredActions(for: m, limit: 4)
+            let result = await analysisWorker.analyze(meeting)
+            guard !Task.isCancelled else { return }
+            decisions = result.decisions
+            actions = result.actions
         }
     }
 
@@ -1513,6 +1525,27 @@ struct SmartNotesPreview: View, Equatable {
     }
 }
 
+private struct SmartNotesAnalysisSnapshot {
+    let decisions: [String]
+    let actions: [ExtractedActionItem]
+}
+
+private actor SmartNotesAnalysisWorker {
+    func analyze(_ meeting: Meeting) -> SmartNotesAnalysisSnapshot {
+        guard !Task.isCancelled else {
+            return SmartNotesAnalysisSnapshot(decisions: [], actions: [])
+        }
+        let decisions = MeetingIntelligenceEngine.decisions(for: meeting, limit: 3)
+        guard !Task.isCancelled else {
+            return SmartNotesAnalysisSnapshot(decisions: [], actions: [])
+        }
+        return SmartNotesAnalysisSnapshot(
+            decisions: decisions,
+            actions: MeetingIntelligenceEngine.structuredActions(for: meeting, limit: 4)
+        )
+    }
+}
+
 // MARK: - Live level leaves
 
 /// The mic waveform. Reads `inputLevel` itself so the high-frequency level
@@ -1549,20 +1582,59 @@ private struct ReactiveRing: View {
 /// Live Copilot rail. Isolated as its own view so it recomputes its (meeting-
 /// scanning) signals only when its inputs change — not on every waveform tick
 /// that re-renders the parent capture screen.
+fileprivate struct MeetingCopilotSnapshot: Equatable {
+    var remember: [CopilotSignal] = []
+    var detected: [CopilotSignal] = []
+    var ask: [CopilotSignal] = []
+}
+
+private struct MeetingCopilotSnapshotKey: Hashable {
+    let libraryRevision: Int
+    let attendees: [String]
+    let paragraphTail: [String]
+    let purpose: CapturePurpose
+    let isRecording: Bool
+}
+
+private actor MeetingCopilotSnapshotBuilder {
+    func make(
+        meetings: [Meeting],
+        attendees: [String],
+        paragraphs: [String],
+        purpose: CapturePurpose
+    ) -> MeetingCopilotSnapshot {
+        MeetingCopilot.snapshot(
+            attendees: attendees,
+            paragraphs: paragraphs,
+            purpose: purpose,
+            meetings: meetings
+        )
+    }
+}
+
 private struct MeetingCopilotRail: View {
     let meetings: [Meeting]
+    let libraryRevision: Int
     let attendees: [String]
     let paragraphs: [String]
     let purpose: CapturePurpose
     let isRecording: Bool
     let onFile: (CopilotSignal) -> Void
+    @State private var snapshot = MeetingCopilotSnapshot()
+    @State private var snapshotBuilder = MeetingCopilotSnapshotBuilder()
+
+    private var snapshotKey: MeetingCopilotSnapshotKey {
+        MeetingCopilotSnapshotKey(
+            libraryRevision: libraryRevision,
+            attendees: attendees,
+            paragraphTail: Array(paragraphs.suffix(10)),
+            purpose: purpose,
+            isRecording: isRecording
+        )
+    }
 
     var body: some View {
-        // Each feed computed once per render of this view.
         let isWorkCapture = purpose.allowsMeetingSignals
-        let remember = isWorkCapture ? MeetingCopilot.remember(attendees: attendees, in: meetings) : []
-        let detected = MeetingCopilot.detect(paragraphs: paragraphs, purpose: purpose)
-        let ask = isWorkCapture ? MeetingCopilot.askThem(attendees: attendees, in: meetings) : []
 
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 8) {
@@ -1588,7 +1660,7 @@ private struct MeetingCopilotRail: View {
             if isWorkCapture {
                 section(
                     "REMEMBER", icon: "brain", tint: AppPalette.accent,
-                    signals: remember,
+                    signals: snapshot.remember,
                     emptyHint: attendees.isEmpty
                         ? "Add attendees above to recall open promises with these people."
                         : "No open items carried over with these people."
@@ -1598,7 +1670,7 @@ private struct MeetingCopilotRail: View {
                 isWorkCapture ? "DETECTED NOW" : purpose.kind.insightTitle.uppercased(),
                 icon: isWorkCapture ? "dot.radiowaves.left.and.right" : purpose.kind.systemImage,
                 tint: AppPalette.gold,
-                signals: detected,
+                signals: snapshot.detected,
                 emptyHint: isRecording
                     ? (isWorkCapture
                         ? "Listening for decisions and action items…"
@@ -1608,7 +1680,7 @@ private struct MeetingCopilotRail: View {
             if isWorkCapture {
                 section(
                     "ASK THEM", icon: "questionmark.bubble", tint: AppPalette.coral,
-                    signals: ask,
+                    signals: snapshot.ask,
                     emptyHint: nil
                 )
             }
@@ -1624,6 +1696,20 @@ private struct MeetingCopilotRail: View {
                 .strokeBorder(AppPalette.accent.opacity(0.18), lineWidth: 0.8)
         )
         .appShadow(AppShadow.soft)
+        .task(id: snapshotKey) {
+            try? await Task.sleep(for: .milliseconds(100))
+            guard !Task.isCancelled else { return }
+            let nextSnapshot = await snapshotBuilder.make(
+                meetings: meetings,
+                attendees: attendees,
+                paragraphs: paragraphs,
+                purpose: purpose
+            )
+            guard !Task.isCancelled else { return }
+            if snapshot != nextSnapshot {
+                snapshot = nextSnapshot
+            }
+        }
     }
 
     @ViewBuilder
@@ -1723,6 +1809,29 @@ struct CopilotSignal: Identifiable, Equatable {
 /// Kept as static functions so it stays trivially testable and side-effect free.
 enum MeetingCopilot {
 
+    fileprivate static func snapshot(
+        attendees: [String],
+        paragraphs: [String],
+        purpose: CapturePurpose,
+        meetings: [Meeting]
+    ) -> MeetingCopilotSnapshot {
+        let detected = detect(paragraphs: paragraphs, purpose: purpose)
+        guard purpose.allowsMeetingSignals, !Task.isCancelled else {
+            return MeetingCopilotSnapshot(detected: detected)
+        }
+
+        let related = relatedMeetings(attendees: attendees, in: meetings)
+        let accountable = related.filter {
+            guard !Task.isCancelled else { return false }
+            return $0.allowsAccountabilityExtraction
+        }
+        return MeetingCopilotSnapshot(
+            remember: remember(in: accountable),
+            detected: detected,
+            ask: askThem(in: accountable)
+        )
+    }
+
     /// Past meetings that share at least one attendee (by name) with the
     /// current set. Title is also matched so a "QBR: Meridian" recalls when
     /// "Meridian" is an attendee. Newest first.
@@ -1743,10 +1852,15 @@ enum MeetingCopilot {
     /// people, so nothing carries over forgotten.
     static func remember(attendees: [String], in meetings: [Meeting], limit: Int = 3) -> [CopilotSignal] {
         let related = relatedMeetings(attendees: attendees, in: meetings)
+            .filter(\.allowsAccountabilityExtraction)
+        return remember(in: related, limit: limit)
+    }
+
+    private static func remember(in related: [Meeting], limit: Int = 3) -> [CopilotSignal] {
         guard !related.isEmpty else { return [] }
         var out: [CopilotSignal] = []
         for meeting in related {
-            guard meeting.allowsAccountabilityExtraction else { continue }
+            guard !Task.isCancelled else { break }
             for c in meeting.commitments where c.status == .open || c.status == .atRisk {
                 let detail = [ownerLabel(c.owner), meeting.title]
                     .filter { !$0.isEmpty }
@@ -1761,10 +1875,15 @@ enum MeetingCopilot {
     /// raise in this meeting.
     static func askThem(attendees: [String], in meetings: [Meeting], limit: Int = 2) -> [CopilotSignal] {
         let related = relatedMeetings(attendees: attendees, in: meetings)
+            .filter(\.allowsAccountabilityExtraction)
+        return askThem(in: related, limit: limit)
+    }
+
+    private static func askThem(in related: [Meeting], limit: Int = 2) -> [CopilotSignal] {
         guard !related.isEmpty else { return [] }
         var out: [CopilotSignal] = []
         for meeting in related {
-            guard meeting.allowsAccountabilityExtraction else { continue }
+            guard !Task.isCancelled else { break }
             for c in meeting.commitments
             where (c.status == .open || c.status == .atRisk) && !isSelf(c.owner) {
                 out.append(CopilotSignal(kind: .ask, text: question(from: c.statement), detail: ownerLabel(c.owner)))

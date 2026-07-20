@@ -43,8 +43,8 @@ enum AppMotion {
     static let snappy: Animation = .spring(response: 0.28, dampingFraction: 0.86)
     /// Smooth — toasts, sheets, modal transitions. ~380ms, gentle.
     static let smooth: Animation = .spring(response: 0.38, dampingFraction: 0.84)
-    /// Gentle — first-frame entrance cascades, stagger reveals. ~500ms.
-    static let entrance: Animation = .spring(response: 0.50, dampingFraction: 0.88)
+    /// Short first-frame fade for lightweight screen chrome.
+    static let entrance: Animation = .easeOut(duration: 0.24)
     /// Press — button label compress on tap. Tighter than `snappy`.
     static let press: Animation = .spring(response: 0.24, dampingFraction: 0.82)
     /// Linear opacity fade — privacy curtain, splash dismiss.
@@ -54,8 +54,8 @@ enum AppMotion {
     /// Repeating pulse — live recording dots, attention indicators.
     static let pulse: Animation = .easeInOut(duration: 0.9).repeatForever(autoreverses: true)
 
-    /// Stagger delay between siblings in an entrance cascade.
-    static let entranceStagger: Double = 0.06
+    /// Small stagger for the first few pieces of screen chrome.
+    static let entranceStagger: Double = 0.035
 
     /// Interactive bounce — used for selected tab pop, mic tap.
     static let bounce: Animation = .spring(response: 0.30, dampingFraction: 0.62)
@@ -183,12 +183,14 @@ extension View {
 struct PressScaleButtonStyle: ButtonStyle {
     var scale: CGFloat = 0.98
     var opacity: Double = 0.92
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? scale : 1)
-            .opacity(configuration.isPressed ? opacity : 1)
-            .animation(AppMotion.press, value: configuration.isPressed)
+            .scaleEffect(configuration.isPressed && !reduceMotion ? scale : 1)
+            .opacity(isEnabled ? (configuration.isPressed ? opacity : 1) : 0.46)
+            .animation(reduceMotion ? nil : AppMotion.press, value: configuration.isPressed)
     }
 }
 
@@ -344,6 +346,12 @@ enum AppLayout {
     /// Max width for primary scroll content. Tuned for ~80 chars at body
     /// size — the long-read sweet spot.
     static let contentMaxWidth: CGFloat = 720
+    /// Consistent readable gutter for every full-screen flow.
+    static let screenHorizontalPadding: CGFloat = 20
+    /// Minimum interactive footprint from the iOS Human Interface Guidelines.
+    static let minimumTapTarget: CGFloat = 44
+    /// Bottom breathing room for sheets without persistent bottom controls.
+    static let sheetBottomPadding: CGFloat = 32
 }
 
 /// Caps a stack of content to `AppLayout.contentMaxWidth` and centers it.
@@ -352,6 +360,24 @@ extension View {
     func readingWidth() -> some View {
         frame(maxWidth: AppLayout.contentMaxWidth, alignment: .center)
             .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    /// Gives compact icon and chip controls a reliable 44-point hit region
+    /// without forcing their visible background to grow.
+    func appTapTarget(_ size: CGFloat = AppLayout.minimumTapTarget) -> some View {
+        frame(minWidth: size, minHeight: size)
+            .contentShape(Rectangle())
+    }
+
+    /// Standard page treatment for content hosted by a vertical ScrollView.
+    func appScreenContent(
+        top: CGFloat = AppSpacing.md,
+        bottom: CGFloat = AppLayout.sheetBottomPadding
+    ) -> some View {
+        padding(.horizontal, AppLayout.screenHorizontalPadding)
+            .padding(.top, top)
+            .padding(.bottom, bottom)
+            .readingWidth()
     }
 }
 

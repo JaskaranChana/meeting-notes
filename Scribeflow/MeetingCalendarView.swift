@@ -28,6 +28,7 @@ struct MeetingCalendarView: View {
     @State private var isRequestingAccess = false
     @State private var snapshot = MeetingCalendarSnapshot()
     @State private var snapshotBuilder = MeetingCalendarSnapshotBuilder()
+    @State private var hasLoadedSnapshot = false
     @State private var prepPresentation: EventPrepPresentation?
 
     private var snapshotKey: MeetingCalendarSnapshotKey {
@@ -370,13 +371,28 @@ struct MeetingCalendarView: View {
 
     @ViewBuilder
     private var calendarModeContent: some View {
-        switch calendarScope {
-        case .month:
-            calendarGrid
-        case .week:
-            calendarWeekBoard
-        case .agenda:
-            calendarAgendaBoard
+        if !hasLoadedSnapshot {
+            HStack(spacing: 12) {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(AppPalette.accent)
+                Text("Preparing calendar")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(AppPalette.secondaryInk)
+                Spacer(minLength: 0)
+            }
+            .frame(minHeight: 180, alignment: .center)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Preparing calendar")
+        } else {
+            switch calendarScope {
+            case .month:
+                calendarGrid
+            case .week:
+                calendarWeekBoard
+            case .agenda:
+                calendarAgendaBoard
+            }
         }
     }
 
@@ -524,7 +540,10 @@ struct MeetingCalendarView: View {
                         agendaSectionTitle(calendarFilter == .openLoops ? "Open-loop notes" : "Scribeflow notes", count: meetings.count)
                         ForEach(meetings) { meeting in
                             NavigationLink(value: meeting.id) {
-                                MeetingCalendarMeetingRow(meeting: meeting)
+                                MeetingCalendarMeetingRow(
+                                    meeting: meeting,
+                                    openLoopCount: snapshot.openLoopCount(for: meeting.id)
+                                )
                             }
                             .buttonStyle(PressScaleButtonStyle(scale: 0.98))
                         }
@@ -561,7 +580,10 @@ struct MeetingCalendarView: View {
     }
 
     private var filteredSelectedMeetings: [Meeting] {
-        calendarFilter.visibleMeetings(from: snapshot.selectedMeetings)
+        calendarFilter.visibleMeetings(
+            from: snapshot.selectedMeetings,
+            openLoopCount: snapshot.openLoopCount(for:)
+        )
     }
 
     private var filteredSelectedEvents: [CalendarEventSnapshot] {
@@ -634,7 +656,9 @@ struct MeetingCalendarView: View {
                 .frame(width: 38, height: 38)
                 .background(AppPalette.softSurface, in: Circle())
                 .overlay(Circle().strokeBorder(AppPalette.border.opacity(0.65), lineWidth: 0.8))
+                .appTapTarget()
         }
+        .buttonStyle(PressScaleButtonStyle(scale: 0.94))
         .accessibilityLabel(accessibilityLabel)
     }
 
@@ -701,7 +725,10 @@ struct MeetingCalendarView: View {
             key: key
         )
         guard !Task.isCancelled, key == snapshotKey else { return }
-        snapshot = nextSnapshot
+        if snapshot != nextSnapshot {
+            snapshot = nextSnapshot
+        }
+        hasLoadedSnapshot = true
     }
 
     private func requestCalendarAccess() {
@@ -930,14 +957,17 @@ private enum CalendarContentFilter: String, CaseIterable, Identifiable {
         }
     }
 
-    func visibleMeetings(from meetings: [Meeting]) -> [Meeting] {
+    func visibleMeetings(
+        from meetings: [Meeting],
+        openLoopCount: (Meeting.ID) -> Int
+    ) -> [Meeting] {
         switch self {
         case .all, .notes:
             meetings
         case .events:
             []
         case .openLoops:
-            meetings.filter(meetingHasOpenLoops)
+            meetings.filter { openLoopCount($0.id) > 0 }
         }
     }
 
@@ -951,7 +981,16 @@ private enum CalendarContentFilter: String, CaseIterable, Identifiable {
     }
 
     func matches(_ day: MeetingCalendarAgendaDay) -> Bool {
-        !visibleMeetings(from: day.meetings).isEmpty || !visibleEvents(from: day.events).isEmpty
+        switch self {
+        case .all:
+            day.hasAnyActivity
+        case .notes:
+            !day.meetings.isEmpty
+        case .events:
+            !day.events.isEmpty
+        case .openLoops:
+            day.openLoopCount > 0
+        }
     }
 }
 
@@ -960,10 +999,6 @@ private func meetingOpenLoopCount(_ meeting: Meeting) -> Int {
     return meeting.commitments.reduce(0) { count, commitment in
         count + (commitment.status == .open || commitment.status == .atRisk ? 1 : 0)
     }
-}
-
-private func meetingHasOpenLoops(_ meeting: Meeting) -> Bool {
-    meetingOpenLoopCount(meeting) > 0
 }
 
 private struct MeetingCalendarSnapshotKey: Hashable {
@@ -1012,7 +1047,7 @@ private actor MeetingCalendarSnapshotBuilder {
     }
 }
 
-private struct MeetingCalendarSnapshot {
+private struct MeetingCalendarSnapshot: Equatable {
     var days: [MeetingCalendarDay] = []
     var selectedWeekDays: [MeetingCalendarDay] = []
     var selectedWeekAgendaDays: [MeetingCalendarAgendaDay] = []
@@ -1022,6 +1057,7 @@ private struct MeetingCalendarSnapshot {
     var linkedMeetingsByEventID: [String: Meeting] = [:]
     var linkedMeetingsByFingerprint: [String: Meeting] = [:]
     private var agendaDaysByDate: [Date: MeetingCalendarAgendaDay] = [:]
+    private var openLoopCountsByMeetingID: [Meeting.ID: Int] = [:]
     var monthMeetingCount = 0
     var monthEventCount = 0
     var selectedOpenLoopCount = 0
@@ -1046,6 +1082,10 @@ private struct MeetingCalendarSnapshot {
         let eventsByDay = Dictionary(grouping: events, by: { event in
             calendar.startOfDay(for: event.startDate)
         })
+        for meeting in meetings {
+            guard !Task.isCancelled else { break }
+            openLoopCountsByMeetingID[meeting.id] = meetingOpenLoopCount(meeting)
+        }
 
         selectedMeetings = (meetingsByDay[selectedDay] ?? []).sorted(by: Self.sortMeetingsByTime)
         selectedEvents = (eventsByDay[selectedDay] ?? []).sorted { $0.startDate < $1.startDate }
@@ -1058,7 +1098,7 @@ private struct MeetingCalendarSnapshot {
             }
         }
         selectedOpenLoopCount = selectedMeetings.reduce(0) { total, meeting in
-            total + meetingOpenLoopCount(meeting)
+            total + openLoopCount(for: meeting.id)
         }
 
         if let monthInterval {
@@ -1075,8 +1115,8 @@ private struct MeetingCalendarSnapshot {
             let day = calendar.startOfDay(for: date)
             let dayMeetings = meetingsByDay[day] ?? []
             let dayEvents = eventsByDay[day] ?? []
-            let openLoopCount = dayMeetings.reduce(0) { total, meeting in
-                total + meetingOpenLoopCount(meeting)
+            let dayOpenLoopCount = dayMeetings.reduce(0) { total, meeting in
+                total + openLoopCount(for: meeting.id)
             }
             return MeetingCalendarDay(
                 date: day,
@@ -1089,20 +1129,27 @@ private struct MeetingCalendarSnapshot {
                 isSelected: calendar.isDate(day, inSameDayAs: selectedDay),
                 noteCount: dayMeetings.count,
                 eventCount: dayEvents.count,
-                openLoopCount: openLoopCount
+                openLoopCount: dayOpenLoopCount
             )
         }
 
         let agendaDays = days.map { day in
-            MeetingCalendarAgendaDay(
+            let meetings = (meetingsByDay[day.date] ?? []).sorted(by: Self.sortMeetingsByTime)
+            return MeetingCalendarAgendaDay(
                 date: day.date,
                 dayNumberLabel: "\(day.dayNumber)",
                 weekdayLabel: day.weekdayLabel,
                 titleLabel: day.agendaTitleLabel,
                 isToday: day.isToday,
-                meetings: (meetingsByDay[day.date] ?? []).sorted(by: Self.sortMeetingsByTime),
+                meetings: meetings,
                 events: (eventsByDay[day.date] ?? []).sorted { $0.startDate < $1.startDate },
-                openLoopCount: day.openLoopCount
+                openLoopCount: day.openLoopCount,
+                meetingOpenLoopCounts: meetings.compactMap { meeting in
+                    let count = openLoopCount(for: meeting.id)
+                    return count > 0
+                        ? MeetingCalendarOpenLoopCount(meetingID: meeting.id, count: count)
+                        : nil
+                }
             )
         }
         agendaDaysByDate = Dictionary(uniqueKeysWithValues: agendaDays.map { ($0.date, $0) })
@@ -1153,6 +1200,10 @@ private struct MeetingCalendarSnapshot {
     func linkedMeeting(for event: CalendarEventSnapshot) -> Meeting? {
         linkedMeetingsByEventID[event.id]
             ?? linkedMeetingsByFingerprint[Self.eventFingerprint(title: event.title, startDate: event.startDate)]
+    }
+
+    func openLoopCount(for meetingID: Meeting.ID) -> Int {
+        openLoopCountsByMeetingID[meetingID] ?? 0
     }
 
     private static func eventFingerprint(title: String, startDate: Date) -> String {
@@ -1234,10 +1285,20 @@ private struct MeetingCalendarAgendaDay: Identifiable, Hashable {
     let meetings: [Meeting]
     let events: [CalendarEventSnapshot]
     let openLoopCount: Int
+    let meetingOpenLoopCounts: [MeetingCalendarOpenLoopCount]
 
     var noteCount: Int { meetings.count }
     var eventCount: Int { events.count }
     var hasAnyActivity: Bool { noteCount > 0 || eventCount > 0 || openLoopCount > 0 }
+
+    func openLoopCount(for meetingID: Meeting.ID) -> Int {
+        meetingOpenLoopCounts.first(where: { $0.meetingID == meetingID })?.count ?? 0
+    }
+}
+
+private struct MeetingCalendarOpenLoopCount: Hashable {
+    let meetingID: Meeting.ID
+    let count: Int
 }
 
 private struct MeetingCalendarDayDetailView: View {
@@ -1248,7 +1309,9 @@ private struct MeetingCalendarDayDetailView: View {
     let onCapture: (CalendarEventSnapshot) -> Void
     let onCreateNote: () -> Void
 
-    private var meetings: [Meeting] { filter.visibleMeetings(from: day.meetings) }
+    private var meetings: [Meeting] {
+        filter.visibleMeetings(from: day.meetings, openLoopCount: day.openLoopCount(for:))
+    }
     private var events: [CalendarEventSnapshot] { filter.visibleEvents(from: day.events) }
 
     var body: some View {
@@ -1274,7 +1337,10 @@ private struct MeetingCalendarDayDetailView: View {
                         EditorialSectionHead(title: filter == .openLoops ? "Open-loop notes" : "Scribeflow notes", titleSize: 20)
                         ForEach(meetings) { meeting in
                             NavigationLink(value: meeting.id) {
-                                MeetingCalendarMeetingRow(meeting: meeting)
+                                MeetingCalendarMeetingRow(
+                                    meeting: meeting,
+                                    openLoopCount: day.openLoopCount(for: meeting.id)
+                                )
                             }
                             .buttonStyle(PressScaleButtonStyle(scale: 0.98))
                         }
@@ -1306,10 +1372,7 @@ private struct MeetingCalendarDayDetailView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(AppPalette.ink)
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 16)
-            .padding(.bottom, 40)
-            .readingWidth()
+            .appScreenContent(top: AppSpacing.md, bottom: 40)
         }
         .background(AppPalette.background.ignoresSafeArea())
         .navigationTitle("Day agenda")
@@ -1393,7 +1456,7 @@ private struct MeetingCalendarAgendaDayRow: View {
     let isSelected: Bool
 
     private var visibleMeetings: [Meeting] {
-        filter.visibleMeetings(from: day.meetings)
+        filter.visibleMeetings(from: day.meetings, openLoopCount: day.openLoopCount(for:))
     }
 
     private var visibleEvents: [CalendarEventSnapshot] {
@@ -1483,6 +1546,7 @@ private struct MeetingCalendarAgendaDayRow: View {
 
 private struct MeetingCalendarMeetingRow: View {
     let meeting: Meeting
+    let openLoopCount: Int
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -1514,9 +1578,8 @@ private struct MeetingCalendarMeetingRow: View {
                     if meeting.isPinned {
                         chip("Pinned", icon: "pin.fill", tint: AppPalette.gold)
                     }
-                    let open = meetingOpenLoopCount(meeting)
-                    if open > 0 {
-                        chip("\(open) open", icon: "checklist", tint: AppPalette.coral)
+                    if openLoopCount > 0 {
+                        chip("\(openLoopCount) open", icon: "checklist", tint: AppPalette.coral)
                     }
                     if meeting.calendarEventID != nil {
                         chip("Linked", icon: "calendar", tint: AppPalette.accent)
