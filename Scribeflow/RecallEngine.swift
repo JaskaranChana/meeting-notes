@@ -108,6 +108,13 @@ enum PeopleEngine {
 enum MeetingScorer {
 
     static func score(for meeting: Meeting) -> MeetingScore {
+        score(
+            for: meeting,
+            allowsAccountability: meeting.allowsAccountabilityExtraction
+        )
+    }
+
+    static func score(for meeting: Meeting, allowsAccountability: Bool) -> MeetingScore {
         var clarity = 50
         var decisiveness = 50
         var actionability = 50
@@ -118,7 +125,7 @@ enum MeetingScorer {
         if !meeting.objective.isEmpty { clarity += 10 }
         if meeting.transcript.count > 5 { clarity += 10 }
 
-        let scoredCommitments = meeting.allowsAccountabilityExtraction ? meeting.commitments : []
+        let scoredCommitments = allowsAccountability ? meeting.commitments : []
         let decisions = scoredCommitments.filter { $0.status != .superseded }.count
         decisiveness += min(decisions * 10, 30)
         if meeting.summaries.count > 1 { decisiveness += 10 }

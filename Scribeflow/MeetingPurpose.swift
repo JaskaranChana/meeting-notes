@@ -199,12 +199,27 @@ struct MeetingPurposeClassifier {
         if let brief = meeting.aiBrief,
            brief.makesSense,
            let detectedPurpose = brief.capturePurpose {
+            let contentPurpose = classifyContent(in: meeting)
+            let resolvedPurpose: CapturePurposeKind
+            let trimmedTopic = brief.captureTopic.trimmingCharacters(in: .whitespacesAndNewlines)
+            if detectedPurpose.allowsMeetingSignals,
+               !contentPurpose.allowsMeetingSignals {
+                resolvedPurpose = contentPurpose.kind
+            } else {
+                resolvedPurpose = detectedPurpose
+            }
             return CapturePurpose(
-                kind: detectedPurpose,
-                confidence: CapturePurposeConfidence(modelValue: brief.purposeConfidence),
-                evidence: [.aiUnderstanding, .contentAnalysis],
-                topic: brief.captureTopic,
-                domain: brief.captureDomain
+                kind: resolvedPurpose,
+                confidence: resolvedPurpose == detectedPurpose
+                    ? CapturePurposeConfidence(modelValue: brief.purposeConfidence)
+                    : contentPurpose.confidence,
+                evidence: resolvedPurpose == detectedPurpose
+                    ? [.aiUnderstanding, .contentAnalysis]
+                    : contentPurpose.evidence,
+                topic: trimmedTopic.isEmpty ? contentPurpose.topic : trimmedTopic,
+                domain: resolvedPurpose == detectedPurpose
+                    ? brief.captureDomain
+                    : contentPurpose.domain
             )
         }
 
@@ -212,13 +227,21 @@ struct MeetingPurposeClassifier {
     }
 
     private func classifyContent(in meeting: Meeting) -> CapturePurpose {
-        classifyCapture(
+        let transcriptParagraphs = representativeTranscriptParagraphs(meeting.transcript)
+        let recordingParagraphs = meeting.audioRecordings.flatMap { recording -> [String] in
+            var sources = sampledTextFragments(recording.linkedNote)
+            if meeting.transcript.isEmpty {
+                sources.append(contentsOf: sampledTextFragments(recording.transcript))
+            }
+            return sources
+        }
+        return classifyCapture(
             title: meeting.title,
             workspace: meeting.workspace,
             objective: meeting.objective,
             attendees: meeting.attendees,
-            notes: meeting.rawNotes,
-            transcriptParagraphs: meeting.transcript.map(\.text) + meeting.audioRecordings.map(\.transcript),
+            notes: meeting.trustedSourceNotes,
+            transcriptParagraphs: transcriptParagraphs + recordingParagraphs,
             distinctSpeakerCount: distinctSpeakerCount(in: meeting),
             hasCalendarContext: hasCalendarContext(meeting),
             isCallRecording: meeting.audioRecordings.contains { $0.source == .compliantCall },
@@ -243,13 +266,26 @@ struct MeetingPurposeClassifier {
         consentState: ConsentState = .privateCapture,
         isSoloVoiceNote: Bool = false
     ) -> CapturePurpose {
-        let content = normalizedText(([notes] + transcriptParagraphs).joined(separator: " "))
+        let noteFragments = sampledTextFragments(notes)
+        let representativeTranscript = representativeParagraphs(transcriptParagraphs)
+        let content = normalizedText((noteFragments + representativeTranscript).joined(separator: " "))
         let metadata = normalizedText([title, workspace, objective].joined(separator: " "))
         let semanticText = [content, metadata].filter { !$0.isEmpty }.joined(separator: " ")
         let explicitTopicText = normalizedText([objective, title].joined(separator: " "))
         let topicText = explicitTopicText.isEmpty ? content : explicitTopicText
         let externalAttendeeCount = attendees.filter { !isSelfLabel($0) }.count
         let hasMultiplePeople = distinctSpeakerCount > 1 || externalAttendeeCount > 0
+        let hasExplicitMeetingLabel = hasMeetingLabel(
+            title: title,
+            workspace: workspace,
+            objective: objective
+        )
+        let hasTrustedMeetingContext = hasVerifiedMeetingContext(
+            hasCalendarContext: hasCalendarContext,
+            externalAttendeeCount: externalAttendeeCount,
+            meetingMode: meetingMode,
+            consentState: consentState
+        )
 
         let appointmentScore = score(appointmentCues, in: semanticText)
         let learningScore = score(learningCues, in: semanticText)
@@ -271,7 +307,7 @@ struct MeetingPurposeClassifier {
         if meetingMode != .privateNotes || consentState != .privateCapture { evidence.append(.disclosedMode) }
         if externalAttendeeCount > 0 { evidence.append(.externalAttendees) }
         if isCallRecording { evidence.append(.callRecording) }
-        if hasMeetingLabel(title: title, workspace: workspace, objective: objective) { evidence.append(.meetingLabel) }
+        if hasExplicitMeetingLabel { evidence.append(.meetingLabel) }
         evidence.append(contentsOf: personalEvidence(
             title: title,
             workspace: workspace,
@@ -304,15 +340,15 @@ struct MeetingPurposeClassifier {
         } else if !hasMultiplePeople, planningScore >= 4, workScore < 4 {
             kind = .personalPlan
             winningScore = planningScore
-        } else if workScore + structuredScore >= (hasMultiplePeople ? 4 : 5) {
+        } else if workScore + structuredScore >= (hasMultiplePeople ? 4 : 5),
+                  hasMultiplePeople
+                    || hasTrustedMeetingContext
+                    || hasExplicitMeetingLabel
+                    || structuredScore >= 3 {
             kind = isCallRecording || hasCallLabel(title: title, workspace: workspace) ? .call : .meeting
             winningScore = workScore + structuredScore
-        } else if hasVerifiedMeetingContext(
-            hasCalendarContext: hasCalendarContext,
-            externalAttendeeCount: externalAttendeeCount,
-            meetingMode: meetingMode,
-            consentState: consentState
-        ), content.isEmpty || structuredScore > 0 || workScore > 1 {
+        } else if hasTrustedMeetingContext,
+                  content.isEmpty || structuredScore > 0 || workScore > 1 {
             kind = isCallRecording || hasCallLabel(title: title, workspace: workspace) ? .call : .meeting
             winningScore = 4
         } else if hasMultiplePeople {
@@ -342,11 +378,84 @@ struct MeetingPurposeClassifier {
     }
 
     private func distinctSpeakerCount(in meeting: Meeting) -> Int {
-        Set(meeting.transcript.compactMap { line -> String? in
+        var speakers: Set<String> = []
+        for line in meeting.transcript {
             let speaker = line.speaker.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard !speaker.isEmpty else { return nil }
-            return speaker
-        }).count
+            guard !speaker.isEmpty else { continue }
+            speakers.insert(speaker)
+            if speakers.count == 2 { return 2 }
+        }
+        return speakers.count
+    }
+
+    private func representativeTranscriptParagraphs(
+        _ lines: [TranscriptLine],
+        limit: Int = 80
+    ) -> [String] {
+        representativeIndices(count: lines.count, limit: limit).map {
+            boundedParagraph(lines[$0].text)
+        }
+    }
+
+    private func representativeParagraphs(
+        _ paragraphs: [String],
+        limit: Int = 80
+    ) -> [String] {
+        representativeIndices(count: paragraphs.count, limit: limit).map {
+            boundedParagraph(paragraphs[$0])
+        }
+    }
+
+    private func representativeIndices(count: Int, limit: Int) -> [Int] {
+        guard count > 0, limit > 0 else { return [] }
+        guard count > limit else { return Array(0..<count) }
+
+        let edgeCount = min(20, limit / 3)
+        var selected = Set(0..<edgeCount)
+        selected.formUnion((count - edgeCount)..<count)
+        let remaining = limit - selected.count
+        guard remaining > 0 else { return selected.sorted() }
+
+        let step = Double(count - 1) / Double(remaining + 1)
+        for position in 1...remaining {
+            selected.insert(min(count - 1, Int((Double(position) * step).rounded())))
+        }
+        return selected.sorted().prefix(limit).map { $0 }
+    }
+
+    private func sampledTextFragments(
+        _ text: String,
+        fragmentLength: Int = 320,
+        limit: Int = 12
+    ) -> [String] {
+        let source = text.trimmingCharacters(in: .whitespacesAndNewlines) as NSString
+        guard source.length > 0 else { return [] }
+        guard source.length > fragmentLength else { return [source as String] }
+
+        let maximumStart = source.length - fragmentLength
+        let fragmentCount = min(limit, max(2, Int(ceil(Double(source.length) / Double(fragmentLength)))))
+        var fragments: [String] = []
+        fragments.reserveCapacity(fragmentCount)
+
+        for position in 0..<fragmentCount {
+            let progress = fragmentCount == 1
+                ? 0
+                : Double(position) / Double(fragmentCount - 1)
+            let start = min(maximumStart, Int((Double(maximumStart) * progress).rounded()))
+            fragments.append(
+                source.substring(with: NSRange(location: start, length: fragmentLength))
+            )
+        }
+        return fragments
+    }
+
+    private func boundedParagraph(_ text: String, maximumLength: Int = 320) -> String {
+        let source = text.trimmingCharacters(in: .whitespacesAndNewlines) as NSString
+        guard source.length > maximumLength else { return source as String }
+        let edgeLength = maximumLength / 2
+        return source.substring(to: edgeLength)
+            + " "
+            + source.substring(from: source.length - edgeLength)
     }
 
     private func confidence(

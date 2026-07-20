@@ -154,22 +154,40 @@ actor PendingMeetingFileTransfer {
     func preserveAsRecording(_ sourceURL: URL) throws -> URL {
         try RecordingFileStore.adoptFile(at: sourceURL)
     }
+
+    func deletePending(_ fileName: String) {
+        PendingMeetingAudioStore.delete(fileName)
+    }
+
+    func deleteAllPending() {
+        PendingMeetingAudioStore.deleteAll()
+    }
 }
 
 actor PendingMeetingProcessingQueue {
     static let shared = PendingMeetingProcessingQueue()
 
+    private let folderURL: URL
     private let fileURL: URL
-    private var jobs: [PendingMeetingProcessingJob]
+    private var jobs: [PendingMeetingProcessingJob] = []
+    private var hasLoaded = false
 
     init() {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
         let folder = base.appendingPathComponent("Scribeflow", isDirectory: true)
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        folderURL = folder
         fileURL = folder.appendingPathComponent("meeting-processing-queue.json")
+    }
 
+    private func loadIfNeeded() {
+        guard !hasLoaded else { return }
+        hasLoaded = true
+        try? FileManager.default.createDirectory(
+            at: folderURL,
+            withIntermediateDirectories: true
+        )
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         var recovered: [PendingMeetingProcessingJob] = []
@@ -177,7 +195,7 @@ actor PendingMeetingProcessingQueue {
             do {
                 recovered = try decoder.decode([PendingMeetingProcessingJob].self, from: data)
             } catch {
-                let quarantineURL = folder.appendingPathComponent(
+                let quarantineURL = folderURL.appendingPathComponent(
                     "meeting-processing-queue-corrupt-\(UUID().uuidString).json"
                 )
                 try? FileManager.default.moveItem(at: fileURL, to: quarantineURL)
@@ -198,6 +216,7 @@ actor PendingMeetingProcessingQueue {
     }
 
     func enqueue(_ job: PendingMeetingProcessingJob) throws {
+        loadIfNeeded()
         let previous = jobs
         if let index = jobs.firstIndex(where: { $0.meetingID == job.meetingID }) {
             jobs[index] = job
@@ -213,7 +232,8 @@ actor PendingMeetingProcessingQueue {
     }
 
     func readyJobs(now: Date = .now) -> [PendingMeetingProcessingJob] {
-        jobs
+        loadIfNeeded()
+        return jobs
             .filter {
                 $0.canRetry
                     && $0.state != .completed
@@ -223,6 +243,7 @@ actor PendingMeetingProcessingQueue {
     }
 
     func markRunning(_ id: Meeting.ID) throws -> PendingMeetingProcessingJob? {
+        loadIfNeeded()
         guard let index = jobs.firstIndex(where: { $0.meetingID == id }) else { return nil }
         let previous = jobs[index]
         jobs[index].markRunning()
@@ -236,6 +257,7 @@ actor PendingMeetingProcessingQueue {
     }
 
     func markFailed(_ id: Meeting.ID, message: String) throws -> PendingMeetingProcessingJob? {
+        loadIfNeeded()
         guard let index = jobs.firstIndex(where: { $0.meetingID == id }) else { return nil }
         let previous = jobs[index]
         jobs[index].markFailed(message)
@@ -249,6 +271,7 @@ actor PendingMeetingProcessingQueue {
     }
 
     func requeueInterrupted(_ id: Meeting.ID) throws {
+        loadIfNeeded()
         guard let index = jobs.firstIndex(where: { $0.meetingID == id }) else { return }
         let previous = jobs[index]
         jobs[index].markQueuedAfterInterruption()
@@ -262,6 +285,7 @@ actor PendingMeetingProcessingQueue {
 
     @discardableResult
     func remove(_ id: Meeting.ID) throws -> PendingMeetingProcessingJob? {
+        loadIfNeeded()
         let previous = jobs
         let removed = jobs.first { $0.meetingID == id }
         jobs.removeAll { $0.meetingID == id }
@@ -275,18 +299,22 @@ actor PendingMeetingProcessingQueue {
     }
 
     func earliestRetryDate() -> Date? {
-        jobs.compactMap(\.nextRetryAt).min()
+        loadIfNeeded()
+        return jobs.compactMap(\.nextRetryAt).min()
     }
 
     func pendingJobs() -> [PendingMeetingProcessingJob] {
-        jobs
+        loadIfNeeded()
+        return jobs
     }
 
     func hasPendingJobs() -> Bool {
-        !jobs.isEmpty
+        loadIfNeeded()
+        return !jobs.isEmpty
     }
 
     func clear() {
+        hasLoaded = true
         jobs = []
         try? FileManager.default.removeItem(at: fileURL)
     }
@@ -353,7 +381,7 @@ private enum TranscriptQualityEvaluator {
         }
 
         let enoughForDuration = duration < 4 || words.count >= 2
-        let enoughComparedWithLive = liveBaseline < 12 || completionRatio >= 0.28
+        let enoughComparedWithLive = liveBaseline < 12 || completionRatio >= 0.50
         let plausibleMaximum = duration < 5
             || words.count <= Int((duration / 60) * 330) + 16
         let repetitionLooksNatural = words.count < 12
@@ -380,7 +408,7 @@ private enum TranscriptQualityEvaluator {
 
         let isStrong = isUsable
             && score >= 52
-            && (liveBaseline < 12 || completionRatio >= 0.58)
+            && (liveBaseline < 12 || completionRatio >= 0.80)
         return Assessment(
             wordCount: words.count,
             score: score,
@@ -479,32 +507,22 @@ final class EnhancedMeetingTranscriptionService {
                 if assessment.isUsable {
                     candidates.append(enhancedResult)
                 }
-                if let preferred = TranscriptQualityEvaluator.preferred(
-                    from: candidates,
-                    liveWordCount: liveWordCount,
-                    audioURL: audioURL
-                ) {
-                    return preferred
+                if assessment.isStrong {
+                    if let preferred = TranscriptQualityEvaluator.preferred(
+                        from: candidates,
+                        liveWordCount: liveWordCount,
+                        audioURL: audioURL
+                    ) {
+                        return preferred
+                    }
                 }
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                if let preferred = TranscriptQualityEvaluator.preferred(
-                    from: candidates,
-                    liveWordCount: liveWordCount,
-                    audioURL: audioURL
-                ), preferred.provider != .backend {
-                    return preferred
-                }
+                // Continue to Apple Speech with any usable candidate retained
+                // for comparison. A weak partial result must not suppress the
+                // full-file recognition pass.
             }
-        }
-
-        if let preferred = TranscriptQualityEvaluator.preferred(
-            from: candidates,
-            liveWordCount: liveWordCount,
-            audioURL: audioURL
-        ), preferred.provider != .backend {
-            return preferred
         }
 
         do {
@@ -889,7 +907,10 @@ enum MeetingProcessingNotification {
     @discardableResult
     static func sendReady(meetingID: Meeting.ID, title: String) async -> Bool {
         let center = UNUserNotificationCenter.current()
-        let permission = await ScribeflowNotificationAuthorization.shared.currentPermission()
+        var permission = await ScribeflowNotificationAuthorization.shared.currentPermission()
+        if permission == .notDetermined {
+            permission = await ScribeflowNotificationAuthorization.shared.requestIfNeeded()
+        }
         guard permission.canSchedule else {
             await postInAppFallback(title: title, permission: permission)
             return false
@@ -955,7 +976,7 @@ final class MeetingProcessingCoordinator {
         do {
             try await PendingMeetingProcessingQueue.shared.enqueue(job)
         } catch {
-            PendingMeetingAudioStore.delete(job.fileName)
+            await PendingMeetingFileTransfer.shared.deletePending(job.fileName)
             store.finishPendingMeetingWithLiveTranscript(
                 job.meetingID,
                 message: "Saved with the live transcript"
@@ -990,7 +1011,7 @@ final class MeetingProcessingCoordinator {
                 return
             }
             if let removed {
-                PendingMeetingAudioStore.delete(removed.fileName)
+                await PendingMeetingFileTransfer.shared.deletePending(removed.fileName)
             }
             self?.discardedMeetingIDs.remove(meetingID)
         }
@@ -1044,17 +1065,14 @@ final class MeetingProcessingCoordinator {
         suspendedMeetingIDs.removeAll()
         discardedMeetingIDs.removeAll()
         await PendingMeetingProcessingQueue.shared.clear()
-        PendingMeetingAudioStore.deleteAll()
+        await PendingMeetingFileTransfer.shared.deleteAllPending()
         endExtendedExecution()
         isPausedForLibraryReplacement = false
     }
 
     func processPendingAndWait() async -> Bool {
         if store == nil {
-            for _ in 0..<20 where store == nil {
-                try? await Task.sleep(for: .milliseconds(100))
-                if Task.isCancelled { return false }
-            }
+            attach(ScribeflowRuntime.shared.store)
         }
         guard let store else {
             MeetingProcessingBackgroundScheduler.schedule(
@@ -1062,6 +1080,7 @@ final class MeetingProcessingCoordinator {
             )
             return false
         }
+        await store.loadLibraryIfNeeded()
         await restorePendingMeetingsIfNeeded(using: store)
         startProcessingIfNeeded()
         guard let processingTask else {
@@ -1252,7 +1271,9 @@ final class MeetingProcessingCoordinator {
     ) async -> Bool {
         do {
             let removed = try await queue.remove(job.meetingID)
-            PendingMeetingAudioStore.delete(removed?.fileName ?? job.fileName)
+            await PendingMeetingFileTransfer.shared.deletePending(
+                removed?.fileName ?? job.fileName
+            )
             discardedMeetingIDs.remove(job.meetingID)
             return true
         } catch {
@@ -1305,6 +1326,8 @@ final class MeetingProcessingCoordinator {
 }
 
 enum MeetingProcessingBackgroundScheduler {
+    private static let lastSchedulingErrorKey = "scribeflow.backgroundProcessing.lastSchedulingError"
+
     static var identifier: String {
         "\(Bundle.main.bundleIdentifier ?? "ai.scribeflow.app").meeting-processing"
     }
@@ -1333,16 +1356,27 @@ enum MeetingProcessingBackgroundScheduler {
     }
 
     @MainActor
-    static func schedule(earliestBeginDate: Date? = nil) {
+    @discardableResult
+    static func schedule(earliestBeginDate: Date? = nil) -> Bool {
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
         let request = BGProcessingTaskRequest(identifier: identifier)
         request.requiresNetworkConnectivity = TranscriptionProviderFactory.isRemoteTranscriptionEnabled
         request.requiresExternalPower = false
         request.earliestBeginDate = earliestBeginDate
-        try? BGTaskScheduler.shared.submit(request)
+        do {
+            try BGTaskScheduler.shared.submit(request)
+            UserDefaults.standard.removeObject(forKey: lastSchedulingErrorKey)
+            return true
+        } catch {
+            let message = error.localizedDescription
+            UserDefaults.standard.set(message, forKey: lastSchedulingErrorKey)
+            AnalyticsLog.shared.log("background.processing.schedule_failed", ["error": message])
+            return false
+        }
     }
 }
 
+@MainActor
 final class ScribeflowAppDelegate: NSObject, UIApplicationDelegate {
     func application(
         _ application: UIApplication,
@@ -1350,6 +1384,7 @@ final class ScribeflowAppDelegate: NSObject, UIApplicationDelegate {
     ) -> Bool {
         NotificationRouter.shared.configure()
         MeetingProcessingBackgroundScheduler.register()
+        MeetingProcessingCoordinator.shared.attach(ScribeflowRuntime.shared.store)
         return true
     }
 }

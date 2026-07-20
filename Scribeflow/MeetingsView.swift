@@ -8,6 +8,7 @@ struct MeetingsView: View {
     let onAskTap: () -> Void
     @Binding var toast: ToastItem?
     @State private var searchText = ""
+    @FocusState private var searchFocused: Bool
     @AppStorage("scribeflow.library.segment") private var segment: LibrarySegment = .all
     @AppStorage("scribeflow.library.type") private var typeFilter: LibraryTypeFilter = .all
     @AppStorage("scribeflow.library.date") private var dateFilter: LibraryDateFilter = .all
@@ -19,6 +20,7 @@ struct MeetingsView: View {
     @State private var pendingDeleteFinalizeID: UUID?
     @State private var snapshot = LibrarySnapshot()
     @State private var snapshotBuilder = LibrarySnapshotBuilder()
+    @State private var hasLoadedSnapshot = false
 
     private var snapshotKey: LibrarySnapshotKey {
         LibrarySnapshotKey(
@@ -71,7 +73,7 @@ struct MeetingsView: View {
                         EditorialMeta(text: "\(snapshot.libraryResults.count)")
                     }
 
-                    if !hasAnimatedIn && snapshot.libraryResults.isEmpty {
+                    if !hasLoadedSnapshot && snapshot.libraryResults.isEmpty {
                         // First-paint skeleton — replaces the brief flash of empty
                         // results before the snapshot builder finishes its work.
                         ForEach(0..<4, id: \.self) { _ in
@@ -90,7 +92,7 @@ struct MeetingsView: View {
                         // Date-grouped sections — Today / This Week / Earlier
                         // pattern. Pinned items are not in libraryResults
                         // (rendered above), so grouping is purely chronological.
-                        ForEach(libraryDateGroups, id: \.title) { group in
+                        ForEach(snapshot.dateGroups, id: \.title) { group in
                             Section {
                                 ForEach(group.meetings) { meeting in
                                     actionableLibraryRow(meeting)
@@ -209,41 +211,7 @@ struct MeetingsView: View {
         if snapshot != nextSnapshot {
             snapshot = nextSnapshot
         }
-    }
-
-    /// Skeleton row shown during the snapshot's first build. Calms the
-    /// momentary "no results" flash so the page feels instantly populated.
-    /// Splits `snapshot.libraryResults` into chronological buckets.
-    private struct DateGroup {
-        let title: String
-        let meetings: [Meeting]
-    }
-
-    private var libraryDateGroups: [DateGroup] {
-        let cal = Calendar.current
-        let now = Date.now
-        let startOfToday = cal.startOfDay(for: now)
-        let weekAgo = cal.date(byAdding: .day, value: -7, to: startOfToday) ?? startOfToday
-        let monthAgo = cal.date(byAdding: .day, value: -30, to: startOfToday) ?? startOfToday
-
-        var today: [Meeting] = []
-        var week: [Meeting] = []
-        var month: [Meeting] = []
-        var earlier: [Meeting] = []
-
-        for m in snapshot.libraryResults {
-            if m.when >= startOfToday        { today.append(m) }
-            else if m.when >= weekAgo        { week.append(m) }
-            else if m.when >= monthAgo       { month.append(m) }
-            else                             { earlier.append(m) }
-        }
-
-        var out: [DateGroup] = []
-        if !today.isEmpty   { out.append(DateGroup(title: "Today", meetings: today)) }
-        if !week.isEmpty    { out.append(DateGroup(title: "This week", meetings: week)) }
-        if !month.isEmpty   { out.append(DateGroup(title: "This month", meetings: month)) }
-        if !earlier.isEmpty { out.append(DateGroup(title: "Earlier", meetings: earlier)) }
-        return out
+        hasLoadedSnapshot = true
     }
 
     /// Smart segment chip row. Quick lateral filters that don't require opening
@@ -274,6 +242,7 @@ struct MeetingsView: View {
                         .foregroundStyle(segment == seg ? .white : AppPalette.ink)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 7)
+                        .frame(minHeight: AppLayout.minimumTapTarget)
                         .background(
                             Capsule().fill(segment == seg ? AppPalette.ink : AppPalette.softSurface)
                         )
@@ -383,8 +352,10 @@ struct MeetingsView: View {
                 .foregroundStyle(AppPalette.tertiaryInk)
 
             TextField("Search meetings, people, transcripts…", text: $searchText)
+                .focused($searchFocused)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .submitLabel(.search)
                 .font(.system(size: 15))
                 .foregroundStyle(AppPalette.ink)
 
@@ -403,18 +374,20 @@ struct MeetingsView: View {
                     Image(systemName: "xmark.circle.fill")
                         .font(.subheadline)
                         .foregroundStyle(AppPalette.tertiaryInk)
+                        .appTapTarget()
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Clear search")
             }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .frame(minHeight: 50)
         .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous)
-                .strokeBorder(AppPalette.border, lineWidth: 1)
+                .strokeBorder(searchFocused ? AppPalette.accent : AppPalette.border, lineWidth: searchFocused ? 1.4 : 1)
         )
+        .animation(AppMotion.snappy, value: searchFocused)
     }
 
     /// Compact filter strip. Active filters appear as chips with tap-to-clear.
@@ -422,23 +395,29 @@ struct MeetingsView: View {
     /// cognitive load than three pickers always visible.
     private var filterBar: some View {
         HStack(spacing: 8) {
-            if typeFilter != .all {
-                activeChip(filter: typeFilter.title, systemImage: typeFilter.systemImage) {
-                    withAnimation(AppMotion.snappy) { typeFilter = .all }
+            if activeFilterCount > 0 {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        if typeFilter != .all {
+                            activeChip(filter: typeFilter.title, systemImage: typeFilter.systemImage) {
+                                withAnimation(AppMotion.snappy) { typeFilter = .all }
+                            }
+                        }
+                        if dateFilter != .all {
+                            activeChip(filter: dateFilter.title, systemImage: "calendar") {
+                                withAnimation(AppMotion.snappy) { dateFilter = .all }
+                            }
+                        }
+                        if sortMode != .newest {
+                            activeChip(filter: sortMode.title, systemImage: "arrow.up.arrow.down") {
+                                withAnimation(AppMotion.snappy) { sortMode = .newest }
+                            }
+                        }
+                    }
                 }
+            } else {
+                Spacer(minLength: 0)
             }
-            if dateFilter != .all {
-                activeChip(filter: dateFilter.title, systemImage: "calendar") {
-                    withAnimation(AppMotion.snappy) { dateFilter = .all }
-                }
-            }
-            if sortMode != .newest {
-                activeChip(filter: sortMode.title, systemImage: "arrow.up.arrow.down") {
-                    withAnimation(AppMotion.snappy) { sortMode = .newest }
-                }
-            }
-
-            Spacer(minLength: 0)
 
             Button {
                 HapticEngine.tap(.light)
@@ -462,6 +441,7 @@ struct MeetingsView: View {
                 .foregroundStyle(AppPalette.ink)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
+                .frame(minHeight: AppLayout.minimumTapTarget)
                 .background(AppPalette.cardBackground, in: Capsule())
                 .overlay(Capsule().strokeBorder(AppPalette.border.opacity(0.25), lineWidth: 0.5))
                 .overlay(alignment: .topTrailing) {
@@ -493,25 +473,23 @@ struct MeetingsView: View {
     }
 
     private func activeChip(filter: String, systemImage: String, onClear: @escaping () -> Void) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: systemImage)
-                .font(.system(size: 10, weight: .heavy))
-            Text(filter)
-                .font(.caption.weight(.bold))
-            Button(action: onClear) {
+        Button(action: onClear) {
+            HStack(spacing: 6) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 10, weight: .heavy))
+                Text(filter)
+                    .font(.caption.weight(.bold))
                 Image(systemName: "xmark")
                     .font(.caption2.weight(.heavy))
-                    .frame(width: 28, height: 28)
-                    .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Clear \(filter)")
+            .foregroundStyle(AppPalette.accent)
+            .padding(.horizontal, 10)
+            .frame(minHeight: AppLayout.minimumTapTarget)
+            .background(AppPalette.accent.opacity(0.10), in: Capsule())
+            .overlay(Capsule().strokeBorder(AppPalette.accent.opacity(0.22), lineWidth: 0.6))
         }
-        .foregroundStyle(AppPalette.accent)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(AppPalette.accent.opacity(0.10), in: Capsule())
-        .overlay(Capsule().strokeBorder(AppPalette.accent.opacity(0.22), lineWidth: 0.6))
+        .buttonStyle(PressScaleButtonStyle(scale: 0.96))
+        .accessibilityLabel("Clear \(filter) filter")
         .transition(.scale(scale: 0.85).combined(with: .opacity))
     }
 
@@ -760,9 +738,9 @@ private struct LibraryRowPreview: View {
     private var metaStrip: [String] {
         var out: [String] = []
         if meeting.isPinned { out.append("PINNED") }
-        let openCount = meeting.allowsAccountabilityExtraction
-            ? meeting.commitments.filter { $0.status == .open || $0.status == .atRisk }.count
-            : 0
+        let openCount = meeting.commitments.filter {
+            $0.status == .open || $0.status == .atRisk
+        }.count
         if openCount > 0 { out.append("\(openCount) OPEN") }
         if !meeting.audioRecordings.isEmpty { out.append("AUDIO") }
         if !meeting.attendees.isEmpty { out.append("\(meeting.attendees.count) ATTENDEES") }
@@ -796,14 +774,17 @@ enum LibrarySegment: String, CaseIterable, Identifiable {
         }
     }
 
-    func matches(_ m: Meeting) -> Bool {
+    func matches(
+        _ m: Meeting,
+        allowsAccountability: Bool
+    ) -> Bool {
         switch self {
         case .all:     return true
         case .pinned:  return m.isPinned
         case .audio:   return !m.audioRecordings.isEmpty
-        case .actions: return m.allowsAccountabilityExtraction && !m.commitments.isEmpty
+        case .actions: return allowsAccountability && !m.commitments.isEmpty
         case .mine:
-            guard m.allowsAccountabilityExtraction else { return false }
+            guard allowsAccountability else { return false }
             return m.commitments.contains { c in
                 guard c.status == .open || c.status == .atRisk else { return false }
                 let o = c.owner.lowercased()

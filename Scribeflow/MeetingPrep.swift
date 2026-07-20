@@ -565,10 +565,7 @@ struct EventPrepBriefSheet: View {
 
                     if !brief.relatedMeetings.isEmpty { sourceDisclosure }
                 }
-                .padding(.horizontal, AppSpacing.lg)
-                .padding(.top, AppSpacing.md)
-                .padding(.bottom, AppSpacing.xl)
-                .readingWidth()
+                .appScreenContent(top: AppSpacing.md, bottom: AppSpacing.xl)
             }
             .background(AppPalette.background.ignoresSafeArea())
             .navigationTitle(event.endDate < .now ? "Event context" : "Before you join")
@@ -579,6 +576,7 @@ struct EventPrepBriefSheet: View {
                         dismiss()
                     } label: {
                         Image(systemName: AppSymbols.close)
+                            .appTapTarget()
                     }
                     .accessibilityLabel("Close")
                 }

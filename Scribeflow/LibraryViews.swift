@@ -263,7 +263,6 @@ struct EditorialLibraryRow: View {
             .replacingOccurrences(of: "\n", with: " ")
     }
     private var openActions: Int {
-        guard meeting.allowsAccountabilityExtraction else { return 0 }
         return meeting.commitments.filter { $0.status == .open || $0.status == .atRisk }.count
     }
     private var durationLabel: String { meeting.durationMinutes > 0 ? "\(meeting.durationMinutes)m" : "" }
@@ -360,18 +359,20 @@ struct MeetingQuickActionBar: View {
                 Image(systemName: isPinned ? "pin.slash" : "pin")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(AppPalette.tertiaryInk)
-                    .frame(width: 36, height: 36)
+                    .frame(width: AppLayout.minimumTapTarget, height: AppLayout.minimumTapTarget)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(isPinned ? "Unpin meeting" : "Pin meeting")
             Button(role: .destructive) { onDelete() } label: {
                 Image(systemName: "trash")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(AppPalette.tertiaryInk)
-                    .frame(width: 36, height: 36)
+                    .frame(width: AppLayout.minimumTapTarget, height: AppLayout.minimumTapTarget)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Delete meeting")
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 6)
@@ -421,6 +422,63 @@ struct FolderRow: View {
     }
 }
 
+private struct FolderDetailSnapshotKey: Hashable {
+    let libraryRevision: Int
+    let folderName: String
+    let query: String
+
+    init(libraryRevision: Int, folderName: String, query: String) {
+        self.libraryRevision = libraryRevision
+        self.folderName = folderName
+        self.query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var isSearching: Bool { !query.isEmpty }
+}
+
+private struct FolderDetailSnapshot: Equatable {
+    var meetings: [Meeting] = []
+    var visibleMeetings: [Meeting] = []
+}
+
+private actor FolderDetailSnapshotBuilder {
+    private var cachedRevision: Int?
+    private var cachedFolderName = ""
+    private var cachedMeetings: [Meeting] = []
+
+    func make(meetings: [Meeting], key: FolderDetailSnapshotKey) -> FolderDetailSnapshot {
+        if cachedRevision != key.libraryRevision
+            || cachedFolderName.caseInsensitiveCompare(key.folderName) != .orderedSame {
+            cachedRevision = key.libraryRevision
+            cachedFolderName = key.folderName
+            cachedMeetings = meetings
+                .filter { $0.workspace.caseInsensitiveCompare(key.folderName) == .orderedSame }
+                .sorted(by: Meeting.sortDescending)
+        }
+
+        guard key.isSearching else {
+            return FolderDetailSnapshot(meetings: cachedMeetings, visibleMeetings: cachedMeetings)
+        }
+
+        var matches: [Meeting] = []
+        matches.reserveCapacity(min(cachedMeetings.count, 24))
+        for meeting in cachedMeetings {
+            guard !Task.isCancelled else { break }
+            if Self.matches(meeting, query: key.query) {
+                matches.append(meeting)
+            }
+        }
+        return FolderDetailSnapshot(meetings: cachedMeetings, visibleMeetings: matches)
+    }
+
+    private static func matches(_ meeting: Meeting, query: String) -> Bool {
+        meeting.title.localizedStandardContains(query)
+            || meeting.objective.localizedStandardContains(query)
+            || meeting.attendees.contains(where: { $0.localizedStandardContains(query) })
+            || meeting.rawNotes.localizedStandardContains(query)
+    }
+}
+
 struct FolderDetailView: View {
     @Environment(MeetingStore.self) private var store
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -434,17 +492,16 @@ struct FolderDetailView: View {
     @State private var answer: String?
     @State private var searchText = ""
     @State private var showsFolderChat = false
+    @State private var snapshot = FolderDetailSnapshot()
+    @State private var snapshotBuilder = FolderDetailSnapshotBuilder()
+    @State private var hasLoadedSnapshot = false
 
-    private var meetings: [Meeting] { store.meetings(in: folder) }
-    private var filteredMeetings: [Meeting] {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return meetings }
-        return meetings.filter { meeting in
-            meeting.title.localizedStandardContains(query)
-                || meeting.objective.localizedStandardContains(query)
-                || meeting.attendees.contains(where: { $0.localizedStandardContains(query) })
-                || meeting.rawNotes.localizedStandardContains(query)
-        }
+    private var snapshotKey: FolderDetailSnapshotKey {
+        FolderDetailSnapshotKey(
+            libraryRevision: store.revision,
+            folderName: folder.name,
+            query: searchText
+        )
     }
 
     var body: some View {
@@ -453,28 +510,38 @@ struct FolderDetailView: View {
                 folderSummary
                 folderChatTool
 
-                EditorialSectionHead(title: searchText.isEmpty ? "Meetings" : "Results", titleSize: 20) {
-                    EditorialMeta(text: "\(filteredMeetings.count)")
+                EditorialSectionHead(title: snapshotKey.isSearching ? "Results" : "Meetings", titleSize: 20) {
+                    EditorialMeta(text: "\(snapshot.visibleMeetings.count)")
                 }
 
-                if filteredMeetings.isEmpty {
+                if !hasLoadedSnapshot {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Loading meetings")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(AppPalette.secondaryInk)
+                        Spacer(minLength: 0)
+                    }
+                    .frame(minHeight: 92)
+                } else if snapshot.visibleMeetings.isEmpty {
                     EmptyStateCard(
-                        title: searchText.isEmpty ? "No meetings yet" : "Nothing matches",
-                        subtitle: searchText.isEmpty
-                            ? "Saved notes in this workspace will appear here."
-                            : "Try another word or clear the search.",
-                        systemImage: searchText.isEmpty ? "tray" : "magnifyingglass",
+                        title: snapshotKey.isSearching ? "Nothing matches" : "No meetings yet",
+                        subtitle: snapshotKey.isSearching
+                            ? "Try another word or clear the search."
+                            : "Saved notes in this workspace will appear here.",
+                        systemImage: snapshotKey.isSearching ? "magnifyingglass" : "tray",
                         tint: AppPalette.accent
                     )
                 } else {
                     LazyVStack(spacing: 0) {
-                        ForEach(filteredMeetings) { meeting in
+                        ForEach(snapshot.visibleMeetings) { meeting in
                             EditorialLibraryRow(meeting: meeting, searchQuery: searchText)
                         }
                     }
                 }
             }
-            .padding(20)
+            .appScreenContent(top: AppSpacing.lg)
         }
         .background(AppPalette.background.ignoresSafeArea())
         .accessibilityIdentifier("folderdetail.view")
@@ -482,6 +549,20 @@ struct FolderDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .searchable(text: $searchText, prompt: "Search this folder")
         .navigationDestination(for: Meeting.ID.self) { id in MeetingDetailView(meetingID: id) }
+        .task(id: snapshotKey) {
+            let key = snapshotKey
+            if key.isSearching {
+                try? await Task.sleep(for: .milliseconds(140))
+            }
+            guard !Task.isCancelled else { return }
+            let meetings = store.meetings
+            let nextSnapshot = await snapshotBuilder.make(meetings: meetings, key: key)
+            guard !Task.isCancelled, snapshotKey == key else { return }
+            if snapshot != nextSnapshot {
+                snapshot = nextSnapshot
+            }
+            hasLoadedSnapshot = true
+        }
     }
 
     private var folderSummary: some View {
@@ -493,12 +574,12 @@ struct FolderDetailView: View {
             Group {
                 if dynamicTypeSize.isAccessibilitySize {
                     VStack(alignment: .leading, spacing: 10) {
-                        meta("Meetings", value: "\(meetings.count)")
+                        meta("Meetings", value: "\(snapshot.meetings.count)")
                         meta("Updated", value: folder.latestMeetingDate.formatted(date: .abbreviated, time: .shortened))
                     }
                 } else {
                     HStack(spacing: 24) {
-                        meta("Meetings", value: "\(meetings.count)")
+                        meta("Meetings", value: "\(snapshot.meetings.count)")
                         meta("Updated", value: folder.latestMeetingDate.formatted(date: .abbreviated, time: .shortened))
                     }
                 }

@@ -215,6 +215,15 @@ struct SpeechRecognitionContext: Codable, Hashable, Sendable {
 
 enum SpeechRecognitionSupport {
     static let localePreferenceKey = "scribeflow.speechLocaleIdentifier"
+    static let appleServiceFallbackPreferenceKey = "scribeflow.appleSpeechServiceFallbackEnabled"
+
+    static var allowsAppleSpeechServiceFallback: Bool {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: appleServiceFallbackPreferenceKey) != nil else {
+            return true
+        }
+        return defaults.bool(forKey: appleServiceFallbackPreferenceKey)
+    }
 
     private static let supportedLegacyLocales = SFSpeechRecognizer.supportedLocales()
         .sorted { lhs, rhs in
@@ -303,6 +312,7 @@ enum SpeechRecognitionSupport {
         request.taskHint = .dictation
         request.contextualStrings = context.contextualPhrases
         request.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
+            || !allowsAppleSpeechServiceFallback
 
         if #available(iOS 16.0, *) {
             request.addsPunctuation = true
@@ -351,6 +361,7 @@ protocol LiveSpeechTranscribing: AnyObject {
 
 enum SpeechRecognitionPipelineError: LocalizedError {
     case recognizerUnavailable
+    case onDeviceRecognitionUnavailable
     case unsupportedLocale
     case unsupportedAudioFormat
 
@@ -358,6 +369,8 @@ enum SpeechRecognitionPipelineError: LocalizedError {
         switch self {
         case .recognizerUnavailable:
             "Speech recognition is temporarily unavailable."
+        case .onDeviceRecognitionUnavailable:
+            "On-device speech recognition is unavailable for this language. Enable Apple Speech fallback in Recording privacy to continue."
         case .unsupportedLocale:
             "Speech recognition does not support the device language yet."
         case .unsupportedAudioFormat:
@@ -390,6 +403,11 @@ enum SpeechRecognitionPipeline {
               recognizer.isAvailable else {
             throw SpeechRecognitionPipelineError.recognizerUnavailable
         }
+        guard recognizer.supportsOnDeviceRecognition
+                || SpeechRecognitionSupport.allowsAppleSpeechServiceFallback
+        else {
+            throw SpeechRecognitionPipelineError.onDeviceRecognitionUnavailable
+        }
 
         return LegacyLiveSpeechSession(
             recognizer: recognizer,
@@ -417,12 +435,15 @@ private final class LegacyLiveSpeechSession: LiveSpeechTranscribing {
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private var rotationTask: Task<Void, Never>?
+    private var restartTask: Task<Void, Never>?
     private var finishTimeoutTask: Task<Void, Never>?
     private var finishContinuation: CheckedContinuation<Void, Never>?
     private var completedSegmentTranscripts: [Int: String] = [:]
     private var retiredSegments: [Int: RetiredRecognitionSegment] = [:]
     private var currentTranscript = ""
     private var generation = 0
+    private var requiresOnDeviceRecognition: Bool
+    private var consecutiveRecognitionFailures = 0
     private var isFinishing = false
     private var isCancelled = false
 
@@ -436,6 +457,7 @@ private final class LegacyLiveSpeechSession: LiveSpeechTranscribing {
         self.context = context
         self.onTranscript = onTranscript
         self.onError = onError
+        self.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
         replaceRecognitionSegment()
     }
 
@@ -493,6 +515,8 @@ private final class LegacyLiveSpeechSession: LiveSpeechTranscribing {
 
     private func replaceRecognitionSegment() {
         guard !isCancelled, !isFinishing else { return }
+        restartTask?.cancel()
+        restartTask = nil
 
         let oldRequest = recognitionRequest
         let oldTask = recognitionTask
@@ -508,6 +532,7 @@ private final class LegacyLiveSpeechSession: LiveSpeechTranscribing {
             context: context,
             reportsPartialResults: true
         )
+        request.requiresOnDeviceRecognition = requiresOnDeviceRecognition
 
         recognitionRequest = request
         audioSink.replaceHandler { [request] buffer in
@@ -569,6 +594,7 @@ private final class LegacyLiveSpeechSession: LiveSpeechTranscribing {
         guard generation == self.generation else { return }
 
         if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            consecutiveRecognitionFailures = 0
             currentTranscript = text
             onTranscript(combinedTranscript, isFinal)
         }
@@ -589,7 +615,17 @@ private final class LegacyLiveSpeechSession: LiveSpeechTranscribing {
         if isFinishing {
             completeFinish()
         } else if recognizer.isAvailable {
-            replaceRecognitionSegment()
+            if requiresOnDeviceRecognition,
+               SpeechRecognitionSupport.allowsAppleSpeechServiceFallback {
+                requiresOnDeviceRecognition = false
+            }
+            consecutiveRecognitionFailures += 1
+            guard consecutiveRecognitionFailures < 3 else {
+                onError("Live speech recognition paused after repeated system errors. The full recording is still safe.")
+                cancel()
+                return
+            }
+            scheduleRestartAfterFailure()
         } else {
             onError("Speech recognition became unavailable. Your transcript was preserved up to this point.")
             cancel()
@@ -600,6 +636,18 @@ private final class LegacyLiveSpeechSession: LiveSpeechTranscribing {
         rotationTask?.cancel()
         rotationTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(50))
+            guard !Task.isCancelled else { return }
+            self?.replaceRecognitionSegment()
+        }
+    }
+
+    private func scheduleRestartAfterFailure() {
+        restartTask?.cancel()
+        let delay: Duration = consecutiveRecognitionFailures == 1
+            ? .milliseconds(200)
+            : .milliseconds(600)
+        restartTask = Task { [weak self] in
+            try? await Task.sleep(for: delay)
             guard !Task.isCancelled else { return }
             self?.replaceRecognitionSegment()
         }
@@ -631,6 +679,8 @@ private final class LegacyLiveSpeechSession: LiveSpeechTranscribing {
     private func teardown() {
         rotationTask?.cancel()
         rotationTask = nil
+        restartTask?.cancel()
+        restartTask = nil
         finishTimeoutTask?.cancel()
         finishTimeoutTask = nil
         audioSink.replaceHandler(nil)

@@ -2,12 +2,92 @@ import SwiftUI
 
 // MARK: - Ask (workspace-wide AI surface)
 
+private struct AskSuggestion: Hashable, Identifiable {
+    let systemImage: String
+    let prompt: String
+    var id: String { "\(systemImage)|\(prompt)" }
+}
+
+private struct AskDerivedSnapshot: Equatable {
+    let scope: String
+    let suggestions: [AskSuggestion]
+    let hasMeetings: Bool
+}
+
+private actor AskDerivedSnapshotBuilder {
+    func make(from meetings: [Meeting]) -> AskDerivedSnapshot {
+        guard !meetings.isEmpty else {
+            return AskDerivedSnapshot(
+                scope: "Capture your first meeting to start asking.",
+                suggestions: [],
+                hasMeetings: false
+            )
+        }
+
+        let weekStart = Calendar.current.date(byAdding: .day, value: -7, to: .now) ?? .now
+        var weekCount = 0
+        var latest: Meeting?
+        var hasPinnedMeeting = false
+        var hasAccountabilityMeeting = false
+        var hasMineOwnedAction = false
+
+        for meeting in meetings {
+            if meeting.when >= weekStart { weekCount += 1 }
+            if let currentLatest = latest {
+                if meeting.when > currentLatest.when { latest = meeting }
+            } else {
+                latest = meeting
+            }
+            if meeting.isPinned { hasPinnedMeeting = true }
+            guard meeting.allowsAccountabilityExtraction else { continue }
+            hasAccountabilityMeeting = true
+            if !hasMineOwnedAction {
+                hasMineOwnedAction = meeting.commitments.contains { commitment in
+                    guard commitment.status == .open || commitment.status == .atRisk else { return false }
+                    let owner = commitment.owner.lowercased()
+                    return owner.contains("you") || owner == "me" || owner == "i"
+                }
+            }
+        }
+
+        let total = meetings.count
+        let weekPart = weekCount == 0 ? "none yet this week" : "\(weekCount) from this week"
+        var suggestions: [AskSuggestion] = []
+        if let latest, !latest.title.isEmpty {
+            suggestions.append(AskSuggestion(
+                systemImage: "doc.text.magnifyingglass",
+                prompt: "Summarize \(latest.title)"
+            ))
+        }
+        if hasMineOwnedAction {
+            suggestions.append(AskSuggestion(systemImage: "person.fill", prompt: "What's owed to me right now?"))
+        }
+        if hasPinnedMeeting {
+            suggestions.append(AskSuggestion(systemImage: "pin.fill", prompt: "What's the latest from my pinned meetings?"))
+        }
+        suggestions.append(AskSuggestion(systemImage: "checkmark.seal.fill", prompt: "What decisions did we make this week?"))
+        if hasAccountabilityMeeting {
+            suggestions.append(AskSuggestion(
+                systemImage: "exclamationmark.triangle.fill",
+                prompt: "What's at risk across every meeting?"
+            ))
+        }
+
+        return AskDerivedSnapshot(
+            scope: "Searching \(total) meeting\(total == 1 ? "" : "s") · \(weekPart)",
+            suggestions: Array(suggestions.prefix(5)),
+            hasMeetings: true
+        )
+    }
+}
+
 /// Top-level "Ask" tab. Lets the user ask questions across every saved
 /// meeting and get a single grounded answer back. Designed as tab content —
 /// the caller wraps in NavigationStack.
 struct AskView: View {
     @Environment(MeetingStore.self) private var store
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    let isActive: Bool
 
     @State private var prompt = ""
     @FocusState private var composerFocused: Bool
@@ -29,8 +109,13 @@ struct AskView: View {
     @State private var promptTask: Task<Void, Never>?
     @State private var copiedTurnID: AskTurn.ID?
     // Cached so typing in the composer doesn't re-scan every meeting per keystroke.
-    @State private var cachedScope = ""
-    @State private var cachedSuggestions: [(String, String)] = []
+    @State private var derivedSnapshot = AskDerivedSnapshot(
+        scope: "",
+        suggestions: [],
+        hasMeetings: false
+    )
+    @State private var hasLoadedDerivedSnapshot = false
+    @State private var derivedSnapshotBuilder = AskDerivedSnapshotBuilder()
 
     private var isAnyRunning: Bool { turns.contains { $0.isRunning } }
 
@@ -59,6 +144,10 @@ struct AskView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
+                        Color.clear
+                            .frame(height: 0)
+                            .id("ask.top")
+
                         if turns.isEmpty {
                             emptyPrompt
                                 .motionEntrance(step: 0, active: hasAnimatedIn)
@@ -68,9 +157,7 @@ struct AskView: View {
                             }
                         }
                     }
-                    .padding(.horizontal, 20)
-                    .padding(.top, 16)
-                    .padding(.bottom, 24)
+                    .appScreenContent(top: AppSpacing.md, bottom: AppSpacing.xl)
                 }
                 .background(AppPalette.background.ignoresSafeArea())
                 .onChange(of: turns.last?.id) { _, id in
@@ -80,6 +167,13 @@ struct AskView: View {
                 .onChange(of: turns.last?.answer) { _, _ in
                     guard let id = turns.last?.id else { return }
                     withAnimation(AppMotion.smooth) { proxy.scrollTo(id, anchor: .bottom) }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .scribeflowDockScrollToTop)) { note in
+                    guard note.object as? String == "ask" else { return }
+                    composerFocused = false
+                    withAnimation(AppMotion.smooth) {
+                        proxy.scrollTo("ask.top", anchor: .top)
+                    }
                 }
             }
         }
@@ -129,16 +223,21 @@ struct AskView: View {
                 .accessibilityLabel("Ask options")
             }
         }
-        .onAppear { hasAnimatedIn = true; refreshAskDerived() }
-        .onChange(of: store.revision) { refreshAskDerived() }
+        .onAppear { hasAnimatedIn = true }
+        .task(id: isActive ? store.revision : nil) {
+            guard isActive else { return }
+            if !derivedSnapshot.scope.isEmpty {
+                try? await Task.sleep(for: .milliseconds(140))
+            }
+            guard !Task.isCancelled else { return }
+            let snapshot = await derivedSnapshotBuilder.make(from: store.meetings)
+            guard !Task.isCancelled else { return }
+            if derivedSnapshot != snapshot {
+                derivedSnapshot = snapshot
+            }
+            hasLoadedDerivedSnapshot = true
+        }
         .onDisappear { promptTask?.cancel(); promptTask = nil }
-    }
-
-    /// Recompute the meeting-derived header + suggestions only when the library
-    /// changes, not on every keystroke in the composer.
-    private func refreshAskDerived() {
-        cachedScope = scopeSummary
-        cachedSuggestions = smartSuggestions
     }
 
     // MARK: Header
@@ -159,53 +258,21 @@ struct AskView: View {
                     }
                 }
             }
-            Text(cachedScope.isEmpty ? scopeSummary : cachedScope)
+            Text(derivedSnapshot.scope.isEmpty ? "Preparing workspace context…" : derivedSnapshot.scope)
                 .font(.subheadline)
                 .foregroundStyle(AppPalette.secondaryInk)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 20)
         .padding(.vertical, 14)
+        .padding(.horizontal, AppLayout.screenHorizontalPadding)
+        .readingWidth()
     }
 
     private var askTitle: some View {
         Text("Ask")
             .font(AppFont.serif(.title2, weight: .medium))
             .foregroundStyle(AppPalette.ink)
-    }
-
-    private var scopeSummary: String {
-        let total = store.meetings.count
-        if total == 0 { return "Capture your first meeting to start asking." }
-        let weekStart = Calendar.current.date(byAdding: .day, value: -7, to: .now) ?? .now
-        let week = store.meetings.filter { $0.when >= weekStart }.count
-        let weekPart = week == 0 ? "none yet this week" : "\(week) from this week"
-        return "Searching \(total) meeting\(total == 1 ? "" : "s") · \(weekPart)"
-    }
-
-    // MARK: Empty state with smart, data-derived suggestions
-
-    private var smartSuggestions: [(String, String)] {
-        var out: [(String, String)] = []
-        if let latest = store.meetings.sorted(by: Meeting.sortDescending).first(where: { !$0.title.isEmpty }) {
-            out.append(("doc.text.magnifyingglass", "Summarize \(latest.title)"))
-        }
-        let accountabilityMeetings = store.meetings.filter { $0.allowsAccountabilityExtraction }
-        let mineOwned = accountabilityMeetings.flatMap { $0.commitments }.contains { c in
-            guard c.status == .open || c.status == .atRisk else { return false }
-            let o = c.owner.lowercased()
-            return o.contains("you") || o == "me" || o == "i"
-        }
-        if mineOwned { out.append(("person.fill", "What's owed to me right now?")) }
-        if store.meetings.contains(where: \.isPinned) {
-            out.append(("pin.fill", "What's the latest from my pinned meetings?"))
-        }
-        out.append(("checkmark.seal.fill", "What decisions did we make this week?"))
-        if !accountabilityMeetings.isEmpty {
-            out.append(("exclamationmark.triangle.fill", "What's at risk across every meeting?"))
-        }
-        return Array(out.prefix(5))
     }
 
     private var emptyPrompt: some View {
@@ -222,7 +289,17 @@ struct AskView: View {
             }
             .padding(.top, 4)
 
-            if store.meetings.isEmpty {
+            if !hasLoadedDerivedSnapshot {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(AppPalette.accent)
+                    Text("Preparing suggestions")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(AppPalette.secondaryInk)
+                }
+                .frame(minHeight: 80)
+            } else if !derivedSnapshot.hasMeetings {
                 askFirstRunHint
             } else {
             if !recentQuestions.isEmpty {
@@ -253,21 +330,20 @@ struct AskView: View {
                 .padding(.bottom, 4)
             }
             VStack(alignment: .leading, spacing: 8) {
-                EditorialEyebrow(text: "Try these · \(cachedSuggestions.count)")
+                EditorialEyebrow(text: "Try these · \(derivedSnapshot.suggestions.count)")
                 VStack(spacing: 0) {
-                    let suggestions = Array(cachedSuggestions.enumerated())
-                    ForEach(suggestions, id: \.offset) { index, item in
+                    ForEach(derivedSnapshot.suggestions) { item in
                         Button {
                             HapticEngine.tap(.light)
-                            runPrompt(item.1)
+                            runPrompt(item.prompt)
                         } label: {
                             HStack(spacing: 12) {
-                                Image(systemName: item.0)
+                                Image(systemName: item.systemImage)
                                     .font(.system(size: 13, weight: .bold))
                                     .foregroundStyle(AppPalette.accent)
                                     .frame(width: 30, height: 30)
                                     .background(AppPalette.accentSoft, in: RoundedRectangle(cornerRadius: AppRadius.sm, style: .continuous))
-                                Text(item.1)
+                                Text(item.prompt)
                                     .scaledFont(size: 14, weight: .medium, design: .serif, relativeTo: .body)
                                     .foregroundStyle(AppPalette.ink)
                                     .lineLimit(2)
@@ -282,7 +358,7 @@ struct AskView: View {
                             .padding(.vertical, 13)
                             .contentShape(Rectangle())
                             .overlay(alignment: .bottom) {
-                                if index < suggestions.count - 1 {
+                                if item.id != derivedSnapshot.suggestions.last?.id {
                                     EditorialRule(inset: 56)
                                 }
                             }
@@ -454,6 +530,7 @@ struct AskView: View {
                                     .font(.caption.weight(.semibold))
                                     .foregroundStyle(didCopy ? AppPalette.accent : AppPalette.secondaryInk)
                                     .contentTransition(.symbolEffect(.replace))
+                                    .appTapTarget()
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel(didCopy ? "Copied" : "Copy answer")
@@ -562,7 +639,7 @@ struct AskView: View {
                     .lineLimit(5)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 12)
-                    .padding(.trailing, showClearButton ? 26 : 0)
+                    .padding(.trailing, showClearButton ? 40 : 0)
                     .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous)
@@ -577,10 +654,9 @@ struct AskView: View {
                                 Image(systemName: "xmark.circle.fill")
                                     .font(.subheadline)
                                     .foregroundStyle(AppPalette.tertiaryInk)
+                                    .appTapTarget()
                             }
                             .buttonStyle(.plain)
-                            .padding(.trailing, 10)
-                            .padding(.bottom, 11)
                             .transition(.opacity.combined(with: .scale(scale: 0.8)))
                             .accessibilityLabel("Clear")
                         }
@@ -600,7 +676,7 @@ struct AskView: View {
                     Image(systemName: isAnyRunning ? "stop.fill" : "arrow.up")
                         .font(.footnote.weight(.bold))
                         .foregroundStyle(.white)
-                        .frame(width: 40, height: 40)
+                        .frame(width: AppLayout.minimumTapTarget, height: AppLayout.minimumTapTarget)
                         .background(
                             isSendDisabled
                                 ? AnyShapeStyle(AppPalette.secondaryInk.opacity(0.25))
@@ -617,8 +693,9 @@ struct AskView: View {
                 .disabled(!isAnyRunning && prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .accessibilityLabel(isAnyRunning ? "Stop" : "Send")
             }
-            .padding(.horizontal, 16)
+            .padding(.horizontal, AppLayout.screenHorizontalPadding)
             .padding(.vertical, 14)
+            .readingWidth()
             .background(AppPalette.paper)
         }
     }

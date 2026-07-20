@@ -167,6 +167,7 @@ actor UsageImpactBuilder {
 struct UsageImpactView: View {
     @Environment(MeetingStore.self) private var store
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var period: UsageImpactPeriod = .month
     @State private var snapshot = UsageImpactSnapshot()
     @State private var builder = UsageImpactBuilder()
@@ -186,9 +187,7 @@ struct UsageImpactView: View {
                     accountabilitySummary
                     privacyNote
                 }
-                .padding(20)
-                .padding(.bottom, 24)
-                .readingWidth()
+                .appScreenContent(top: AppSpacing.lg, bottom: AppSpacing.xl)
             }
             .background(AppPalette.background.ignoresSafeArea())
             .navigationTitle(AppStrings.Screen.impact)
@@ -234,7 +233,9 @@ struct UsageImpactView: View {
 
     private var metricGrid: some View {
         LazyVGrid(
-            columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)],
+            columns: dynamicTypeSize.isAccessibilitySize
+                ? [GridItem(.flexible())]
+                : [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)],
             spacing: 10
         ) {
             ImpactMetricCard(

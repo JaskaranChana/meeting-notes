@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct DataControlsView: View {
     @Environment(MeetingStore.self) private var store
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     @AppStorage("scribeflow.lastManualBackupAt") private var lastManualBackupAt = 0.0
     @AppStorage("scribeflow.lastManualBackupIncludedAudio") private var lastManualBackupIncludedAudio = false
@@ -107,9 +108,7 @@ struct DataControlsView: View {
                     recordingsCard
                     dangerZone
                 }
-                .padding(.horizontal, 20)
-                .padding(.top, 18)
-                .padding(.bottom, 36)
+                .appScreenContent(top: 18, bottom: 36)
             }
             .disabled(isRestoreBusy)
             .background(AppPalette.background.ignoresSafeArea())
@@ -305,11 +304,14 @@ struct DataControlsView: View {
     private var storageOverview: some View {
         SurfaceCard(title: "Storage", subtitle: "Local notes, transcripts, and audio files.") {
             VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 0) {
+                LazyVGrid(
+                    columns: dynamicTypeSize.isAccessibilitySize
+                        ? [GridItem(.flexible())]
+                        : Array(repeating: GridItem(.flexible(), spacing: 12), count: 3),
+                    spacing: 14
+                ) {
                     storageRing("Total", snapshot.totalSizeLabel, 1.0, AppPalette.ink)
-                    Spacer()
                     storageRing("Audio", snapshot.audioSizeLabel, snapshot.audioFraction, AppPalette.accent)
-                    Spacer()
                     storageRing("Notes", "\(snapshot.notesCount)", min(1, Double(snapshot.notesCount) / max(1, Double(snapshot.notesCount + snapshot.recordingsCount))), AppPalette.gold)
                 }
 
@@ -382,8 +384,7 @@ struct DataControlsView: View {
                 .padding(.vertical, 6)
                 .background(tint.opacity(0.10), in: Capsule(style: .continuous))
         }
-        .padding(12)
-        .background(AppPalette.paper.opacity(0.72), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .padding(.vertical, 8)
     }
 
     private var backupCard: some View {
@@ -394,7 +395,7 @@ struct DataControlsView: View {
                     .foregroundStyle(AppPalette.secondaryInk)
                     .fixedSize(horizontal: false, vertical: true)
 
-                HStack(spacing: 10) {
+                AdaptiveActionStack(spacing: 10) {
                     backupAction(
                         "Notes only",
                         icon: "doc.text",
@@ -451,7 +452,7 @@ struct DataControlsView: View {
                     }
                 }
 
-                HStack(spacing: 10) {
+                AdaptiveActionStack(spacing: 10) {
                     Button {
                         createAutomaticBackup()
                     } label: {
@@ -504,7 +505,7 @@ struct DataControlsView: View {
                 prepareAutomaticRestore(backup)
             } label: {
                 Image(systemName: "arrow.counterclockwise")
-                    .frame(width: 30, height: 30)
+                    .appTapTarget()
             }
             .buttonStyle(.plain)
             .foregroundStyle(AppPalette.accent)
@@ -530,7 +531,7 @@ struct DataControlsView: View {
                     .foregroundStyle(AppPalette.secondaryInk)
                     .fixedSize(horizontal: false, vertical: true)
 
-                HStack(spacing: 10) {
+                AdaptiveActionStack(spacing: 10) {
                     cloudAction(
                         title: "Check",
                         icon: "arrow.clockwise",
@@ -582,7 +583,7 @@ struct DataControlsView: View {
                 Slider(value: $largeFileThresholdMB, in: 5...100, step: 5)
                     .tint(AppPalette.accent)
 
-                HStack(spacing: 10) {
+                AdaptiveActionStack(spacing: 10) {
                     cleanupButton(
                         title: "Large",
                         icon: "scalemass.fill",
@@ -979,13 +980,13 @@ struct AccountSyncView: View {
                             infoRow(
                                 icon: "icloud",
                                 tint: AppPalette.secondaryInk,
-                                title: "Optional iCloud sync next",
-                                detail: "The current app is local-first. The next layer should add user-controlled iCloud backup and cross-device restore without making cloud storage required."
+                                title: "Optional iCloud backup",
+                                detail: "Private CloudKit backup appears only in provisioned builds. Local and user-exported backups remain available without cloud storage."
                             )
                         }
                     }
                 }
-                .padding(20)
+                .appScreenContent(top: AppSpacing.lg)
             }
             .background(AppPalette.background.ignoresSafeArea())
             .navigationTitle("Storage")

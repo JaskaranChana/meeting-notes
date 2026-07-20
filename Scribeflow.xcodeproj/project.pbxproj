@@ -650,7 +650,7 @@
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Scribeflow uses Face ID to unlock your secure session.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Scribeflow uses the microphone to record meetings and voice notes you choose to capture. Audio stays on this device unless you explicitly enable a configured service or export it.";
 				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Scribeflow adds your action items to Apple Reminders, with their due dates, when you choose to.";
-				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Scribeflow uses on-device speech recognition to turn recordings into searchable transcripts.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Scribeflow uses Apple Speech recognition to turn recordings into searchable transcripts. Recognition runs on device when available and may use Apple services when fallback is enabled.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -685,7 +685,7 @@
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Scribeflow uses Face ID to unlock your secure session.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Scribeflow uses the microphone to record meetings and voice notes you choose to capture. Audio stays on this device unless you explicitly enable a configured service or export it.";
 				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Scribeflow adds your action items to Apple Reminders, with their due dates, when you choose to.";
-				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Scribeflow uses on-device speech recognition to turn recordings into searchable transcripts.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Scribeflow uses Apple Speech recognition to turn recordings into searchable transcripts. Recognition runs on device when available and may use Apple services when fallback is enabled.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

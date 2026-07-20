@@ -258,7 +258,7 @@ struct AudioDiagnosticsView: View {
                     iosLimitationsCard
                         .motionEntrance(step: 4, active: hasAnimatedIn)
                 }
-                .padding(20)
+                .appScreenContent(top: AppSpacing.lg)
             }
             .background(AppPalette.background.ignoresSafeArea())
             .navigationTitle("Microphone & audio")
@@ -278,6 +278,7 @@ struct AudioDiagnosticsView: View {
                 refreshRoute()
             }
         }
+        .modifier(ScribeflowChrome())
     }
 
     // MARK: header

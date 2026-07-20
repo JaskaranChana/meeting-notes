@@ -5,6 +5,7 @@ struct RecordingPrivacyView: View {
     @AppStorage(TranscriptionProviderFactory.remoteTranscriptionConsentKey) private var remoteTranscriptionEnabled = false
     @AppStorage(EnhancedSpeechSettings.enabledKey) private var enhancedLocalTranscriptionEnabled = true
     @AppStorage(LocalSpeakerDiarizationSettings.enabledKey) private var localSpeakerDiarizationEnabled = true
+    @AppStorage(SpeechRecognitionSupport.appleServiceFallbackPreferenceKey) private var appleSpeechFallbackEnabled = true
     @State private var hasAnimatedIn = false
     @State private var showingRemoteTranscriptionConfirmation = false
 
@@ -50,24 +51,30 @@ struct RecordingPrivacyView: View {
                         .padding(.horizontal, 20)
                         .padding(.top, 28)
 
-                    localSpeakerDiarizationControl
+                    appleSpeechFallbackControl
                         .motionEntrance(step: 6, active: hasAnimatedIn)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 12)
+
+                    localSpeakerDiarizationControl
+                        .motionEntrance(step: 7, active: hasAnimatedIn)
                         .padding(.horizontal, 20)
                         .padding(.top, 12)
 
                     if TranscriptionProviderFactory.isBackendConfigured {
                         remoteTranscriptionControl
-                            .motionEntrance(step: 7, active: hasAnimatedIn)
+                            .motionEntrance(step: 8, active: hasAnimatedIn)
                             .padding(.horizontal, 20)
                             .padding(.top, 28)
                     }
 
                     footer
-                        .motionEntrance(step: 6, active: hasAnimatedIn)
+                        .motionEntrance(step: 9, active: hasAnimatedIn)
                         .padding(.horizontal, 20)
                         .padding(.top, 32)
                         .padding(.bottom, 40)
                 }
+                .readingWidth()
             }
             .background(AppPalette.background.ignoresSafeArea())
             .navigationTitle("Recording privacy")
@@ -163,7 +170,9 @@ struct RecordingPrivacyView: View {
             Image(systemName: "lock.fill")
                 .font(.caption.weight(.medium))
                 .foregroundStyle(AppPalette.success)
-            Text("Audio stays local unless you export it or explicitly enable remote transcription.")
+            Text(appleSpeechFallbackEnabled
+                 ? "Scribeflow remote transcription is off unless enabled. Apple Speech may process audio when local recognition is unavailable."
+                 : "Speech stays on device unless you export audio or explicitly enable Scribeflow remote transcription.")
                 .font(.system(.caption, design: .serif))
                 .foregroundStyle(AppPalette.tertiaryInk)
                 .lineSpacing(1)
@@ -185,8 +194,8 @@ struct RecordingPrivacyView: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(AppPalette.ink)
                 Text(remoteTranscriptionEnabled
-                     ? "Enabled for future recordings. Turn it off anytime to keep transcription on device."
-                     : "Off by default. Audio remains on device and uses enhanced local speech with Apple fallback.")
+                     ? "Enabled for future recordings. Turn it off anytime to stop uploads to the configured Scribeflow service."
+                     : "Off by default. Scribeflow will not upload recordings to its transcription service.")
                     .font(.caption)
                     .foregroundStyle(AppPalette.secondaryInk)
                     .fixedSize(horizontal: false, vertical: true)
@@ -210,8 +219,40 @@ struct RecordingPrivacyView: View {
             .accessibilityValue(remoteTranscriptionEnabled ? "Enabled" : "Disabled")
         }
         .padding(16)
-        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(AppPalette.border.opacity(0.4), lineWidth: 0.7))
+        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous).strokeBorder(AppPalette.border.opacity(0.4), lineWidth: 0.7))
+    }
+
+    private var appleSpeechFallbackControl: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: appleSpeechFallbackEnabled ? "apple.logo" : "iphone")
+                .font(.body.weight(.semibold))
+                .foregroundStyle(appleSpeechFallbackEnabled ? AppPalette.accent : AppPalette.secondaryInk)
+                .frame(width: 34, height: 34)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Apple Speech fallback")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(AppPalette.ink)
+                Text(appleSpeechFallbackEnabled
+                     ? "Allowed when on-device recognition is unavailable or fails. Apple may process speech under its service terms."
+                     : "Off. Unsupported languages or devices may be unable to produce a transcript.")
+                    .font(.caption)
+                    .foregroundStyle(AppPalette.secondaryInk)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 8)
+
+            Toggle("", isOn: $appleSpeechFallbackEnabled)
+                .labelsHidden()
+                .tint(AppPalette.accent)
+                .accessibilityLabel("Apple Speech fallback")
+                .accessibilityValue(appleSpeechFallbackEnabled ? "Enabled" : "Disabled")
+        }
+        .padding(16)
+        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous).strokeBorder(AppPalette.border.opacity(0.4), lineWidth: 0.7))
     }
 
     private var localSpeakerDiarizationControl: some View {
@@ -242,8 +283,8 @@ struct RecordingPrivacyView: View {
                 .accessibilityValue(localSpeakerDiarizationEnabled ? "Enabled" : "Disabled")
         }
         .padding(16)
-        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(AppPalette.border.opacity(0.4), lineWidth: 0.7))
+        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous).strokeBorder(AppPalette.border.opacity(0.4), lineWidth: 0.7))
     }
 
     private var enhancedLocalTranscriptionControl: some View {
@@ -274,7 +315,7 @@ struct RecordingPrivacyView: View {
                 .accessibilityValue(enhancedLocalTranscriptionEnabled ? "Enabled" : "Disabled")
         }
         .padding(16)
-        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(AppPalette.border.opacity(0.4), lineWidth: 0.7))
+        .background(AppPalette.cardBackground, in: RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous).strokeBorder(AppPalette.border.opacity(0.4), lineWidth: 0.7))
     }
 }

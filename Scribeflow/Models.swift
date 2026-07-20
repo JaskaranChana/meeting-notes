@@ -309,6 +309,12 @@ struct TranscriptLine: Codable, Hashable, Identifiable {
     var sourceRecordingID: AudioRecordingAttachment.ID? = nil
 }
 
+enum SpeakerSeparationConfidence: String, Codable, Hashable, Sendable {
+    case unverified
+    case tentative
+    case strong
+}
+
 struct AIResponse: Codable, Hashable, Identifiable {
     var id = UUID()
     var prompt: String
@@ -1051,7 +1057,14 @@ struct Meeting: Codable, Hashable, Identifiable {
     var stage: String
     var objective: String
     var rawNotes: String
+    /// The latest text the user explicitly authored. AI extraction and source
+    /// proof read this value, while `rawNotes` may hold a generated working copy.
+    var authoredNotes: String
+    /// The first saved capture, retained for recovery even after later edits.
+    var originalCaptureNotes: String
+    var notesAreGenerated: Bool = false
     var transcript: [TranscriptLine]
+    var speakerSeparationConfidence: SpeakerSeparationConfidence? = nil
     var summaries: [TemplateSummary]
     var prompts: [AIResponse]
     var destinations: [String]
@@ -1063,6 +1076,7 @@ struct Meeting: Codable, Hashable, Identifiable {
     var retentionPolicy: RetentionPolicy = .keepUntilDeleted
     var retentionPolicyUpdatedAt: Date? = nil
     var evidenceItems: [EvidenceItem] = []
+    var dismissedEvidenceFingerprints: Set<String> = []
     var commitments: [Commitment] = []
     var sensitiveFlags: [SensitiveFlag] = []
     var transcriptVisibilityEnabled: Bool = true
@@ -1089,7 +1103,11 @@ struct Meeting: Codable, Hashable, Identifiable {
         case stage
         case objective
         case rawNotes
+        case authoredNotes
+        case originalCaptureNotes
+        case notesAreGenerated
         case transcript
+        case speakerSeparationConfidence
         case summaries
         case prompts
         case destinations
@@ -1101,6 +1119,7 @@ struct Meeting: Codable, Hashable, Identifiable {
         case retentionPolicy
         case retentionPolicyUpdatedAt
         case evidenceItems
+        case dismissedEvidenceFingerprints
         case commitments
         case sensitiveFlags
         case transcriptVisibilityEnabled
@@ -1126,7 +1145,11 @@ struct Meeting: Codable, Hashable, Identifiable {
         stage: String,
         objective: String,
         rawNotes: String,
+        authoredNotes: String? = nil,
+        originalCaptureNotes: String? = nil,
+        notesAreGenerated: Bool = false,
         transcript: [TranscriptLine],
+        speakerSeparationConfidence: SpeakerSeparationConfidence? = nil,
         summaries: [TemplateSummary],
         prompts: [AIResponse],
         destinations: [String],
@@ -1138,6 +1161,7 @@ struct Meeting: Codable, Hashable, Identifiable {
         retentionPolicy: RetentionPolicy = .keepUntilDeleted,
         retentionPolicyUpdatedAt: Date? = nil,
         evidenceItems: [EvidenceItem] = [],
+        dismissedEvidenceFingerprints: Set<String> = [],
         commitments: [Commitment] = [],
         sensitiveFlags: [SensitiveFlag] = [],
         transcriptVisibilityEnabled: Bool = true,
@@ -1161,7 +1185,12 @@ struct Meeting: Codable, Hashable, Identifiable {
         self.stage = stage
         self.objective = objective
         self.rawNotes = rawNotes
+        let resolvedAuthoredNotes = authoredNotes ?? rawNotes
+        self.authoredNotes = resolvedAuthoredNotes
+        self.originalCaptureNotes = originalCaptureNotes ?? resolvedAuthoredNotes
+        self.notesAreGenerated = notesAreGenerated
         self.transcript = transcript
+        self.speakerSeparationConfidence = speakerSeparationConfidence
         self.summaries = summaries
         self.prompts = prompts
         self.destinations = destinations
@@ -1173,6 +1202,7 @@ struct Meeting: Codable, Hashable, Identifiable {
         self.retentionPolicy = retentionPolicy
         self.retentionPolicyUpdatedAt = retentionPolicyUpdatedAt ?? when
         self.evidenceItems = evidenceItems
+        self.dismissedEvidenceFingerprints = dismissedEvidenceFingerprints
         self.commitments = commitments
         self.sensitiveFlags = sensitiveFlags
         self.transcriptVisibilityEnabled = transcriptVisibilityEnabled
@@ -1199,7 +1229,17 @@ struct Meeting: Codable, Hashable, Identifiable {
         stage = try container.decode(String.self, forKey: .stage)
         objective = try container.decode(String.self, forKey: .objective)
         rawNotes = try container.decode(String.self, forKey: .rawNotes)
+        authoredNotes = try container.decodeIfPresent(String.self, forKey: .authoredNotes) ?? rawNotes
+        originalCaptureNotes = try container.decodeIfPresent(
+            String.self,
+            forKey: .originalCaptureNotes
+        ) ?? authoredNotes
+        notesAreGenerated = try container.decodeIfPresent(Bool.self, forKey: .notesAreGenerated) ?? false
         transcript = try container.decode([TranscriptLine].self, forKey: .transcript)
+        speakerSeparationConfidence = try container.decodeIfPresent(
+            SpeakerSeparationConfidence.self,
+            forKey: .speakerSeparationConfidence
+        )
         summaries = try container.decode([TemplateSummary].self, forKey: .summaries)
         prompts = try container.decode([AIResponse].self, forKey: .prompts)
         destinations = try container.decode([String].self, forKey: .destinations)
@@ -1211,6 +1251,10 @@ struct Meeting: Codable, Hashable, Identifiable {
         retentionPolicy = try container.decodeIfPresent(RetentionPolicy.self, forKey: .retentionPolicy) ?? .keepUntilDeleted
         retentionPolicyUpdatedAt = try container.decodeIfPresent(Date.self, forKey: .retentionPolicyUpdatedAt) ?? when
         evidenceItems = try container.decodeIfPresent([EvidenceItem].self, forKey: .evidenceItems) ?? []
+        dismissedEvidenceFingerprints = try container.decodeIfPresent(
+            Set<String>.self,
+            forKey: .dismissedEvidenceFingerprints
+        ) ?? []
         commitments = try container.decodeIfPresent([Commitment].self, forKey: .commitments) ?? []
         sensitiveFlags = try container.decodeIfPresent([SensitiveFlag].self, forKey: .sensitiveFlags) ?? []
         transcriptVisibilityEnabled = try container.decodeIfPresent(Bool.self, forKey: .transcriptVisibilityEnabled) ?? true
@@ -1240,7 +1284,14 @@ struct Meeting: Codable, Hashable, Identifiable {
         try container.encode(stage, forKey: .stage)
         try container.encode(objective, forKey: .objective)
         try container.encode(rawNotes, forKey: .rawNotes)
+        try container.encode(authoredNotes, forKey: .authoredNotes)
+        try container.encode(originalCaptureNotes, forKey: .originalCaptureNotes)
+        try container.encode(notesAreGenerated, forKey: .notesAreGenerated)
         try container.encode(transcript, forKey: .transcript)
+        try container.encodeIfPresent(
+            speakerSeparationConfidence,
+            forKey: .speakerSeparationConfidence
+        )
         try container.encode(summaries, forKey: .summaries)
         try container.encode(prompts, forKey: .prompts)
         try container.encode(destinations, forKey: .destinations)
@@ -1252,6 +1303,7 @@ struct Meeting: Codable, Hashable, Identifiable {
         try container.encode(retentionPolicy, forKey: .retentionPolicy)
         try container.encodeIfPresent(retentionPolicyUpdatedAt, forKey: .retentionPolicyUpdatedAt)
         try container.encode(evidenceItems, forKey: .evidenceItems)
+        try container.encode(dismissedEvidenceFingerprints, forKey: .dismissedEvidenceFingerprints)
         try container.encode(commitments, forKey: .commitments)
         try container.encode(sensitiveFlags, forKey: .sensitiveFlags)
         try container.encode(transcriptVisibilityEnabled, forKey: .transcriptVisibilityEnabled)
@@ -1268,6 +1320,17 @@ struct Meeting: Codable, Hashable, Identifiable {
 }
 
 extension Meeting {
+    var trustedSourceNotes: String {
+        let authored = authoredNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !authored.isEmpty { return authored }
+        return notesAreGenerated ? "" : rawNotes
+    }
+
+    var hasRecoverableOriginalNotes: Bool {
+        !originalCaptureNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && originalCaptureNotes != rawNotes
+    }
+
     /// Returns the currently selected AI response. Falls back to the first
     /// prompt, then a placeholder if `prompts` is empty (previously crashed
     /// with `prompts[0]` on out-of-bounds access).

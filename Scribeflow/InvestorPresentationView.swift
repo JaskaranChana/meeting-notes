@@ -55,6 +55,7 @@ struct InvestorPresentationView: View {
                     .font(.subheadline.weight(.bold))
                     .frame(width: 34, height: 34)
                     .background(AppPalette.softSurface, in: Circle())
+                    .appTapTarget()
             }
             .buttonStyle(.plain)
             .foregroundStyle(AppPalette.ink)
@@ -226,7 +227,7 @@ struct InvestorPresentationView: View {
                 withAnimation(AppMotion.smooth) { page -= 1 }
             } label: {
                 Image(systemName: "chevron.left")
-                    .frame(width: 40, height: 40)
+                    .frame(width: AppLayout.minimumTapTarget, height: AppLayout.minimumTapTarget)
             }
             .buttonStyle(.bordered)
             .buttonBorderShape(.circle)
@@ -250,7 +251,7 @@ struct InvestorPresentationView: View {
                 }
             } label: {
                 Image(systemName: page == pageCount - 1 ? "checkmark" : "chevron.right")
-                    .frame(width: 40, height: 40)
+                    .frame(width: AppLayout.minimumTapTarget, height: AppLayout.minimumTapTarget)
             }
             .buttonStyle(.borderedProminent)
             .buttonBorderShape(.circle)

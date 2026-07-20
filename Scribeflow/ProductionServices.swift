@@ -68,6 +68,7 @@ enum ProductionServiceError: LocalizedError, Equatable, Sendable {
     case authenticationRequired
     case recordingMissing
     case recordingTooLarge
+    case insufficientTemporaryStorage
     case invalidResponse
     case invalidPayload
     case server(statusCode: Int, message: String?)
@@ -82,6 +83,8 @@ enum ProductionServiceError: LocalizedError, Equatable, Sendable {
             "The recording is no longer available on this device."
         case .recordingTooLarge:
             "This recording is too large to upload. Keep it locally or split it into smaller captures."
+        case .insufficientTemporaryStorage:
+            "There isn’t enough free space to prepare this recording for upload. Free some storage or keep the capture on device."
         case .invalidResponse, .invalidPayload:
             "The transcription service returned an unreadable response."
         case .server(_, let message):
@@ -97,7 +100,7 @@ enum ProductionServiceError: LocalizedError, Equatable, Sendable {
         case .invalidResponse:
             true
         case .notConfigured, .authenticationRequired, .recordingMissing,
-             .recordingTooLarge, .invalidPayload:
+             .recordingTooLarge, .insufficientTemporaryStorage, .invalidPayload:
             false
         }
     }
@@ -220,6 +223,16 @@ actor URLSessionTranscriptionAPIClient: TranscriptionAPIClient {
     }
 
     private func performTranscription(audioURL: URL, idempotencyKey: String) async throws -> TranscriptionResult {
+        let accessToken: String?
+        if configuration.requiresAuthentication {
+            guard let token = await tokenProvider.validAccessToken() else {
+                throw ProductionServiceError.authenticationRequired
+            }
+            accessToken = token
+        } else {
+            accessToken = nil
+        }
+
         let boundary = "Scribeflow-\(UUID().uuidString)"
         let uploadURL = try await uploadBuilder.build(
             audioURL: audioURL,
@@ -239,11 +252,8 @@ actor URLSessionTranscriptionAPIClient: TranscriptionAPIClient {
         request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
         request.setValue("Scribeflow-iOS", forHTTPHeaderField: "X-Scribeflow-Client")
 
-        if configuration.requiresAuthentication {
-            guard let token = await tokenProvider.validAccessToken() else {
-                throw ProductionServiceError.authenticationRequired
-            }
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        if let accessToken {
+            request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         }
 
         let (data, response) = try await session.upload(for: request, fromFile: uploadURL)
@@ -288,61 +298,100 @@ actor URLSessionTranscriptionAPIClient: TranscriptionAPIClient {
 }
 
 private actor MultipartAudioUploadBuilder {
+    private static let temporaryFilePrefix = "scribeflow-upload-"
+    private static let minimumFreeSpaceBuffer: Int64 = 64 * 1_024 * 1_024
+
     func build(audioURL: URL, boundary: String, fields: [String: String]) throws -> URL {
         let manager = FileManager.default
+        removeStaleTemporaryUploads(using: manager)
+        let audioBytes = Int64(
+            (try? audioURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        )
+        if let available = try? manager.temporaryDirectory.resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+        ).volumeAvailableCapacityForImportantUsage,
+           available < audioBytes + Self.minimumFreeSpaceBuffer {
+            throw ProductionServiceError.insufficientTemporaryStorage
+        }
+
         let uploadURL = manager.temporaryDirectory
-            .appendingPathComponent("scribeflow-upload-\(UUID().uuidString).multipart")
+            .appendingPathComponent("\(Self.temporaryFilePrefix)\(UUID().uuidString).multipart")
         guard manager.createFile(atPath: uploadURL.path, contents: nil) else {
             throw ProductionServiceError.recordingMissing
         }
 
-        let input = try FileHandle(forReadingFrom: audioURL)
-        let output = try FileHandle(forWritingTo: uploadURL)
-        defer {
-            try? input.close()
-            try? output.close()
-        }
+        do {
+            let input = try FileHandle(forReadingFrom: audioURL)
+            let output = try FileHandle(forWritingTo: uploadURL)
+            defer {
+                try? input.close()
+                try? output.close()
+            }
 
-        for (name, value) in fields.sorted(by: { $0.key < $1.key }) {
-            let safeName = sanitized(name)
-            let safeValue = value
+            for (name, value) in fields.sorted(by: { $0.key < $1.key }) {
+                let safeName = sanitized(name)
+                let safeValue = value
+                    .replacingOccurrences(of: "\r", with: "")
+                    .replacingOccurrences(of: "\n", with: "")
+                let field = """
+                --\(boundary)\r
+                Content-Disposition: form-data; name="\(safeName)"\r
+                \r
+                \(safeValue)\r
+
+                """
+                try output.write(contentsOf: Data(field.utf8))
+            }
+
+            let fileName = audioURL.lastPathComponent
+                .replacingOccurrences(of: "\"", with: "")
                 .replacingOccurrences(of: "\r", with: "")
                 .replacingOccurrences(of: "\n", with: "")
-            let field = """
+            let header = """
             --\(boundary)\r
-            Content-Disposition: form-data; name="\(safeName)"\r
+            Content-Disposition: form-data; name="audio"; filename="\(fileName)"\r
+            Content-Type: \(mimeType(for: audioURL.pathExtension))\r
             \r
-            \(safeValue)\r
 
             """
-            try output.write(contentsOf: Data(field.utf8))
+            try output.write(contentsOf: Data(header.utf8))
+
+            while let chunk = try input.read(upToCount: 1_024 * 1_024), !chunk.isEmpty {
+                try Task.checkCancellation()
+                try output.write(contentsOf: chunk)
+            }
+
+            let footer = "\r\n--\(boundary)--\r\n"
+            try output.write(contentsOf: Data(footer.utf8))
+            try manager.setAttributes(
+                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                ofItemAtPath: uploadURL.path
+            )
+            return uploadURL
+        } catch {
+            try? manager.removeItem(at: uploadURL)
+            throw error
         }
+    }
 
-        let fileName = audioURL.lastPathComponent
-            .replacingOccurrences(of: "\"", with: "")
-            .replacingOccurrences(of: "\r", with: "")
-            .replacingOccurrences(of: "\n", with: "")
-        let header = """
-        --\(boundary)\r
-        Content-Disposition: form-data; name="audio"; filename="\(fileName)"\r
-        Content-Type: \(mimeType(for: audioURL.pathExtension))\r
-        \r
-
-        """
-        try output.write(contentsOf: Data(header.utf8))
-
-        while let chunk = try input.read(upToCount: 1_024 * 1_024), !chunk.isEmpty {
-            try Task.checkCancellation()
-            try output.write(contentsOf: chunk)
+    private func removeStaleTemporaryUploads(using manager: FileManager) {
+        let cutoff = Date.now.addingTimeInterval(-60 * 60)
+        guard let files = try? manager.contentsOfDirectory(
+            at: manager.temporaryDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+        for file in files where file.lastPathComponent.hasPrefix(Self.temporaryFilePrefix) {
+            guard let modified = try? file.resourceValues(
+                forKeys: [.contentModificationDateKey]
+            ).contentModificationDate else {
+                try? manager.removeItem(at: file)
+                continue
+            }
+            if modified < cutoff {
+                try? manager.removeItem(at: file)
+            }
         }
-
-        let footer = "\r\n--\(boundary)--\r\n"
-        try output.write(contentsOf: Data(footer.utf8))
-        try manager.setAttributes(
-            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
-            ofItemAtPath: uploadURL.path
-        )
-        return uploadURL
     }
 
     private func sanitized(_ value: String) -> String {
@@ -420,28 +469,37 @@ enum TranscriptionProviderFactory {
 actor TranscriptionRetryQueue {
     static let shared = TranscriptionRetryQueue()
 
+    private let folderURL: URL
     private let fileURL: URL
-    private var jobs: [TranscriptionRetryJob]
+    private var jobs: [TranscriptionRetryJob] = []
+    private var hasLoaded = false
 
     init() {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
         let folder = base.appendingPathComponent("Scribeflow", isDirectory: true)
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        folderURL = folder
         fileURL = folder.appendingPathComponent("transcription-queue.json")
+    }
 
+    private func loadIfNeeded() {
+        guard !hasLoaded else { return }
+        hasLoaded = true
+        try? FileManager.default.createDirectory(
+            at: folderURL,
+            withIntermediateDirectories: true
+        )
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         if let data = try? Data(contentsOf: fileURL),
            let decoded = try? decoder.decode([TranscriptionRetryJob].self, from: data) {
             jobs = decoded
-        } else {
-            jobs = []
         }
     }
 
     func upsert(_ job: TranscriptionRetryJob) {
+        loadIfNeeded()
         if let index = jobs.firstIndex(where: { $0.id == job.id }) {
             jobs[index] = job
         } else {
@@ -451,6 +509,7 @@ actor TranscriptionRetryQueue {
     }
 
     func enqueueFresh(_ job: TranscriptionRetryJob) {
+        loadIfNeeded()
         jobs.removeAll {
             $0.recordingID == job.recordingID && $0.meetingID == job.meetingID
         }
@@ -459,12 +518,14 @@ actor TranscriptionRetryQueue {
     }
 
     func remove(id: TranscriptionRetryJob.ID) {
+        loadIfNeeded()
         jobs.removeAll { $0.id == id }
         persist()
     }
 
     func readyJobs(now: Date = .now) -> [TranscriptionRetryJob] {
-        jobs
+        loadIfNeeded()
+        return jobs
             .filter { job in
                 job.meetingID != nil
                     && job.canRetry
@@ -475,10 +536,12 @@ actor TranscriptionRetryQueue {
     }
 
     func job(id: TranscriptionRetryJob.ID) -> TranscriptionRetryJob? {
-        jobs.first { $0.id == id }
+        loadIfNeeded()
+        return jobs.first { $0.id == id }
     }
 
     func clear() {
+        hasLoaded = true
         jobs.removeAll()
         try? FileManager.default.removeItem(at: fileURL)
     }
@@ -579,7 +642,7 @@ final class TranscriptionRecoveryCoordinator {
                     workspace: meeting.workspace,
                     objective: meeting.objective,
                     attendees: meeting.attendees,
-                    notes: meeting.rawNotes,
+                    notes: meeting.trustedSourceNotes,
                     templateTitle: meeting.selectedTemplate.title,
                     templateGuidance: meeting.selectedTemplate.aiHint,
                     vocabulary: meeting.attendees,

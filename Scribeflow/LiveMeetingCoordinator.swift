@@ -26,6 +26,38 @@ private final class LiveAudioLevelSampler: @unchecked Sendable {
     }
 }
 
+private struct LiveTranscriptAnalysisSnapshot {
+    let paragraphs: [String]
+    let wordCount: Int
+}
+
+private actor LiveTranscriptAnalysisWorker {
+    func analyze(_ text: String) -> LiveTranscriptAnalysisSnapshot {
+        guard !Task.isCancelled else {
+            return LiveTranscriptAnalysisSnapshot(paragraphs: [], wordCount: 0)
+        }
+        let paragraphs = Array(
+            text
+                .components(separatedBy: CharacterSet(charactersIn: ".!?\n"))
+                .lazy
+                .map {
+                    $0.replacingOccurrences(of: "\n", with: " ")
+                        .replacingOccurrences(of: "\"", with: "")
+                        .replacingOccurrences(of: "  ", with: " ")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                .filter { !$0.isEmpty }
+        )
+        guard !Task.isCancelled else {
+            return LiveTranscriptAnalysisSnapshot(paragraphs: [], wordCount: 0)
+        }
+        return LiveTranscriptAnalysisSnapshot(
+            paragraphs: paragraphs,
+            wordCount: text.split(whereSeparator: \.isWhitespace).count
+        )
+    }
+}
+
 @MainActor
 private final class CaptureBackgroundTaskLease {
     private var identifier = UIBackgroundTaskIdentifier.invalid
@@ -146,6 +178,7 @@ final class LiveMeetingCoordinator {
     var selectedTemplate: NoteTemplate = .general
     var transcriptText = ""
     var transcriptParagraphs: [String] = []
+    private(set) var transcriptWordCount = 0
     var transcriptSegments: [TranscriptionSegment] = []
     var isFinalizingSpeech = false
     var speakerStatus: String?
@@ -201,6 +234,27 @@ final class LiveMeetingCoordinator {
 
     @ObservationIgnored
     private var pendingTranscriptUpdateTask: Task<Void, Never>?
+
+    @ObservationIgnored
+    private var pendingTranscriptText: String?
+
+    @ObservationIgnored
+    private var lastTranscriptPublishAt = Date.distantPast
+
+    @ObservationIgnored
+    private var pendingTranscriptAnalysisTask: Task<Void, Never>?
+
+    @ObservationIgnored
+    private var pendingTranscriptAnalysisText: String?
+
+    @ObservationIgnored
+    private var pendingTranscriptAnalysisRunID: UUID?
+
+    @ObservationIgnored
+    private var lastTranscriptAnalysisAt = Date.distantPast
+
+    @ObservationIgnored
+    private let transcriptAnalysisWorker = LiveTranscriptAnalysisWorker()
 
     @ObservationIgnored
     private var speechContextUpdateTask: Task<Void, Never>?
@@ -369,6 +423,7 @@ final class LiveMeetingCoordinator {
         guard generation == captureGeneration, permissionState == .ready else { return }
         transcriptText = ""
         transcriptParagraphs = []
+        transcriptWordCount = 0
         transcriptSegments = []
         speakerStatus = nil
         isFinalizingSpeech = false
@@ -384,6 +439,11 @@ final class LiveMeetingCoordinator {
         isPaused = false
         acceptedFingerprints.removeAll()
         dismissedFingerprints.removeAll()
+        pendingTranscriptText = nil
+        pendingTranscriptAnalysisText = nil
+        pendingTranscriptAnalysisRunID = nil
+        lastTranscriptPublishAt = .distantPast
+        lastTranscriptAnalysisAt = .distantPast
 
         do {
             try configureAudioSession()
@@ -477,7 +537,9 @@ final class LiveMeetingCoordinator {
         audioWriter?.discard()
         audioWriter = nil
         if let pendingAudioFileName {
-            PendingMeetingAudioStore.delete(pendingAudioFileName)
+            Task {
+                await PendingMeetingFileTransfer.shared.deletePending(pendingAudioFileName)
+            }
             self.pendingAudioFileName = nil
         }
         isFinalizingSpeech = false
@@ -507,7 +569,7 @@ final class LiveMeetingCoordinator {
         let finalizedTranscript = await session?.finish() ?? ""
         let cleanedTranscript = finalizedTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
         if !cleanedTranscript.isEmpty {
-            applyTranscriptUpdate(cleanedTranscript)
+            await applyFinalTranscriptUpdate(cleanedTranscript)
         }
 
         guard let temporaryURL = await audioFinalization.value else {
@@ -515,7 +577,8 @@ final class LiveMeetingCoordinator {
             return
         }
         do {
-            pendingAudioFileName = try PendingMeetingAudioStore.adopt(temporaryURL)
+            pendingAudioFileName = try await PendingMeetingFileTransfer.shared
+                .adoptForProcessing(temporaryURL)
             speakerStatus = "Recording secured · Save to refine wording and speaker labels"
         } catch {
             try? FileManager.default.removeItem(at: temporaryURL)
@@ -547,6 +610,11 @@ final class LiveMeetingCoordinator {
         timer = nil
         pendingTranscriptUpdateTask?.cancel()
         pendingTranscriptUpdateTask = nil
+        pendingTranscriptText = nil
+        pendingTranscriptAnalysisTask?.cancel()
+        pendingTranscriptAnalysisTask = nil
+        pendingTranscriptAnalysisText = nil
+        pendingTranscriptAnalysisRunID = nil
         speechContextUpdateTask?.cancel()
         speechContextUpdateTask = nil
     }
@@ -725,9 +793,10 @@ final class LiveMeetingCoordinator {
                         fileName = try await PendingMeetingFileTransfer.shared
                             .adoptForProcessing(temporaryAudioURL)
                     } catch {
+                        let finalized: Bool
                         if let preservedURL = try? await PendingMeetingFileTransfer.shared
                             .preserveAsRecording(temporaryAudioURL) {
-                            _ = store.finishPendingMeetingPreservingAudio(
+                            finalized = store.finishPendingMeetingPreservingAudio(
                                 pending.id,
                                 recordingURL: preservedURL,
                                 recovery: nil,
@@ -738,6 +807,13 @@ final class LiveMeetingCoordinator {
                                 pending.id,
                                 message: "Saved with the live transcript"
                             )
+                            finalized = true
+                        }
+                        if finalized {
+                            _ = await MeetingProcessingNotification.sendReady(
+                                meetingID: pending.id,
+                                title: resolvedTitle
+                            )
                         }
                         return
                     }
@@ -745,6 +821,10 @@ final class LiveMeetingCoordinator {
                     store.finishPendingMeetingWithLiveTranscript(
                         pending.id,
                         message: "Saved with the live transcript"
+                    )
+                    _ = await MeetingProcessingNotification.sendReady(
+                        meetingID: pending.id,
+                        title: resolvedTitle
                     )
                     return
                 }
@@ -889,31 +969,124 @@ final class LiveMeetingCoordinator {
 
     private func handleTranscriptUpdate(_ text: String, isFinal: Bool) {
         noteAudibleSpeech()
-        pendingTranscriptUpdateTask?.cancel()
 
         if isFinal {
-            applyTranscriptUpdate(text)
+            pendingTranscriptUpdateTask?.cancel()
+            pendingTranscriptUpdateTask = nil
+            pendingTranscriptText = nil
+            lastTranscriptPublishAt = .now
+            applyTranscriptUpdate(text, analyzeImmediately: true)
             return
         }
 
-        let candidate = text
+        pendingTranscriptText = text
+        guard pendingTranscriptUpdateTask == nil else { return }
+
+        let elapsed = Date.now.timeIntervalSince(lastTranscriptPublishAt)
+        if elapsed >= 0.22 {
+            publishPendingTranscript()
+            return
+        }
+
+        let delay = max(0.02, 0.22 - elapsed)
+        let delayMilliseconds = Int((delay * 1_000).rounded())
         pendingTranscriptUpdateTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(180))
+            try? await Task.sleep(for: .milliseconds(delayMilliseconds))
             guard !Task.isCancelled else { return }
-            self?.applyTranscriptUpdate(candidate)
+            self?.publishPendingTranscript()
         }
     }
 
-    private func applyTranscriptUpdate(_ text: String) {
-        guard text != transcriptText else { return }
+    private func publishPendingTranscript() {
+        pendingTranscriptUpdateTask = nil
+        guard let candidate = pendingTranscriptText else { return }
+        pendingTranscriptText = nil
+        lastTranscriptPublishAt = .now
+        applyTranscriptUpdate(candidate)
+    }
+
+    private func applyTranscriptUpdate(
+        _ text: String,
+        analyzeImmediately: Bool = false
+    ) {
+        if text == transcriptText {
+            if analyzeImmediately {
+                scheduleLiveTranscriptAnalysis(immediately: true)
+            }
+            return
+        }
         transcriptText = text
-        transcriptParagraphs = text
-            .components(separatedBy: CharacterSet(charactersIn: ".!?\n"))
-            .map { cleanSentence($0) }
-            .filter { !$0.isEmpty }
+        scheduleLiveTranscriptAnalysis(immediately: analyzeImmediately)
+    }
+
+    /// Partial recognition can update several times per second. Keep accepting
+    /// every result, but publish paragraph/suggestion state at most about once
+    /// per second so a long transcript never creates quadratic UI work.
+    private func scheduleLiveTranscriptAnalysis(immediately: Bool = false) {
+        pendingTranscriptAnalysisText = transcriptText
+        if immediately {
+            pendingTranscriptAnalysisTask?.cancel()
+            pendingTranscriptAnalysisTask = nil
+            pendingTranscriptAnalysisRunID = nil
+        } else if pendingTranscriptAnalysisTask != nil {
+            return
+        }
+
+        let elapsed = Date.now.timeIntervalSince(lastTranscriptAnalysisAt)
+        let delay = immediately || elapsed >= 0.8 ? 0 : max(0.08, 0.8 - elapsed)
+        let delayMilliseconds = Int((delay * 1_000).rounded())
+        let runID = UUID()
+        pendingTranscriptAnalysisRunID = runID
+        let worker = transcriptAnalysisWorker
+        pendingTranscriptAnalysisTask = Task { [weak self] in
+            if delayMilliseconds > 0 {
+                try? await Task.sleep(for: .milliseconds(delayMilliseconds))
+            }
+            guard !Task.isCancelled else { return }
+            guard let self,
+                  self.pendingTranscriptAnalysisRunID == runID,
+                  let source = self.pendingTranscriptAnalysisText
+            else { return }
+            self.pendingTranscriptAnalysisText = nil
+
+            let analysis = await worker.analyze(source)
+            guard !Task.isCancelled,
+                  self.pendingTranscriptAnalysisRunID == runID
+            else { return }
+
+            if self.transcriptText == source {
+                self.applyLiveTranscriptAnalysis(analysis)
+            }
+            self.pendingTranscriptAnalysisTask = nil
+            self.pendingTranscriptAnalysisRunID = nil
+            if self.pendingTranscriptAnalysisText != nil {
+                self.scheduleLiveTranscriptAnalysis()
+            }
+        }
+    }
+
+    private func applyLiveTranscriptAnalysis(_ analysis: LiveTranscriptAnalysisSnapshot) {
+        lastTranscriptAnalysisAt = .now
+        if transcriptParagraphs != analysis.paragraphs {
+            transcriptParagraphs = analysis.paragraphs
+        }
+        if transcriptWordCount != analysis.wordCount {
+            transcriptWordCount = analysis.wordCount
+        }
         refreshPurposeUnderstanding()
         refreshSuggestions()
         autoSuggestTitleIfNeeded()
+    }
+
+    private func applyFinalTranscriptUpdate(_ text: String) async {
+        pendingTranscriptAnalysisTask?.cancel()
+        pendingTranscriptAnalysisTask = nil
+        pendingTranscriptAnalysisText = nil
+        pendingTranscriptAnalysisRunID = nil
+        transcriptText = text
+        let analysis = await transcriptAnalysisWorker.analyze(text)
+        guard !Task.isCancelled, transcriptText == text else { return }
+        applyLiveTranscriptAnalysis(analysis)
     }
 
     private func preserveRecordingAfterSpeechFailure(_ message: String) {
@@ -927,45 +1100,11 @@ final class LiveMeetingCoordinator {
             : "Live captions paused: \(detail) The full recording is still being captured."
     }
 
-    private func applyFinalTranscriptionResult(_ result: TranscriptionResult) {
-        let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-
-        transcriptText = text
-        transcriptSegments = SpeakerIdentityResolver.normalizedSegments(result.segments)
-        if transcriptSegments.isEmpty {
-            transcriptParagraphs = text
-                .components(separatedBy: CharacterSet(charactersIn: ".!?\n"))
-                .map { cleanSentence($0) }
-                .filter { !$0.isEmpty }
-        } else {
-            transcriptParagraphs = transcriptSegments.map(\.text)
-        }
-
-        if result.diarizationAvailable {
-            let speakerCount = Set(transcriptSegments.map {
-                SpeakerIdentityResolver.canonicalKey(for: $0.speaker)
-            }).filter { !$0.isEmpty }.count
-            speakerStatus = speakerCount == 1
-                ? "1 speaker detected on device"
-                : "\(speakerCount) speakers detected on device"
-        } else {
-            speakerStatus = "Transcript refined. Speaker separation was unavailable."
-        }
-        refreshPurposeUnderstanding()
-        refreshSuggestions()
-        autoSuggestTitleIfNeeded()
-    }
-
     private func recognitionContext(includeLiveVocabulary: Bool = false) -> SpeechRecognitionContext {
         let participantNames = attendees
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        let inferredSpeakerCount = participantNames.count >= 2
-            ? min(participantNames.count, 8)
-            : nil
-
         return SpeechRecognitionContext(
             title: title,
             workspace: workspace,
@@ -976,7 +1115,7 @@ final class LiveMeetingCoordinator {
             templateGuidance: "\(selectedTemplate.description) \(selectedTemplate.aiHint)",
             vocabulary: includeLiveVocabulary ? finalPassVocabulary : [],
             localeIdentifier: recognitionLocale.identifier,
-            expectedSpeakerCount: expectedSpeakerCount ?? inferredSpeakerCount
+            expectedSpeakerCount: expectedSpeakerCount
         )
     }
 

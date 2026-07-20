@@ -5,6 +5,46 @@ private struct MeetingTranscriptSnapshotKey: Hashable {
     let query: String
 }
 
+private struct MeetingAnswerSources: View {
+    let citations: [RAGResult]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Sources")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(AppPalette.secondaryInk)
+
+            ForEach(citations.prefix(5)) { citation in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text(citation.sourceID)
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.white)
+                            .frame(minWidth: 28, minHeight: 22)
+                            .padding(.horizontal, 4)
+                            .background(AppPalette.accent, in: Capsule())
+
+                        Text(citation.sourceLabel)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(AppPalette.ink)
+                    }
+
+                    Text(citation.snippet)
+                        .font(.caption)
+                        .foregroundStyle(AppPalette.secondaryInk)
+                        .lineLimit(3)
+                        .textSelection(.enabled)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 4)
+            }
+        }
+        .padding(.top, 2)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Answer sources")
+    }
+}
+
 private struct MeetingTranscriptDisplaySnapshot {
     let lines: [TranscriptLine]
     let wordCount: Int
@@ -52,6 +92,7 @@ struct MeetingDetailView: View {
     @State private var rewriteMessage: String?
     @State private var isGeneratingPrompt = false
     @State private var promptResponse: String?
+    @State private var promptCitations: [RAGResult] = []
     @State private var promptTitle = ""
     @State private var shareText = ""
     @State private var showingShareSheet = false
@@ -71,6 +112,8 @@ struct MeetingDetailView: View {
     @State private var showingPresentation = false
     @State private var showingPeopleCard: String? = nil
     @State private var showingAttachRecorder = false
+    @State private var showingDeleteConfirmation = false
+    @State private var sendingWebhookIDs: Set<UUID> = []
     @State private var recordingRenameText = ""
     @State private var recordingPendingRename: AudioRecordingAttachment?
     @State private var recordingPendingDelete: AudioRecordingAttachment?
@@ -84,9 +127,11 @@ struct MeetingDetailView: View {
     @State private var cachedPrepBrief = PrepBrief(headline: "", bullets: [], questions: [])
     @State private var cachedSynopsis: String = ""
     @State private var cachedIntelligenceReport: MeetingIntelligenceReport?
+    @State private var cachedPurpose: CapturePurpose?
     @State private var cachedTranscriptLines: [TranscriptLine] = []
     @State private var cachedTranscriptWordCount = 0
     @State private var transcriptSnapshotBuilder = MeetingTranscriptSnapshotBuilder()
+    @State private var isPreparingContent = true
     @State private var selectedTab: HubTab = .overview
     @AppStorage("hasUsedMeetingTabs") private var hasUsedTabs = false
 
@@ -107,7 +152,7 @@ struct MeetingDetailView: View {
     }
 
     func visibleTabs(for meeting: Meeting) -> [HubTab] {
-        meeting.allowsAccountabilityExtraction
+        resolvedPurpose(for: meeting).allowsAccountabilityExtraction
             ? HubTab.allCases
             : [.overview, .transcript, .more]
     }
@@ -119,7 +164,7 @@ struct MeetingDetailView: View {
         case .overview:
             return nil
         case .tasks:
-            guard meeting.allowsAccountabilityExtraction else { return nil }
+            guard resolvedPurpose(for: meeting).allowsAccountabilityExtraction else { return nil }
             // Commitments and signal actions are the same extractor now — don't
             // sum them. Open commitments when present, else the live signals.
             let open = meeting.commitments.filter { $0.status == .open || $0.status == .atRisk }.count
@@ -160,6 +205,10 @@ struct MeetingDetailView: View {
     var meetingSignals: MeetingSignals { cachedSignals }
     var prepBrief: PrepBrief { cachedPrepBrief }
 
+    private func resolvedPurpose(for meeting: Meeting) -> CapturePurpose {
+        cachedPurpose ?? meeting.purpose
+    }
+
     private var transcriptSnapshotKey: MeetingTranscriptSnapshotKey {
         MeetingTranscriptSnapshotKey(
             revision: store.revision,
@@ -179,17 +228,24 @@ struct MeetingDetailView: View {
         meetingDigestMarkdown(m, signals: store.signals(for: m))
     }
 
-    func refreshDerived() {
+    private func refreshDerived() async {
         guard let m = meeting else { return }
-        cachedSignals = store.signals(for: m)
+        let bundle = await store.analysisBundle(for: m)
+        guard !Task.isCancelled,
+              let current = store.meeting(withID: m.id),
+              current == m
+        else { return }
+        cachedSignals = bundle.signals
         cachedSynopsis = synopsisFor(m, summary: m.summary(for: m.selectedTemplate))
-        cachedIntelligenceReport = store.intelligenceReport(for: m)
+        cachedIntelligenceReport = bundle.report
+        cachedPurpose = bundle.purpose
         if transcriptSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             cachedTranscriptLines = m.transcript
         }
         if selectedTab == .more {
             cachedPrepBrief = store.prepBrief(for: m)
         }
+        isPreparingContent = false
     }
 
     private func refreshPrepIfNeeded() {
@@ -205,253 +261,365 @@ struct MeetingDetailView: View {
     var body: some View {
         Group {
             if let meeting {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        meetingDetailHero(meeting)
-                            .padding(.horizontal, 20)
-                            .padding(.top, 12)
-                            .padding(.bottom, 8)
-                            .readingWidth()
-
-                        hubTabPicker(meeting)
-                            .padding(.horizontal, 20)
-                            .padding(.top, 14)
-                            .readingWidth()
-
-                        VStack(alignment: .leading, spacing: 14) {
-                            hubTabContent(meeting)
-                        }
-                        .id(selectedTab)
-                        .transition(.opacity)
-                        .padding(.horizontal, 20)
-                        .padding(.top, 14)
-                        .padding(.bottom, 40)
-                        .readingWidth()
-                        .animation(.easeOut(duration: 0.16), value: selectedTab)
-                    }
-                }
-                .background(AppPalette.background.ignoresSafeArea())
-                .accessibilityIdentifier("meetingdetail.view")
-                .navigationTitle("Meeting")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItemGroup(placement: .topBarTrailing) {
-                        Menu {
-                            Button {
-                                HapticEngine.tap(.light)
-                                quickShareDigest(meeting)
-                            } label: {
-                                Label("Share digest", systemImage: "doc.plaintext")
-                            }
-                            Button {
-                                HapticEngine.tap(.light)
-                                showingShareCustomize = true
-                            } label: {
-                                Label("Customize…", systemImage: "slider.horizontal.3")
-                            }
-                        } label: {
-                            Image(systemName: "square.and.arrow.up")
-                        }
-                        .accessibilityLabel("Share")
-
-                        Menu {
-                            Button("Present", systemImage: "play.rectangle.fill") {
-                                HapticEngine.tap(.medium)
-                                showingPresentation = true
-                            }
-                            Button(meeting.isPinned ? "Unpin" : "Pin", systemImage: meeting.isPinned ? "pin.slash" : "pin") {
-                                HapticEngine.select()
-                                let wasPinned = meeting.isPinned
-                                store.togglePinned(for: meeting.id)
-                                NotificationCenter.default.post(
-                                    name: .scribeflowToast,
-                                    object: ToastItem(
-                                        message: wasPinned ? "Unpinned" : "Pinned to Today",
-                                        icon: wasPinned ? "pin.slash" : "pin.fill"
-                                    )
-                                )
-                            }
-                            Button("Duplicate", systemImage: "doc.on.doc") {
-                                _ = store.duplicateMeeting(meeting.id)
-                                dismiss()
-                            }
-                            ShareLink(
-                                item: store.safeSharePreview(
-                                    for: meeting.id,
-                                    format: .markdown,
-                                    includeInferred: true,
-                                    includePrivateNotes: false,
-                                    includeTranscript: false
-                                ) ?? meeting.title,
-                                subject: Text(meeting.title)
-                            ) {
-                                Label("Share as Markdown", systemImage: "doc.text")
-                            }
-                            if !WebhookStore.shared.configs.isEmpty {
-                                Menu("Send to") {
-                                    ForEach(WebhookStore.shared.configs) { config in
-                                        Button {
-                                            sendToWebhook(meeting: meeting, config: config)
-                                        } label: {
-                                            Label(
-                                                config.label.isEmpty ? config.target.title : config.label,
-                                                systemImage: config.target.systemImage
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                            Divider()
-                            Button("Delete", systemImage: "trash", role: .destructive) {
-                                HapticEngine.notify(.warning)
-                                store.deleteMeeting(meeting.id)
-                                dismiss()
-                            }
-                        } label: {
-                            Image(systemName: "ellipsis.circle")
-                        }
-                        .accessibilityLabel("More options")
-                    }
-                }
-                .sheet(isPresented: $showingShareCustomize) {
-                    shareCustomizeSheet(meeting)
-                }
-                .sheet(isPresented: $showingShareSheet) {
-                    ActivityView(items: [shareText]) { completed in
-                        if completed {
-                            store.markShared(for: meeting.id)
-                            HapticEngine.notify(.success)
-                        }
-                    }
-                }
-                .fullScreenCover(isPresented: $showingPresentation) {
-                    MeetingPresentationSheet(meeting: meeting, signals: store.signals(for: meeting))
-                }
-                .sheet(isPresented: $showingChat) {
-                    SourceCitedChatView(meeting: meeting)
-                        .presentationCornerRadius(30)
-                }
-                .sheet(isPresented: $showingAttachRecorder) {
-                    VoiceRecorderView(selectedMeetingID: .constant(meeting.id), presentationMode: .attach(meeting.id))
-                        .presentationCornerRadius(30)
-                }
-                .sheet(isPresented: $showingSpeakerEditor) {
-                    SpeakerEditorView(meetingID: meeting.id)
-                        .presentationDetents([.medium, .large])
-                        .presentationCornerRadius(30)
-                }
-                .sheet(item: $transcriptLinePendingSpeakerEdit) { line in
-                    TranscriptSpeakerAssignmentView(meetingID: meeting.id, line: line)
-                        .presentationDetents([.medium])
-                        .presentationCornerRadius(30)
-                }
-                .sheet(item: $selectedSourceProof) { selection in
-                    SourceProofInspectorView(selection: selection)
-                        .presentationDetents([.medium, .large])
-                        .presentationCornerRadius(30)
-                }
-                .alert("Rename recording", isPresented: Binding(
-                    get: { recordingPendingRename != nil },
-                    set: { if !$0 { recordingPendingRename = nil } }
-                )) {
-                    TextField("Recording title", text: $recordingRenameText)
-                    Button("Save") {
-                        if let recordingPendingRename {
-                            store.updateRecordingTitle(recordingRenameText, recordingID: recordingPendingRename.id, in: meeting.id)
-                        }
-                        recordingPendingRename = nil
-                    }
-                    Button("Cancel", role: .cancel) {
-                        recordingPendingRename = nil
-                    }
-                }
-                .confirmationDialog("Delete recording?", isPresented: Binding(
-                    get: { recordingPendingDelete != nil },
-                    set: { if !$0 { recordingPendingDelete = nil } }
-                ), titleVisibility: .visible) {
-                    if let recordingPendingDelete {
-                        Button("Delete \(recordingPendingDelete.title)", role: .destructive) {
-                            store.deleteRecording(recordingPendingDelete.id, from: meeting.id)
-                            self.recordingPendingDelete = nil
-                        }
-                    }
-                    Button("Cancel", role: .cancel) {
-                        recordingPendingDelete = nil
-                    }
-                } message: {
-                    Text("This removes the local audio file from this device.")
-                }
-                .sheet(isPresented: $showingContextPicker) {
-                    MeetingContextPickerView(selectedMode: Binding(
-                        get: { meeting.contextMode },
-                        set: { store.updateContextMode($0, for: meeting.id) }
-                    ))
-                    .presentationDetents([.medium, .large])
-                    .presentationCornerRadius(30)
-                }
-                .sheet(item: Binding(
-                    get: { showingPeopleCard.map { IdentifiableString(value: $0) } },
-                    set: { showingPeopleCard = $0?.value }
-                )) { item in
-                    NavigationStack {
-                        ScrollView {
-                            VStack(spacing: 12) {
-                                PeopleIntelligenceCard(
-                                    person: store.personIntelligence(for: item.value)
-                                )
-                                .padding(.horizontal, 16)
-                            }
-                            .padding(.vertical, 16)
-                        }
-                        .background(AppPalette.background.ignoresSafeArea())
-                        .navigationTitle(item.value)
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbar {
-                            ToolbarItem(placement: .topBarTrailing) {
-                                Button("Done") { showingPeopleCard = nil }
-                                    .tint(AppPalette.ink)
-                            }
-                        }
-                    }
-                    .presentationDetents([.medium, .large])
-                    .presentationCornerRadius(30)
-                }
-                .onAppear {
-                    hasAnimatedIn = true
-                    store.scoreAndSave(for: meeting.id)
-                    refreshDerived()
-                }
-                .task(id: store.revision) {
-                    // Debounce: each keystroke bumps store.revision, which cancels
-                    // and restarts this task. Sleeping first means the heavy
-                    // derived read only runs once the store settles (typing pause),
-                    // not on every keystroke — which is what hung the keyboard.
-                    try? await Task.sleep(for: .milliseconds(300))
-                    guard !Task.isCancelled else { return }
-                    if !visibleTabs(for: meeting).contains(selectedTab) {
-                        selectedTab = .overview
-                    }
-                    refreshDerived()
-                }
-                .task(id: transcriptSnapshotKey) {
-                    await refreshTranscriptSnapshot(for: transcriptSnapshotKey)
-                }
-                .onChange(of: selectedTab) { _, _ in
-                    refreshPrepIfNeeded()
-                }
-                .navigationDestination(for: DetailRoute.self) { route in
-                    detailDestination(route)
-                }
-                .onDisappear {
-                    rewriteTask?.cancel()
-                    promptTask?.cancel()
-                    rewriteTask = nil
-                    promptTask = nil
-                }
+                meetingScreen(meeting)
             } else {
                 ContentUnavailableView("Meeting not found", systemImage: "exclamationmark.triangle")
             }
         }
+    }
+
+    private func meetingScreen(_ meeting: Meeting) -> some View {
+        let page = meetingPage(meeting)
+        let primaryPresentations = attachPrimaryPresentations(to: page, meeting: meeting)
+        let editorPresentations = attachEditorPresentations(to: primaryPresentations, meeting: meeting)
+        let contextPresentations = attachContextPresentations(to: editorPresentations, meeting: meeting)
+        return attachLifecycle(to: contextPresentations, meeting: meeting)
+    }
+
+    private func meetingPage(_ meeting: Meeting) -> some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                meetingDetailHero(meeting)
+                    .padding(.horizontal, AppLayout.screenHorizontalPadding)
+                    .padding(.top, AppSpacing.sm)
+                    .padding(.bottom, AppSpacing.xs)
+                    .readingWidth()
+
+                hubTabPicker(meeting)
+                    .padding(.horizontal, AppLayout.screenHorizontalPadding)
+                    .padding(.top, AppSpacing.md)
+                    .readingWidth()
+
+                VStack(alignment: .leading, spacing: AppSpacing.md) {
+                    if isPreparingContent {
+                        meetingContentLoadingState
+                    } else {
+                        hubTabContent(meeting)
+                    }
+                }
+                .id(selectedTab)
+                .transition(.opacity)
+                .appScreenContent(top: AppSpacing.md, bottom: 40)
+                .animation(.easeOut(duration: 0.16), value: selectedTab)
+            }
+        }
+        .background(AppPalette.background.ignoresSafeArea())
+        .accessibilityIdentifier("meetingdetail.view")
+        .navigationTitle(resolvedPurpose(for: meeting).isPersonalCapture ? "Note" : "Meeting")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            meetingToolbar(for: meeting)
+        }
+    }
+
+    @ToolbarContentBuilder
+    private func meetingToolbar(for meeting: Meeting) -> some ToolbarContent {
+        ToolbarItemGroup(placement: .topBarTrailing) {
+            Menu {
+                Button {
+                    HapticEngine.tap(.light)
+                    quickShareDigest(meeting)
+                } label: {
+                    Label("Share digest", systemImage: "doc.plaintext")
+                }
+                Button {
+                    HapticEngine.tap(.light)
+                    showingShareCustomize = true
+                } label: {
+                    Label("Customize…", systemImage: "slider.horizontal.3")
+                }
+            } label: {
+                Image(systemName: "square.and.arrow.up")
+            }
+            .accessibilityLabel("Share")
+
+            Menu {
+                Button("Present", systemImage: "play.rectangle.fill") {
+                    HapticEngine.tap(.medium)
+                    showingPresentation = true
+                }
+                Button(meeting.isPinned ? "Unpin" : "Pin", systemImage: meeting.isPinned ? "pin.slash" : "pin") {
+                    HapticEngine.select()
+                    let wasPinned = meeting.isPinned
+                    store.togglePinned(for: meeting.id)
+                    NotificationCenter.default.post(
+                        name: .scribeflowToast,
+                        object: ToastItem(
+                            message: wasPinned ? "Unpinned" : "Pinned to Today",
+                            icon: wasPinned ? "pin.slash" : "pin.fill"
+                        )
+                    )
+                }
+                Button("Duplicate", systemImage: "doc.on.doc") {
+                    _ = store.duplicateMeeting(meeting.id)
+                    dismiss()
+                }
+                ShareLink(
+                    item: store.safeSharePreview(
+                        for: meeting.id,
+                        format: .markdown,
+                        includeInferred: true,
+                        includePrivateNotes: false,
+                        includeTranscript: false
+                    ) ?? meeting.title,
+                    subject: Text(meeting.title)
+                ) {
+                    Label("Share as Markdown", systemImage: "doc.text")
+                }
+                if !WebhookStore.shared.configs.isEmpty {
+                    Menu("Send to") {
+                        ForEach(WebhookStore.shared.configs) { config in
+                            Button {
+                                sendToWebhook(meeting: meeting, config: config)
+                            } label: {
+                                Label(
+                                    webhookTitle(for: config),
+                                    systemImage: sendingWebhookIDs.contains(config.id)
+                                        ? "arrow.triangle.2.circlepath"
+                                        : config.target.systemImage
+                                )
+                            }
+                            .disabled(sendingWebhookIDs.contains(config.id))
+                        }
+                    }
+                }
+                Divider()
+                Button("Delete", systemImage: "trash", role: .destructive) {
+                    HapticEngine.notify(.warning)
+                    showingDeleteConfirmation = true
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .accessibilityLabel("More options")
+        }
+    }
+
+    private func webhookTitle(for config: WebhookConfig) -> String {
+        let label = config.label.isEmpty ? config.target.title : config.label
+        return sendingWebhookIDs.contains(config.id) ? "Sending to \(label)" : label
+    }
+
+    private func attachPrimaryPresentations<Content: View>(
+        to content: Content,
+        meeting: Meeting
+    ) -> some View {
+        content
+            .sheet(isPresented: $showingShareCustomize) {
+                shareCustomizeSheet(meeting)
+            }
+            .sheet(isPresented: $showingShareSheet) {
+                ActivityView(items: [shareText]) { completed in
+                    if completed {
+                        store.markShared(for: meeting.id)
+                        HapticEngine.notify(.success)
+                    }
+                }
+            }
+            .fullScreenCover(isPresented: $showingPresentation) {
+                MeetingPresentationSheet(meeting: meeting, signals: store.signals(for: meeting))
+            }
+            .sheet(isPresented: $showingChat) {
+                SourceCitedChatView(meeting: meeting)
+                    .presentationCornerRadius(30)
+            }
+            .sheet(isPresented: $showingAttachRecorder) {
+                VoiceRecorderView(selectedMeetingID: .constant(meeting.id), presentationMode: .attach(meeting.id))
+                    .presentationCornerRadius(30)
+            }
+    }
+
+    private func attachEditorPresentations<Content: View>(
+        to content: Content,
+        meeting: Meeting
+    ) -> some View {
+        content
+            .sheet(isPresented: $showingSpeakerEditor) {
+                SpeakerEditorView(meetingID: meeting.id)
+                    .presentationDetents([.medium, .large])
+                    .presentationCornerRadius(30)
+            }
+            .sheet(item: $transcriptLinePendingSpeakerEdit) { line in
+                TranscriptSpeakerAssignmentView(meetingID: meeting.id, line: line)
+                    .presentationDetents([.medium, .large])
+                    .presentationCornerRadius(30)
+            }
+            .sheet(item: $selectedSourceProof) { selection in
+                SourceProofInspectorView(selection: selection)
+                    .presentationDetents([.medium, .large])
+                    .presentationCornerRadius(30)
+            }
+            .alert("Rename recording", isPresented: recordingRenamePresented) {
+                TextField("Recording title", text: $recordingRenameText)
+                Button("Save") {
+                    if let recordingPendingRename {
+                        store.updateRecordingTitle(
+                            recordingRenameText,
+                            recordingID: recordingPendingRename.id,
+                            in: meeting.id
+                        )
+                    }
+                    recordingPendingRename = nil
+                }
+                Button("Cancel", role: .cancel) {
+                    recordingPendingRename = nil
+                }
+            }
+            .confirmationDialog(
+                "Delete recording?",
+                isPresented: recordingDeletePresented,
+                titleVisibility: .visible
+            ) {
+                if let recordingPendingDelete {
+                    Button("Delete \(recordingPendingDelete.title)", role: .destructive) {
+                        store.deleteRecording(recordingPendingDelete.id, from: meeting.id)
+                        self.recordingPendingDelete = nil
+                    }
+                }
+                Button("Cancel", role: .cancel) {
+                    recordingPendingDelete = nil
+                }
+            } message: {
+                Text("This removes the local audio file from this device.")
+            }
+            .confirmationDialog(
+                resolvedPurpose(for: meeting).isPersonalCapture ? "Delete this note?" : "Delete this meeting?",
+                isPresented: $showingDeleteConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Delete permanently", role: .destructive) {
+                    store.deleteMeeting(meeting.id)
+                    dismiss()
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This removes the note, transcript, and local recordings from this device. This cannot be undone.")
+            }
+    }
+
+    private var recordingRenamePresented: Binding<Bool> {
+        Binding(
+            get: { recordingPendingRename != nil },
+            set: { if !$0 { recordingPendingRename = nil } }
+        )
+    }
+
+    private var recordingDeletePresented: Binding<Bool> {
+        Binding(
+            get: { recordingPendingDelete != nil },
+            set: { if !$0 { recordingPendingDelete = nil } }
+        )
+    }
+
+    private func attachContextPresentations<Content: View>(
+        to content: Content,
+        meeting: Meeting
+    ) -> some View {
+        content
+            .sheet(isPresented: $showingContextPicker) {
+                MeetingContextPickerView(selectedMode: Binding(
+                    get: { meeting.contextMode },
+                    set: { store.updateContextMode($0, for: meeting.id) }
+                ))
+                .presentationDetents([.medium, .large])
+                .presentationCornerRadius(30)
+            }
+            .sheet(item: selectedPersonBinding) { item in
+                peopleIntelligenceSheet(for: item.value)
+                    .presentationDetents([.medium, .large])
+                    .presentationCornerRadius(30)
+            }
+    }
+
+    private var selectedPersonBinding: Binding<IdentifiableString?> {
+        Binding(
+            get: { showingPeopleCard.map { IdentifiableString(value: $0) } },
+            set: { showingPeopleCard = $0?.value }
+        )
+    }
+
+    private func peopleIntelligenceSheet(for personName: String) -> some View {
+        NavigationStack {
+            ScrollView {
+                PeopleIntelligenceCard(
+                    person: store.personIntelligence(for: personName)
+                )
+                .appScreenContent(top: AppSpacing.md)
+            }
+            .background(AppPalette.background.ignoresSafeArea())
+            .navigationTitle(personName)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { showingPeopleCard = nil }
+                        .tint(AppPalette.accent)
+                }
+            }
+        }
+    }
+
+    private func attachLifecycle<Content: View>(
+        to content: Content,
+        meeting: Meeting
+    ) -> some View {
+        content
+            .onAppear {
+                hasAnimatedIn = true
+            }
+            .task(id: store.revision) {
+                // Store changes cancel and restart this task. Debounce derived
+                // reads so typing in notes does not repeatedly rebuild the page.
+                if cachedIntelligenceReport != nil {
+                    try? await Task.sleep(for: .milliseconds(300))
+                }
+                guard !Task.isCancelled else { return }
+                if !visibleTabs(for: meeting).contains(selectedTab) {
+                    selectedTab = .overview
+                }
+                await refreshDerived()
+                guard !Task.isCancelled else { return }
+                await store.scoreAndSave(
+                    for: meeting.id,
+                    allowsAccountability: resolvedPurpose(for: meeting).allowsAccountabilityExtraction
+                )
+            }
+            .task(id: transcriptSnapshotKey) {
+                await refreshTranscriptSnapshot(for: transcriptSnapshotKey)
+            }
+            .onChange(of: selectedTab) { _, _ in
+                refreshPrepIfNeeded()
+            }
+            .navigationDestination(for: DetailRoute.self) { route in
+                detailDestination(route)
+            }
+            .onDisappear {
+                rewriteTask?.cancel()
+                promptTask?.cancel()
+                rewriteTask = nil
+                promptTask = nil
+            }
+    }
+
+    private var meetingContentLoadingState: some View {
+        HStack(spacing: 12) {
+            ProgressView()
+                .controlSize(.small)
+                .tint(AppPalette.accent)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Preparing this note")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(AppPalette.ink)
+                Text("Organizing sources and meeting intelligence")
+                    .font(.caption)
+                    .foregroundStyle(AppPalette.secondaryInk)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 18)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Preparing this note")
     }
 
     // MARK: - Navigable detail rows
@@ -501,7 +669,7 @@ struct MeetingDetailView: View {
     }
 
     private func commitmentsNavRow(_ meeting: Meeting) -> some View {
-        let allowsAccountability = meeting.allowsAccountabilityExtraction
+        let allowsAccountability = resolvedPurpose(for: meeting).allowsAccountabilityExtraction
         let open = meeting.commitments.filter { $0.status == .open || $0.status == .atRisk }
         let preview = allowsAccountability
             ? (open.first?.statement ?? meeting.commitments.first?.statement ?? "No commitments yet.")
@@ -647,15 +815,15 @@ struct MeetingDetailView: View {
                 recordingsNavRow(meeting)
             }
             sectionGroup(title: "INTELLIGENCE") {
-                if meeting.allowsMeetingSignalExtraction {
+                if resolvedPurpose(for: meeting).allowsMeetingSignals {
                     signalBoardNavRow(meeting)
                 }
                 intelligenceNavRow(meeting)
-                if meeting.allowsAccountabilityExtraction {
+                if resolvedPurpose(for: meeting).allowsAccountabilityExtraction {
                     scoreNavRow(meeting)
                 }
             }
-            if meeting.allowsAccountabilityExtraction {
+            if resolvedPurpose(for: meeting).allowsAccountabilityExtraction {
                 sectionGroup(title: "PREP") {
                     prepNavRow(meeting)
                 }
@@ -669,12 +837,12 @@ struct MeetingDetailView: View {
     func overviewCanvas(_ meeting: Meeting) -> some View {
         overviewSnapshot(meeting)
         overviewTrustSummary(meeting)
-        if meeting.allowsAccountabilityExtraction {
+        if resolvedPurpose(for: meeting).allowsAccountabilityExtraction {
             overviewStatsRow(meeting)
         }
         editorialWhatMatters(meeting)
         overviewNextAction(meeting)
-        if meeting.isPersonalCapture {
+        if resolvedPurpose(for: meeting).isPersonalCapture {
             notesNavRow(meeting)
         }
         overviewPrimaryAction
@@ -684,13 +852,13 @@ struct MeetingDetailView: View {
     func editorialWhatMatters(_ meeting: Meeting) -> some View {
         let generatedItems = meeting.aiBrief?.whatMatters ?? []
         let items = generatedItems.isEmpty
-            ? MeetingIntelligenceEngine.keyPoints(for: meeting, limit: 4)
+            ? Array((cachedIntelligenceReport?.suggestedSummary ?? []).prefix(4))
             : generatedItems
         if !items.isEmpty {
             editorialPointList(
-                title: meeting.allowsMeetingSignalExtraction
+                title: resolvedPurpose(for: meeting).allowsMeetingSignals
                     ? "What matters"
-                    : meeting.purpose.kind.insightTitle,
+                    : resolvedPurpose(for: meeting).kind.insightTitle,
                 items: items,
                 tint: AppPalette.accent,
                 limit: 4,
@@ -702,7 +870,7 @@ struct MeetingDetailView: View {
 
     @ViewBuilder
     private func overviewNextAction(_ meeting: Meeting) -> some View {
-        if meeting.allowsAccountabilityExtraction,
+        if resolvedPurpose(for: meeting).allowsAccountabilityExtraction,
            let commitment = meeting.commitments.first(where: {
                $0.status == .atRisk || $0.status == .open
            }) {
@@ -710,7 +878,7 @@ struct MeetingDetailView: View {
                 EditorialSectionHead(title: "Next action", titleSize: 18)
                 editorialActionRow(commitment, in: meeting)
             }
-        } else if meeting.allowsAccountabilityExtraction,
+        } else if resolvedPurpose(for: meeting).allowsAccountabilityExtraction,
                   let action = meetingSignals.actions.first {
             editorialPointList(
                 title: "Next action",
@@ -791,7 +959,16 @@ struct MeetingDetailView: View {
     /// state while the on-device model runs, then an "Enhanced" mark once it has.
     @ViewBuilder
     private func aiStatusRow(_ meeting: Meeting) -> some View {
-        if store.isProcessingAI(meeting.id) {
+        if store.isPreparingDerivedData(meeting.id) {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.mini)
+                Text("Organizing notes and sources…")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(AppPalette.accent)
+            }
+            .padding(.leading, 14)
+            .transition(.opacity)
+        } else if store.isProcessingAI(meeting.id) {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.mini)
                 Text("Processing with Apple Intelligence…")
@@ -822,7 +999,7 @@ struct MeetingDetailView: View {
         let report = cachedIntelligenceReport ?? store.intelligenceReport(for: meeting)
         let sourceCounts = sourceProofCounts(for: meeting)
         let sourceTotal = sourceCounts.notes + sourceCounts.transcript + sourceCounts.audio
-        let purpose = meeting.purpose
+        let purpose = resolvedPurpose(for: meeting)
         let isProcessing = meeting.status == .processing
         let heading: String
         if isProcessing {
@@ -834,8 +1011,8 @@ struct MeetingDetailView: View {
         }
 
         var detailParts: [String] = []
-        if let topic = meeting.purpose.topic { detailParts.append(topic) }
-        if let domain = meeting.purpose.domain,
+        if let topic = purpose.topic { detailParts.append(topic) }
+        if let domain = purpose.domain,
            !detailParts.contains(where: { $0.caseInsensitiveCompare(domain) == .orderedSame }) {
             detailParts.append(domain)
         }
@@ -883,11 +1060,12 @@ struct MeetingDetailView: View {
     }
 
     private func sourceProofCounts(for meeting: Meeting) -> (notes: Int, transcript: Int, audio: Int) {
-        let notes = meeting.rawNotes
-            .split(whereSeparator: \.isNewline)
-            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .count
+        let noteEvidenceCount = meeting.evidenceItems.reduce(into: 0) { count, item in
+            if item.sourceReferences.contains(where: { $0.kind == .note }) {
+                count += 1
+            }
+        }
+        let notes = noteEvidenceCount > 0 ? noteEvidenceCount : (meeting.trustedSourceNotes.isEmpty ? 0 : 1)
         let audio = meeting.audioRecordings.filter {
             !$0.transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || !$0.linkedNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -901,11 +1079,13 @@ struct MeetingDetailView: View {
         let decisions = meetingSignals.decisions.count
         // Commitments and signal actions are the same extractor now, so don't
         // sum them — count commitments when present, else the live signals.
-        let actions = meeting.allowsAccountabilityExtraction
+        let actions = resolvedPurpose(for: meeting).allowsAccountabilityExtraction
             ? (meeting.commitments.isEmpty ? meetingSignals.actions.count : meeting.commitments.count)
             : 0
         let risks = meetingSignals.risks.count
-        let score = meeting.allowsAccountabilityExtraction ? meeting.score?.overall : nil
+        let score = resolvedPurpose(for: meeting).allowsAccountabilityExtraction
+            ? meeting.score?.overall
+            : nil
         return Group {
             if dynamicTypeSize.isAccessibilitySize {
                 VStack(spacing: 0) {
@@ -1099,7 +1279,7 @@ struct MeetingDetailView: View {
 
     @ViewBuilder
     private func tasksCanvas(_ meeting: Meeting) -> some View {
-        if !meeting.allowsAccountabilityExtraction {
+        if !resolvedPurpose(for: meeting).allowsAccountabilityExtraction {
             tasksStatusStrip(open: 0, atRisk: 0, done: 0)
             personalNoteTasksEmptyState()
         } else {
@@ -1345,7 +1525,7 @@ struct MeetingDetailView: View {
         } else if voiceCount > 1 {
             detail = "\(voiceCount) speaker labels detected · review names before sharing"
         } else if voiceCount == 1 {
-            detail = meeting.isPersonalCapture
+            detail = resolvedPurpose(for: meeting).isPersonalCapture
                 ? "Single voice detected · label can be renamed"
                 : "1 speaker label detected · review if others spoke"
         } else {
@@ -1632,7 +1812,7 @@ struct MeetingDetailView: View {
         let subtitle: String
         let trailingDigits: String?
         let trailingLabel: String?
-        if meeting.allowsAccountabilityExtraction, let score = meeting.score {
+        if resolvedPurpose(for: meeting).allowsAccountabilityExtraction, let score = meeting.score {
             subtitle = score.insight.isEmpty
                 ? "Decisiveness \(score.decisiveness) · Action \(score.actionability)"
                 : score.insight
@@ -1690,7 +1870,11 @@ struct MeetingDetailView: View {
                     case .signalBoard:   signalBoardCard(m)
                     case .recordings:    recordingsCard(m)
                     case .intelligence:  intelligenceCard(m)
-                    case .score:         MeetingScoreCard(meeting: m)
+                    case .score:
+                        MeetingScoreCard(
+                            meeting: m,
+                            allowsAccountability: resolvedPurpose(for: m).allowsAccountabilityExtraction
+                        )
                     case .prep:          prepCard(m)
                     }
                 }
@@ -1780,8 +1964,7 @@ struct MeetingDetailView: View {
                     shareSafelyCard(meeting)
                     prepCard(meeting)
                 }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 16)
+                .appScreenContent(top: AppSpacing.md)
             }
             .background(AppPalette.background.ignoresSafeArea())
             .navigationTitle("Customize share")
@@ -1799,7 +1982,7 @@ struct MeetingDetailView: View {
     }
 
     private func meetingDetailHero(_ meeting: Meeting) -> some View {
-        let words = meeting.transcript.reduce(0) { $0 + $1.text.split(whereSeparator: { $0 == " " }).count }
+        let words = cachedTranscriptWordCount
         return VStack(alignment: .leading, spacing: 12) {
             Group {
                 if dynamicTypeSize.isAccessibilitySize {
@@ -1842,7 +2025,7 @@ struct MeetingDetailView: View {
             EditorialAvatarStack(names: meeting.attendees, size: 22, max: 4, borderColor: AppPalette.cardBackground)
         }
         EditorialMeta(text: meetingMetaLine(meeting, words: words))
-        if meeting.allowsMeetingSignalExtraction {
+        if resolvedPurpose(for: meeting).allowsMeetingSignals {
             Button {
                 showingContextPicker = true
             } label: {
@@ -1857,7 +2040,8 @@ struct MeetingDetailView: View {
     }
 
     private func purposeMenu(_ meeting: Meeting) -> some View {
-        Menu {
+        let purpose = resolvedPurpose(for: meeting)
+        return Menu {
             Button {
                 store.updatePurposeOverride(nil, for: meeting.id)
             } label: {
@@ -1872,20 +2056,19 @@ struct MeetingDetailView: View {
                 }
             }
         } label: {
-            Label(meeting.purpose.displayTitle, systemImage: meeting.purpose.kind.systemImage)
+            Label(purpose.displayTitle, systemImage: purpose.kind.systemImage)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(AppPalette.accent)
                 .padding(.horizontal, 10)
                 .frame(minHeight: 36)
                 .background(AppPalette.accent.opacity(0.08), in: Capsule())
         }
-        .accessibilityLabel("Capture purpose: \(meeting.purpose.displayTitle)")
+        .accessibilityLabel("Capture purpose: \(purpose.displayTitle)")
     }
 
     private func meetingMetaLine(_ meeting: Meeting, words: Int) -> String {
         var parts: [String] = []
-        let detectedVoices = (cachedIntelligenceReport ?? store.intelligenceReport(for: meeting))
-            .speakerDetection.detectedCount
+        let detectedVoices = cachedIntelligenceReport?.speakerDetection.detectedCount ?? 0
         if meeting.durationMinutes > 0 { parts.append("\(meeting.durationMinutes)m") }
         if detectedVoices > 0 {
             parts.append("\(detectedVoices) voice\(detectedVoices == 1 ? "" : "s")")
@@ -2069,7 +2252,7 @@ struct MeetingDetailView: View {
             .padding(.bottom, 16)
 
             if !hasSignals {
-                Text(meeting.allowsAccountabilityExtraction
+                Text(resolvedPurpose(for: meeting).allowsAccountabilityExtraction
                      ? "Add more detail to your notes and Scribeflow will pull out decisions, risks, and open questions here."
                      : "This is saved as a personal note, so Scribeflow keeps it as searchable notes instead of turning it into tasks or risks.")
                     .font(.subheadline)
@@ -2124,10 +2307,11 @@ struct MeetingDetailView: View {
 
     private func intelligenceCard(_ meeting: Meeting) -> some View {
         let report = cachedIntelligenceReport ?? store.intelligenceReport(for: meeting)
-        let allowsAccountability = meeting.allowsAccountabilityExtraction
+        let purpose = resolvedPurpose(for: meeting)
+        let allowsAccountability = purpose.allowsAccountabilityExtraction
 
         return SurfaceCard(
-            title: meeting.purpose.kind.intelligenceTitle,
+            title: purpose.kind.intelligenceTitle,
             subtitle: report.headline
         ) {
             VStack(alignment: .leading, spacing: 14) {
@@ -2767,6 +2951,44 @@ struct MeetingDetailView: View {
                     persistedNotes: meeting.rawNotes
                 )
 
+                if meeting.hasRecoverableOriginalNotes {
+                    DisclosureGroup {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text(meeting.originalCaptureNotes)
+                                .font(.subheadline)
+                                .foregroundStyle(AppPalette.secondaryInk)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+
+                            HStack(spacing: 10) {
+                                Button {
+                                    UIPasteboard.general.string = meeting.originalCaptureNotes
+                                } label: {
+                                    Label("Copy original", systemImage: "doc.on.doc")
+                                }
+                                .buttonStyle(.bordered)
+
+                                Button {
+                                    store.restoreOriginalNotes(for: meeting.id)
+                                } label: {
+                                    Label("Restore as note", systemImage: "arrow.uturn.backward")
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(AppPalette.accent)
+                            }
+                        }
+                        .padding(.top, 10)
+                    } label: {
+                        Label("Original capture", systemImage: "quote.opening")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(AppPalette.ink)
+                    }
+                    .tint(AppPalette.secondaryInk)
+                    .padding(14)
+                    .background(AppPalette.softSurface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .accessibilityHint("Shows the first saved version of this capture")
+                }
+
                 // Messy → clean → share, in one place.
                 if !meeting.rawNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     HStack(spacing: 10) {
@@ -2867,14 +3089,15 @@ struct MeetingDetailView: View {
     }
 
     private func commitmentsCard(_ meeting: Meeting) -> some View {
-        SurfaceCard(
-            title: meeting.allowsAccountabilityExtraction ? "Commitments" : "Personal note",
-            subtitle: meeting.allowsAccountabilityExtraction
+        let allowsAccountability = resolvedPurpose(for: meeting).allowsAccountabilityExtraction
+        return SurfaceCard(
+            title: allowsAccountability ? "Commitments" : "Personal note",
+            subtitle: allowsAccountability
                 ? "Track promises, owners, timing, and whether follow-through is still at risk."
                 : "Personal captures stay as notes unless you move them into a meeting context."
         ) {
             VStack(alignment: .leading, spacing: 12) {
-                if !meeting.allowsAccountabilityExtraction {
+                if !allowsAccountability {
                     personalNoteAccountabilityMessage()
                 } else if meeting.commitments.isEmpty {
                     Text("No commitments were extracted yet. Once the note contains clear promises or next steps, Scribeflow will track them here.")
@@ -3034,6 +3257,10 @@ struct MeetingDetailView: View {
                             .font(.subheadline)
                             .foregroundStyle(AppPalette.secondaryInk)
                             .frame(maxWidth: .infinity, alignment: .leading)
+
+                        if !promptCitations.isEmpty {
+                            MeetingAnswerSources(citations: promptCitations)
+                        }
 
                         HStack(spacing: 10) {
                             Button("Copy") {
@@ -3267,23 +3494,24 @@ struct MeetingDetailView: View {
         isGeneratingPrompt = true
         promptTitle = prompt
         promptResponse = nil
+        promptCitations = []
         if let promptID = store.meeting(withID: meetingID)?.prompts.first(where: { $0.prompt == prompt })?.id {
             store.selectPrompt(promptID, for: meetingID)
         }
 
         promptTask?.cancel()
         promptTask = Task {
-            let response = await store.answerMeetingPrompt(for: meetingID, prompt: prompt)
+            let response = await store.groundedAnswerMeetingPrompt(for: meetingID, prompt: prompt)
             guard !Task.isCancelled else { return }
-            promptResponse = response
+            promptResponse = response.text
+            promptCitations = response.citations
             isGeneratingPrompt = false
         }
     }
 
-    /// Post a Markdown recap of the meeting to a configured outbound webhook.
-    /// Surfaced through the toolbar "Send to" menu. Errors are swallowed
-    /// here and surfaced through the analytics log — wire a toast next pass.
     private func sendToWebhook(meeting: Meeting, config: WebhookConfig) {
+        guard sendingWebhookIDs.insert(config.id).inserted else { return }
+        let destination = config.label.isEmpty ? config.target.title : config.label
         let body = store.safeSharePreview(
             for: meeting.id,
             format: .markdown,
@@ -3293,6 +3521,13 @@ struct MeetingDetailView: View {
         ) ?? meeting.title
 
         HapticEngine.tap(.light)
+        NotificationCenter.default.post(
+            name: .scribeflowToast,
+            object: ToastItem(
+                message: "Sending to \(destination)…",
+                icon: "arrow.up.circle"
+            )
+        )
         Task {
             do {
                 try await WebhookStore.shared.send(
@@ -3301,16 +3536,36 @@ struct MeetingDetailView: View {
                     to: config
                 )
                 await MainActor.run {
+                    sendingWebhookIDs.remove(config.id)
                     HapticEngine.notify(.success)
                     AnalyticsLog.shared.log("webhook.sent", ["target": config.target.rawValue])
+                    NotificationCenter.default.post(
+                        name: .scribeflowToast,
+                        object: ToastItem(
+                            message: "Sent to \(destination)",
+                            icon: "checkmark.circle.fill"
+                        )
+                    )
                 }
             } catch {
                 await MainActor.run {
+                    sendingWebhookIDs.remove(config.id)
                     HapticEngine.notify(.error)
                     AnalyticsLog.shared.log("webhook.failed", [
                         "target": config.target.rawValue,
                         "error": error.localizedDescription
                     ])
+                    NotificationCenter.default.post(
+                        name: .scribeflowToast,
+                        object: ToastItem(
+                            message: "Couldn’t send to \(destination)",
+                            icon: "exclamationmark.triangle.fill",
+                            actionTitle: "Retry",
+                            action: {
+                                sendToWebhook(meeting: meeting, config: config)
+                            }
+                        )
+                    )
                 }
             }
         }
@@ -3576,14 +3831,23 @@ private struct SpeakerEditorView: View {
     @State private var selectedSpeaker = ""
     @State private var replacementName = ""
     @State private var speakers: [SpeakerSegment] = []
+    @State private var detection: SpeakerDetectionSummary?
+    @State private var isLoadingSpeakers = true
 
-    private var detection: SpeakerDetectionSummary? {
-        guard let meeting = store.meeting(withID: meetingID) else { return nil }
-        return store.intelligenceReport(for: meeting).speakerDetection
-    }
-
-    private func refreshSpeakers(selectFirstIfNeeded: Bool = false) {
-        speakers = store.speakerSegments(for: meetingID)
+    private func refreshSpeakers(selectFirstIfNeeded: Bool = false) async {
+        guard let meeting = store.meeting(withID: meetingID) else {
+            speakers = []
+            detection = nil
+            isLoadingSpeakers = false
+            return
+        }
+        let bundle = await store.analysisBundle(for: meeting)
+        guard !Task.isCancelled,
+              store.meeting(withID: meetingID) == meeting
+        else { return }
+        speakers = bundle.report.speakerSegments
+        detection = bundle.report.speakerDetection
+        isLoadingSpeakers = false
         guard selectFirstIfNeeded, selectedSpeaker.isEmpty, let first = speakers.first else { return }
         selectedSpeaker = first.speaker
         replacementName = first.speaker
@@ -3595,7 +3859,20 @@ private struct SpeakerEditorView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     SurfaceCard(title: "Speakers", subtitle: "Clean up transcript labels before sharing.") {
                         VStack(alignment: .leading, spacing: 12) {
-                            if speakers.isEmpty {
+                            if isLoadingSpeakers {
+                                HStack(spacing: 10) {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                        .tint(AppPalette.accent)
+                                    Text("Reading speaker turns")
+                                        .font(.footnote.weight(.semibold))
+                                        .foregroundStyle(AppPalette.secondaryInk)
+                                    Spacer(minLength: 0)
+                                }
+                                .frame(minHeight: 64)
+                                .accessibilityElement(children: .combine)
+                                .accessibilityLabel("Reading speaker turns")
+                            } else if speakers.isEmpty {
                                 EmptyStateCard(title: "No speakers yet", subtitle: "Record or import a transcript and speaker labels will appear here.")
                             } else {
                                 ForEach(speakers) { speaker in
@@ -3607,10 +3884,15 @@ private struct SpeakerEditorView: View {
 
                     SurfaceCard(title: "Rename", subtitle: selectedSpeaker.isEmpty ? "Choose a speaker above." : "Apply one clean label across this note.") {
                         VStack(alignment: .leading, spacing: 12) {
-                            TextField("Speaker name", text: $replacementName)
-                                .textInputAutocapitalization(.words)
-                                .padding(14)
-                                .background(AppPalette.paper, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    TextField("Speaker name", text: $replacementName)
+                        .textInputAutocapitalization(.words)
+                        .padding(.horizontal, AppSpacing.md)
+                        .frame(minHeight: 50)
+                        .background(AppPalette.paper, in: RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous)
+                                .strokeBorder(AppPalette.border.opacity(0.55), lineWidth: 0.8)
+                        )
 
                             Button {
                                 store.renameSpeaker(selectedSpeaker, to: replacementName, for: meetingID)
@@ -3634,7 +3916,7 @@ private struct SpeakerEditorView: View {
                         }
                     }
                 }
-                .padding(20)
+                .appScreenContent(top: AppSpacing.lg)
             }
             .background(AppPalette.background.ignoresSafeArea())
             .navigationTitle("Speaker labels")
@@ -3646,11 +3928,8 @@ private struct SpeakerEditorView: View {
                         .tint(AppPalette.ink)
                 }
             }
-            .onAppear {
-                refreshSpeakers(selectFirstIfNeeded: true)
-            }
             .task(id: store.revision) {
-                refreshSpeakers(selectFirstIfNeeded: true)
+                await refreshSpeakers(selectFirstIfNeeded: true)
             }
         }
         .modifier(ScribeflowChrome())
@@ -3811,10 +4090,9 @@ struct MeetingPresentationSheet: View {
     private var slides: [Slide] {
         var out: [Slide] = [.title, .synopsis]
         if !signals.decisions.isEmpty { out.append(.decisions) }
-        if meeting.allowsAccountabilityExtraction,
-           (!meeting.commitments.isEmpty || !signals.actions.isEmpty) { out.append(.actions) }
-        if meeting.allowsAccountabilityExtraction, !signals.risks.isEmpty { out.append(.risks) }
-        if meeting.allowsAccountabilityExtraction, meeting.score != nil { out.append(.score) }
+        if !meeting.commitments.isEmpty || !signals.actions.isEmpty { out.append(.actions) }
+        if !signals.risks.isEmpty { out.append(.risks) }
+        if meeting.score != nil { out.append(.score) }
         out.append(.end)
         return out
     }
@@ -3921,7 +4199,9 @@ struct MeetingPresentationSheet: View {
                             .frame(width: 30, height: 30)
                             .background(Color.white.opacity(0.08), in: Circle())
                             .overlay(Circle().strokeBorder(.white.opacity(0.10), lineWidth: 0.7))
+                            .appTapTarget()
                     }
+                    .buttonStyle(PressScaleButtonStyle(scale: 0.94))
                     .accessibilityLabel("Close presentation")
 
                     Spacer()
@@ -3938,7 +4218,9 @@ struct MeetingPresentationSheet: View {
                             )
                             .overlay(Circle().strokeBorder(.white.opacity(0.12), lineWidth: 0.7))
                             .contentTransition(.symbolEffect(.replace))
+                            .appTapTarget()
                     }
+                    .buttonStyle(PressScaleButtonStyle(scale: 0.94))
                     .accessibilityLabel(autoplay ? "Pause auto-play" : "Auto-play")
 
                     Text("\(page + 1) of \(slides.count)")
@@ -4162,12 +4444,12 @@ struct MeetingPresentationSheet: View {
     }
 
     private var actionsSlide: some View {
-        let visibleCommitments = meeting.allowsAccountabilityExtraction ? meeting.commitments : []
+        let visibleCommitments = meeting.commitments
         let open = visibleCommitments.filter { $0.status == .open || $0.status == .atRisk }
         let done = visibleCommitments.filter { $0.status == .fulfilled || $0.status == .superseded }
         let openList = Array(open.prefix(5))
         let doneList = Array(done.prefix(2))
-        let signalList = meeting.allowsAccountabilityExtraction ? Array(signals.actions.prefix(3)) : []
+        let signalList = Array(signals.actions.prefix(3))
         return VStack(alignment: .leading, spacing: 18) {
             HStack(alignment: .firstTextBaseline) {
                 Text("Actions")
@@ -4267,7 +4549,7 @@ struct MeetingPresentationSheet: View {
                 .foregroundStyle(AppPalette.tertiaryInk)
                 .motionEntrance(step: 2, active: shown)
 
-            HStack(spacing: 10) {
+            AdaptiveActionStack(spacing: 10) {
                 Button {
                     restartDeck()
                 } label: {
@@ -4279,7 +4561,7 @@ struct MeetingPresentationSheet: View {
                     }
                     .foregroundStyle(AppPalette.ink)
                     .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
+                    .frame(minHeight: AppLayout.minimumTapTarget)
                     .background(AppPalette.cardBackground, in: Capsule())
                     .overlay(Capsule().strokeBorder(AppPalette.border, lineWidth: 1))
                 }
@@ -4298,7 +4580,7 @@ struct MeetingPresentationSheet: View {
                     }
                     .foregroundStyle(.white)
                     .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
+                    .frame(minHeight: AppLayout.minimumTapTarget)
                     .background(AppPalette.accentButton, in: Capsule())
                     .shadow(color: AppPalette.accent.opacity(0.28), radius: 10, y: 4)
                 }
@@ -4311,7 +4593,7 @@ struct MeetingPresentationSheet: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(AppPalette.secondaryInk)
                         .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
+                        .frame(minHeight: AppLayout.minimumTapTarget)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)

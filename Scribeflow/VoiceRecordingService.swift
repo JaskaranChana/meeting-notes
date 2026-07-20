@@ -55,6 +55,17 @@ struct TranscriptionResult: Codable, Hashable, Sendable {
     var provider: TranscriptionProviderKind
     var diarizationAvailable: Bool
     var usedFallback: Bool
+    var speakerSeparationConfidence: SpeakerSeparationConfidence? = nil
+
+    var effectiveSpeakerSeparationConfidence: SpeakerSeparationConfidence {
+        speakerSeparationConfidence ?? (diarizationAvailable ? .tentative : .unverified)
+    }
+
+    var distinctSpeakerCount: Int {
+        Set(segments.map {
+            SpeakerIdentityResolver.canonicalKey(for: $0.speaker)
+        }).filter { !$0.isEmpty }.count
+    }
 }
 
 @MainActor
@@ -357,11 +368,6 @@ final class LocalVoiceRecordingService: NSObject, AVAudioRecorderDelegate, Trans
         attendees: [String] = [],
         expectedSpeakerCount: Int? = nil
     ) {
-        let distinctAttendees = Set(attendees.compactMap { attendee -> String? in
-            let cleaned = attendee.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            return cleaned.isEmpty ? nil : cleaned
-        }).count
-        let inferredSpeakerCount = distinctAttendees >= 2 ? min(distinctAttendees, 8) : nil
         transcriptionContext = SpeechRecognitionContext(
             title: title,
             workspace: workspace,
@@ -371,7 +377,7 @@ final class LocalVoiceRecordingService: NSObject, AVAudioRecorderDelegate, Trans
             localeIdentifier: SpeechRecognitionSupport.resolvedLocale(
                 identifier: localeIdentifier
             ).identifier,
-            expectedSpeakerCount: expectedSpeakerCount ?? inferredSpeakerCount
+            expectedSpeakerCount: expectedSpeakerCount
         )
     }
 
@@ -453,6 +459,11 @@ final class LocalVoiceRecordingService: NSObject, AVAudioRecorderDelegate, Trans
         ), recognizer.isAvailable else {
             throw VoiceRecordingError.speechUnavailable
         }
+        guard recognizer.supportsOnDeviceRecognition
+                || SpeechRecognitionSupport.allowsAppleSpeechServiceFallback
+        else {
+            throw VoiceRecordingError.speechUnavailable
+        }
 
         do {
             let transcript = try await transcribe(
@@ -466,7 +477,8 @@ final class LocalVoiceRecordingService: NSObject, AVAudioRecorderDelegate, Trans
                 return transcript
             }
         } catch {
-            if recognizer.supportsOnDeviceRecognition {
+            if recognizer.supportsOnDeviceRecognition,
+               SpeechRecognitionSupport.allowsAppleSpeechServiceFallback {
                 return try await transcribe(
                     url: url,
                     recognizer: recognizer,

@@ -9,7 +9,6 @@ private actor RootChromeSnapshotBuilder {
     func make(from meetings: [Meeting]) -> RootChromeSnapshot {
         RootChromeSnapshot(
             openActionItemCount: meetings.reduce(0) { partial, meeting in
-                guard !meeting.isPersonalCapture else { return partial }
                 return partial + meeting.commitments.reduce(0) { total, commitment in
                     total + (commitment.status == .open || commitment.status == .atRisk ? 1 : 0)
                 }
@@ -153,26 +152,32 @@ struct ContentView: View {
                 #endif
             }
 
-            if isPrivacyScreenVisible {
-                privacyScreen
-                    .transition(.opacity)
-                    .zIndex(100)
+            Group {
+                if isPrivacyScreenVisible {
+                    privacyScreen
+                        .transition(.opacity)
+                        .zIndex(100)
+                }
             }
+            .animation(AppMotion.fade, value: isPrivacyScreenVisible)
 
-            if let toast {
-                ToastView(item: toast, onDismiss: {
-                    toastDismissTask?.cancel()
-                    withAnimation(AppMotion.smooth) { self.toast = nil }
-                })
-                .transition(.asymmetric(
-                    insertion: .move(edge: .top).combined(with: .opacity).combined(with: .scale(scale: 0.9, anchor: .top)),
-                    removal: .move(edge: .top).combined(with: .opacity)
-                ))
-                .zIndex(99)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .padding(.top, 60)
-                .allowsHitTesting(toast.actionTitle != nil)
+            Group {
+                if let toast {
+                    ToastView(item: toast, onDismiss: {
+                        toastDismissTask?.cancel()
+                        withAnimation(AppMotion.smooth) { self.toast = nil }
+                    })
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .top).combined(with: .opacity).combined(with: .scale(scale: 0.9, anchor: .top)),
+                        removal: .move(edge: .top).combined(with: .opacity)
+                    ))
+                    .zIndex(99)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 60)
+                    .allowsHitTesting(toast.actionTitle != nil)
+                }
             }
+            .animation(AppMotion.bounce, value: toast?.id)
 
             RootStoreMaintenanceObserver(
                 sceneIsActive: scenePhase == .active,
@@ -180,8 +185,6 @@ struct ContentView: View {
                 onToast: { toast = $0 }
             )
         }
-        .animation(AppMotion.fade, value: isPrivacyScreenVisible)
-        .animation(AppMotion.bounce, value: toast != nil)
         .onChange(of: scenePhase) { _, phase in
             withAnimation(AppMotion.fade) {
                 isPrivacyScreenVisible = phase != .active
@@ -342,7 +345,7 @@ struct ContentView: View {
                 .tag(RootTab.calendar)
 
                 NavigationStack(path: $askPath) {
-                    AskView()
+                    AskView(isActive: selectedTab == .ask)
                         .toolbar(.hidden, for: .tabBar)
                 }
                 .tag(RootTab.ask)
@@ -358,7 +361,6 @@ struct ContentView: View {
             }
         }
         .background(AppPalette.background.ignoresSafeArea())
-        .animation(AppMotion.smooth, value: selectedNavigationDepth)
         .modifier(ScribeflowChrome())
     }
 
