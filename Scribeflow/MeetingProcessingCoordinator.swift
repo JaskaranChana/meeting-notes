@@ -943,6 +943,7 @@ final class MeetingProcessingCoordinator {
     private var activeMeetingID: Meeting.ID?
     private var discardedMeetingIDs: Set<Meeting.ID> = []
     private var suspendedMeetingIDs: Set<Meeting.ID> = []
+    private var isPausedForLibraryReplacement = false
     private var backgroundExecutionID = UIBackgroundTaskIdentifier.invalid
 
     func attach(_ store: MeetingStore) {
@@ -1008,12 +1009,35 @@ final class MeetingProcessingCoordinator {
         startProcessingIfNeeded()
     }
 
+    func pauseForLibraryReplacement() async {
+        isPausedForLibraryReplacement = true
+        retryWakeTask?.cancel()
+        retryWakeTask = nil
+
+        let activeTask = processingTask
+        activeTask?.cancel()
+        if let activeTask {
+            await activeTask.value
+        }
+        processingTask = nil
+        activeMeetingID = nil
+        endExtendedExecution()
+    }
+
+    func resumeAfterLibraryReplacement(using store: MeetingStore) {
+        attach(store)
+        isPausedForLibraryReplacement = false
+        startProcessingIfNeeded()
+    }
+
     func discardAll() async {
+        isPausedForLibraryReplacement = true
         processingTask?.cancel()
         retryWakeTask?.cancel()
         if let processingTask {
             await processingTask.value
         }
+        retryWakeTask?.cancel()
         processingTask = nil
         retryWakeTask = nil
         activeMeetingID = nil
@@ -1022,6 +1046,7 @@ final class MeetingProcessingCoordinator {
         await PendingMeetingProcessingQueue.shared.clear()
         PendingMeetingAudioStore.deleteAll()
         endExtendedExecution()
+        isPausedForLibraryReplacement = false
     }
 
     func processPendingAndWait() async -> Bool {
@@ -1054,7 +1079,10 @@ final class MeetingProcessingCoordinator {
     }
 
     private func startProcessingIfNeeded() {
-        guard processingTask == nil, store != nil else { return }
+        guard !isPausedForLibraryReplacement,
+              processingTask == nil,
+              store != nil
+        else { return }
         beginExtendedExecution()
         processingTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -1233,6 +1261,11 @@ final class MeetingProcessingCoordinator {
     }
 
     private func scheduleRemainingWorkIfNeeded() async {
+        guard !isPausedForLibraryReplacement else {
+            retryWakeTask?.cancel()
+            retryWakeTask = nil
+            return
+        }
         let queue = PendingMeetingProcessingQueue.shared
         guard await queue.hasPendingJobs() else {
             retryWakeTask?.cancel()

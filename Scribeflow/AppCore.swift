@@ -931,20 +931,120 @@ extension Notification.Name {
 enum SpotlightIndex {
     static let domain = "ai.scribeflow.app.meetings"
     static let activityType = "ai.scribeflow.app.openMeeting"
+    private static let worker = Worker()
 
-    static func index(_ meetings: [Meeting]) {
-        let items = meetings.map(makeItem)
-        CSSearchableIndex.default().indexSearchableItems(items) { _ in }
+    static func index(_ meetings: [Meeting]) async {
+        await worker.index(meetings)
     }
 
     static func remove(meetingID: UUID) {
-        CSSearchableIndex.default()
-            .deleteSearchableItems(withIdentifiers: [meetingID.uuidString]) { _ in }
+        Task { await worker.remove(meetingID: meetingID) }
     }
 
     static func removeAll() {
-        CSSearchableIndex.default()
-            .deleteSearchableItems(withDomainIdentifiers: [domain]) { _ in }
+        Task { await worker.removeAll() }
+    }
+
+    static func removeAllAndWait() async {
+        await worker.removeAll()
+    }
+
+    private actor Worker {
+        private var indexedFingerprints: [Meeting.ID: Int] = [:]
+        private var pendingRemovalIDs: Set<Meeting.ID> = []
+        // Reconcile once per launch so a deletion interrupted by termination
+        // cannot leave a stale system-search result behind.
+        private var needsRemoveAll = true
+
+        func index(_ meetings: [Meeting]) async {
+            if needsRemoveAll {
+                guard await deleteAllFromSystemIndex() else { return }
+                indexedFingerprints.removeAll(keepingCapacity: true)
+                pendingRemovalIDs.removeAll(keepingCapacity: true)
+                needsRemoveAll = false
+            }
+
+            let currentIDs = Set(meetings.map(\.id))
+            pendingRemovalIDs.formUnion(indexedFingerprints.keys.filter { !currentIDs.contains($0) })
+            await flushPendingRemovals()
+
+            var changedMeetings: [Meeting] = []
+            var changedFingerprints: [Meeting.ID: Int] = [:]
+            changedMeetings.reserveCapacity(min(meetings.count, 8))
+            for meeting in meetings {
+                let fingerprint = SpotlightIndex.fingerprint(meeting)
+                guard indexedFingerprints[meeting.id] != fingerprint else { continue }
+                changedMeetings.append(meeting)
+                changedFingerprints[meeting.id] = fingerprint
+            }
+            guard !changedMeetings.isEmpty else { return }
+
+            let items = changedMeetings.map(SpotlightIndex.makeItem)
+            guard await submit(items) else { return }
+            for (meetingID, fingerprint) in changedFingerprints {
+                indexedFingerprints[meetingID] = fingerprint
+            }
+        }
+
+        func remove(meetingID: Meeting.ID) async {
+            pendingRemovalIDs.insert(meetingID)
+            await flushPendingRemovals()
+        }
+
+        func removeAll() async {
+            needsRemoveAll = true
+            guard await deleteAllFromSystemIndex() else { return }
+            indexedFingerprints.removeAll(keepingCapacity: true)
+            pendingRemovalIDs.removeAll(keepingCapacity: true)
+            needsRemoveAll = false
+        }
+
+        private func flushPendingRemovals() async {
+            guard !pendingRemovalIDs.isEmpty else { return }
+            let ids = pendingRemovalIDs
+            let identifiers = ids.map(\.uuidString)
+            let succeeded = await withCheckedContinuation { continuation in
+                CSSearchableIndex.default()
+                    .deleteSearchableItems(withIdentifiers: identifiers) { error in
+                        continuation.resume(returning: error == nil)
+                    }
+            }
+            guard succeeded else { return }
+            pendingRemovalIDs.subtract(ids)
+            for id in ids {
+                indexedFingerprints[id] = nil
+            }
+        }
+
+        private func deleteAllFromSystemIndex() async -> Bool {
+            await withCheckedContinuation { continuation in
+                CSSearchableIndex.default()
+                    .deleteSearchableItems(withDomainIdentifiers: [SpotlightIndex.domain]) { error in
+                        continuation.resume(returning: error == nil)
+                    }
+            }
+        }
+
+        private func submit(_ items: [CSSearchableItem]) async -> Bool {
+            await withCheckedContinuation { continuation in
+                CSSearchableIndex.default().indexSearchableItems(items) { error in
+                    continuation.resume(returning: error == nil)
+                }
+            }
+        }
+    }
+
+    private static func fingerprint(_ meeting: Meeting) -> Int {
+        var hasher = Hasher()
+        hasher.combine(meeting.title)
+        hasher.combine(meeting.objective)
+        hasher.combine(meeting.workspace)
+        hasher.combine(meeting.attendees)
+        hasher.combine(meeting.when)
+        hasher.combine(meeting.rawNotes)
+        hasher.combine(meeting.summaries)
+        hasher.combine(meeting.transcript)
+        return hasher.finalize()
     }
 
     private static func makeItem(_ meeting: Meeting) -> CSSearchableItem {

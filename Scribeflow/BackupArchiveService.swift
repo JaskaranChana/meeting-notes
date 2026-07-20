@@ -39,6 +39,12 @@ enum BackupArchiveError: LocalizedError {
 actor BackupArchiveService {
     static let shared = BackupArchiveService()
 
+    private struct AutomaticBackupFile {
+        let url: URL
+        let modifiedAt: Date
+        let byteCount: Int
+    }
+
     /// The legacy JSON package embeds audio as Base64, which temporarily needs
     /// substantially more memory than the source files. Keep this bounded until
     /// a streaming archive format replaces it.
@@ -157,7 +163,8 @@ actor BackupArchiveService {
 
         if !force {
             if !hasLoadedAutomaticBackupMetadata {
-                _ = try automaticBackups()
+                cachedLatestAutomaticBackupAt = try automaticBackupFiles().first?.modifiedAt
+                hasLoadedAutomaticBackupMetadata = true
             }
             if let latest = cachedLatestAutomaticBackupAt,
                now.timeIntervalSince(latest) < minimumAutomaticBackupInterval {
@@ -191,27 +198,18 @@ actor BackupArchiveService {
     }
 
     func automaticBackups() throws -> [AutomaticBackupSnapshot] {
-        try ensureDirectory()
-        let urls = try FileManager.default.contentsOfDirectory(
-            at: directoryURL,
-            includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
-            options: [.skipsHiddenFiles]
-        )
-
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        let snapshots: [AutomaticBackupSnapshot] = urls.compactMap { url -> AutomaticBackupSnapshot? in
-            guard url.pathExtension.lowercased() == "json",
-                  url.lastPathComponent.hasPrefix("scribeflow-auto-"),
-                  let data = try? Data(contentsOf: url),
+        let snapshots: [AutomaticBackupSnapshot] = try automaticBackupFiles().compactMap { file -> AutomaticBackupSnapshot? in
+            guard let data = try? Data(contentsOf: file.url, options: .mappedIfSafe),
                   let package = try? decoder.decode(ScribeflowBackupPackage.self, from: data)
             else { return nil }
 
             return AutomaticBackupSnapshot(
-                fileName: url.lastPathComponent,
+                fileName: file.url.lastPathComponent,
                 createdAt: package.exportedAt,
                 meetingsCount: package.meetings.count,
-                byteCount: data.count
+                byteCount: file.byteCount
             )
         }
         .sorted { $0.createdAt > $1.createdAt }
@@ -225,7 +223,7 @@ actor BackupArchiveService {
             throw BackupArchiveError.invalidSnapshot
         }
         let url = directoryURL.appendingPathComponent(snapshot.fileName, isDirectory: false)
-        guard let data = try? Data(contentsOf: url), !data.isEmpty else {
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe), !data.isEmpty else {
             throw BackupArchiveError.invalidSnapshot
         }
         return data
@@ -238,10 +236,39 @@ actor BackupArchiveService {
     }
 
     private func pruneAutomaticBackups() throws {
-        let backups = try automaticBackups()
-        for backup in backups.dropFirst(maximumAutomaticBackups) {
-            let url = directoryURL.appendingPathComponent(backup.fileName, isDirectory: false)
-            try? FileManager.default.removeItem(at: url)
+        for file in try automaticBackupFiles().dropFirst(maximumAutomaticBackups) {
+            try? FileManager.default.removeItem(at: file.url)
+        }
+    }
+
+    /// Routine saves need only the newest archive timestamp and retention
+    /// order. Reading file metadata avoids decoding up to seven complete
+    /// library snapshots every time the app launches or persists an edit.
+    private func automaticBackupFiles() throws -> [AutomaticBackupFile] {
+        try ensureDirectory()
+        let urls = try FileManager.default.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        )
+        return urls.compactMap { url in
+            guard url.pathExtension.lowercased() == "json",
+                  url.lastPathComponent.hasPrefix("scribeflow-auto-"),
+                  let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
+                  let byteCount = values.fileSize,
+                  byteCount > 0
+            else { return nil }
+            return AutomaticBackupFile(
+                url: url,
+                modifiedAt: values.contentModificationDate ?? .distantPast,
+                byteCount: byteCount
+            )
+        }
+        .sorted {
+            if $0.modifiedAt == $1.modifiedAt {
+                return $0.url.lastPathComponent > $1.url.lastPathComponent
+            }
+            return $0.modifiedAt > $1.modifiedAt
         }
     }
 

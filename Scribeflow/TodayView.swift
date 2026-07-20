@@ -13,6 +13,11 @@ struct DailyPlanItem: Identifiable, Hashable {
     let dueDate: Date?
 }
 
+private struct TodayCalendarRefreshKey: Hashable {
+    let eventRevision: Int
+    let sceneIsActive: Bool
+}
+
 struct TodayView: View {
     @Environment(MeetingStore.self) private var store
     @Environment(\.openURL) private var openURL
@@ -36,6 +41,7 @@ struct TodayView: View {
     @State private var upcomingEvents: [UpcomingEvent] = []
     @State private var savedPrepEvent: UpcomingEvent?
     @State private var calendarAccessState: CalendarAccessState = .notDetermined
+    @State private var calendarEventRevision = 0
     @State private var isRequestingCalendarAccess = false
     @State private var imminentEvent: UpcomingEvent?
     @State private var showingHowItWorks = false
@@ -360,16 +366,18 @@ struct TodayView: View {
         }
         .task(id: isActive) {
             guard isActive else { return }
-            await refreshUpcoming()
             await runAutoRecordWatch()
         }
-        .onChange(of: scenePhase) { _, phase in
-            guard isActive, phase == .active else { return }
-            Task { await refreshUpcoming() }
+        .task(id: isActive ? TodayCalendarRefreshKey(
+            eventRevision: calendarEventRevision,
+            sceneIsActive: scenePhase == .active
+        ) : nil) {
+            guard isActive, scenePhase == .active else { return }
+            await refreshUpcoming()
         }
         .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
             guard isActive else { return }
-            Task { await refreshUpcoming() }
+            calendarEventRevision &+= 1
         }
         .onReceive(NotificationCenter.default.publisher(for: .scribeflowDockScrollToTop)) { note in
             // Re-tap of the Today dock tab → scroll to top.
@@ -1090,7 +1098,6 @@ struct TodayView: View {
 
     private func resolveOpenLoop(meetingID: Meeting.ID) {
         store.resolveFirstOpenCommitment(in: meetingID)
-        Task { await refreshSnapshot(from: store.meetings) }
         toast = ToastItem(message: "One off the list", icon: "checkmark.circle.fill")
     }
 
@@ -1185,10 +1192,7 @@ struct TodayView: View {
         let nextSnapshot = await snapshotBuilder.make(from: meetings)
         guard !Task.isCancelled else { return }
         snap = nextSnapshot
-        savedPrepEvent = meetings
-            .compactMap(CalendarEventSnapshot.init(preparedMeeting:))
-            .filter { $0.endDate > .now }
-            .min { $0.startDate < $1.startDate }
+        savedPrepEvent = nextSnapshot.savedPrepEvent
         rebuildHeroModel()
     }
 }
@@ -1204,59 +1208,49 @@ private actor TodaySnapshotBuilder {
 struct TodaySnapshot {
     var processingMeetings: [Meeting] = []
     var recentHomeMeetings: [Meeting] = []
-    var dashboardCollections: [SmartCollectionCard] = []
     var openLoops: [OpenLoop] = []
     var dailyPlan: [DailyPlanItem] = []
     var pinnedMeetings: [Meeting] = []
+    var savedPrepEvent: UpcomingEvent?
     var totalOpenLoopsCount = 0
     var nextMove: NextMove? = nil
     var nextMoveAttendees: [String] = []
     var continueMeeting: Meeting? = nil
-    var trailingMeetings: [Meeting] = []
     var todayCaptureCount = 0
-    var weekCaptureCount = 0
     var weekMeetingCount = 0
     var rollingWeekCaptureCount = 0
     var previousWeekCaptureCount = 0
-    var totalCount = 0
     var longestStreakDays = 0
-    var avgDurationMinutes = 0
     var followThroughPct = 0
 
     init() {}
 
     init(meetings: [Meeting]) {
         let recentMeetings = meetings.sorted(by: Meeting.sortDescending)
-        processingMeetings = Array(recentMeetings.filter { $0.status == .processing }.prefix(4))
+        processingMeetings = Array(recentMeetings.lazy.filter { $0.status == .processing }.prefix(4))
         let readyMeetings = recentMeetings.filter { $0.status != .processing }
-        let recent = Array(readyMeetings.prefix(5))
-        let pinned = Array(readyMeetings.filter(\.isPinned).prefix(3))
+        let pinned = Array(readyMeetings.lazy.filter(\.isPinned).prefix(3))
         let pinnedIDs = Set(pinned.map(\.id))
-        let allOpenLoops = Self.openLoops(from: readyMeetings)
+        let openLoopSummary = Self.openLoopSummary(from: readyMeetings)
         let windows = Self.rollingCaptureWindows(in: meetings)
-        recentHomeMeetings = Array(readyMeetings.filter { !pinnedIDs.contains($0.id) }.prefix(4))
-        dashboardCollections = Self.smartCollections(from: recentMeetings)
-        openLoops = Array(allOpenLoops.prefix(3))
+        recentHomeMeetings = Array(
+            readyMeetings.lazy.filter { !pinnedIDs.contains($0.id) }.prefix(4)
+        )
+        openLoops = openLoopSummary.preview
         dailyPlan = Self.dailyPlan(from: readyMeetings)
         pinnedMeetings = pinned
-        totalOpenLoopsCount = allOpenLoops.count
-        continueMeeting = recent.first
-        trailingMeetings = Array(recent.dropFirst())
+        totalOpenLoopsCount = openLoopSummary.count
+        continueMeeting = readyMeetings.first
         let startOfDay = Calendar.current.startOfDay(for: .now)
-        let startOfWeek = Calendar.current.date(byAdding: .day, value: -6, to: startOfDay) ?? startOfDay
         let weekAgo = Calendar.current.date(byAdding: .day, value: -7, to: .now) ?? .now
         todayCaptureCount = meetings.filter { $0.when >= startOfDay }.count
-        weekCaptureCount = meetings.filter { $0.when >= startOfWeek }.count
         weekMeetingCount = meetings.filter { $0.when >= weekAgo }.count
         rollingWeekCaptureCount = windows.current
         previousWeekCaptureCount = windows.previous
-        totalCount = meetings.count
         longestStreakDays = Self.streakDays(in: meetings)
-        let nonZeroDurations = meetings.map(\.durationMinutes).filter { $0 > 0 }
-        avgDurationMinutes = nonZeroDurations.isEmpty ? 0 : nonZeroDurations.reduce(0, +) / nonZeroDurations.count
         nextMove = Self.nextMove(
             from: readyMeetings,
-            openLoops: allOpenLoops,
+            openLoopCount: openLoopSummary.count,
             todayCount: todayCaptureCount,
             streak: longestStreakDays
         )
@@ -1264,6 +1258,11 @@ struct TodaySnapshot {
            let meeting = meetings.first(where: { $0.id == meetingID }) {
             nextMoveAttendees = meeting.attendees
         }
+        let now = Date.now
+        savedPrepEvent = meetings.lazy
+            .compactMap(CalendarEventSnapshot.init(preparedMeeting:))
+            .filter { $0.endDate > now }
+            .min { $0.startDate < $1.startDate }
         followThroughPct = Self.followThroughPercent(in: meetings)
     }
 
@@ -1290,35 +1289,42 @@ struct TodaySnapshot {
             }
         }
 
-        var items: [DailyPlanItem] = []
-        items.reserveCapacity(meetings.reduce(0) { partial, meeting in
-            partial + (meeting.isPersonalCapture ? 0 : meeting.commitments.count)
-        })
-
-        for meeting in meetings where !meeting.isPersonalCapture {
-            for commitment in meeting.commitments {
-                guard let classification = classify(commitment, capturedAt: meeting.when) else { continue }
-                items.append(
-                    DailyPlanItem(
-                        id: commitment.id,
-                        commitment: commitment,
-                        meetingID: meeting.id,
-                        meetingTitle: meeting.title,
-                        meetingDate: meeting.when,
-                        weight: classification.weight,
-                        dueDate: classification.due
-                    )
-                )
-            }
-        }
-
-        items.sort { lhs, rhs in
+        func outranks(_ lhs: DailyPlanItem, _ rhs: DailyPlanItem) -> Bool {
             if lhs.weight != rhs.weight {
                 return lhs.weight < rhs.weight
             }
             return lhs.meetingDate > rhs.meetingDate
         }
-        return Array(items.prefix(3))
+
+        // The UI only presents three priorities. Keep a bounded ordered set
+        // instead of allocating and sorting every commitment in the library.
+        var best: [DailyPlanItem] = []
+        best.reserveCapacity(3)
+
+        for meeting in meetings where !meeting.isPersonalCapture {
+            for commitment in meeting.commitments {
+                guard let classification = classify(commitment, capturedAt: meeting.when) else { continue }
+                let candidate = DailyPlanItem(
+                    id: commitment.id,
+                    commitment: commitment,
+                    meetingID: meeting.id,
+                    meetingTitle: meeting.title,
+                    meetingDate: meeting.when,
+                    weight: classification.weight,
+                    dueDate: classification.due
+                )
+                if let insertionIndex = best.firstIndex(where: { outranks(candidate, $0) }) {
+                    best.insert(candidate, at: insertionIndex)
+                } else if best.count < 3 {
+                    best.append(candidate)
+                }
+                if best.count > 3 {
+                    best.removeLast()
+                }
+            }
+        }
+
+        return best
     }
 
     private static func rollingCaptureWindows(in meetings: [Meeting]) -> (current: Int, previous: Int) {
@@ -1341,12 +1347,18 @@ struct TodaySnapshot {
     }
 
     private static func followThroughPercent(in meetings: [Meeting]) -> Int {
-        let allCommitments = meetings
-            .filter { !$0.isPersonalCapture }
-            .flatMap(\.commitments)
-        guard !allCommitments.isEmpty else { return 0 }
-        let done = allCommitments.filter { $0.status == .fulfilled || $0.status == .superseded }.count
-        return Int((Double(done) / Double(allCommitments.count) * 100).rounded())
+        var total = 0
+        var done = 0
+        for meeting in meetings where !meeting.isPersonalCapture {
+            for commitment in meeting.commitments {
+                total += 1
+                if commitment.status == .fulfilled || commitment.status == .superseded {
+                    done += 1
+                }
+            }
+        }
+        guard total > 0 else { return 0 }
+        return Int((Double(done) / Double(total) * 100).rounded())
     }
 
     /// Surfaces the single most useful next action across the workspace, or
@@ -1354,7 +1366,7 @@ struct TodaySnapshot {
     /// the first matching signal wins so the card never competes with itself.
     private static func nextMove(
         from meetings: [Meeting],
-        openLoops: [OpenLoop],
+        openLoopCount: Int,
         todayCount: Int,
         streak: Int
     ) -> NextMove? {
@@ -1397,10 +1409,10 @@ struct TodaySnapshot {
         }
 
         // 4. Follow-ups are piling up.
-        if openLoops.count >= 3 {
+        if openLoopCount >= 3 {
             return NextMove(
                 kind: .clearFollowUps,
-                title: "\(openLoops.count) follow-ups are waiting",
+                title: "\(openLoopCount) follow-ups are waiting",
                 subtitle: "Clear them before they pile up",
                 meetingID: nil
             )
@@ -1447,81 +1459,79 @@ struct TodaySnapshot {
     }
 
 
-    private static func smartCollections(from meetings: [Meeting]) -> [SmartCollectionCard] {
-        SmartCollectionKind.allCases.map { kind in
-            SmartCollectionCard(kind: kind, count: Self.meetings(matching: kind, in: meetings).count)
-        }
+    private struct OpenLoopSummary {
+        var preview: [OpenLoop] = []
+        var count = 0
     }
 
-    private static func meetings(matching kind: SmartCollectionKind, in meetings: [Meeting]) -> [Meeting] {
-        switch kind {
-        case .all:
-            meetings
-        case .followUp:
-            meetings.filter { $0.status != .shared && $0.status != .processing }
-        case .calls:
-            meetings.filter(\.isCallMeeting)
-        case .pinned:
-            meetings.filter(\.isPinned)
-        case .shared:
-            meetings.filter { $0.status == .shared }
-        }
-    }
+    private static func openLoopSummary(from meetings: [Meeting]) -> OpenLoopSummary {
+        var summary = OpenLoopSummary()
+        summary.preview.reserveCapacity(3)
 
-    private static func openLoops(from meetings: [Meeting]) -> [OpenLoop] {
-        meetings
-            .filter { $0.status != .shared }
-            .filter { !$0.isPersonalCapture }
-            .flatMap { meeting -> [OpenLoop] in
-                let actionLoops = meeting.commitments
-                    .filter { $0.status == .open || $0.status == .atRisk }
-                    .prefix(2)
-                    .map {
+        for meeting in meetings where meeting.status != .shared && !meeting.isPersonalCapture {
+            var meetingActionCount = 0
+            for commitment in meeting.commitments
+            where commitment.status == .open || commitment.status == .atRisk {
+                guard meetingActionCount < 2 else { break }
+                summary.count += 1
+                meetingActionCount += 1
+                if summary.preview.count < 3 {
+                    summary.preview.append(
                         OpenLoop(
                             meetingID: meeting.id,
                             meetingTitle: meeting.title,
                             workspace: meeting.workspace,
                             kind: .action,
-                            text: $0.formattedLine
+                            text: commitment.formattedLine
                         )
-                    }
-                let riskLoops = riskLines(from: meeting).prefix(1).map {
-                    OpenLoop(
-                        meetingID: meeting.id,
-                        meetingTitle: meeting.title,
-                        workspace: meeting.workspace,
-                        kind: .risk,
-                        text: $0
                     )
                 }
-                return actionLoops + riskLoops
             }
-    }
 
-    private static func riskLines(from meeting: Meeting) -> [String] {
-        guard !meeting.isPersonalCapture else { return [] }
-        let sources = [
-            meeting.rawNotes,
-            meeting.objective,
-            meeting.summaries.flatMap { $0.summary.sections.flatMap(\.bullets) }.joined(separator: "\n"),
-            meeting.transcript.prefix(12).map(\.text).joined(separator: "\n")
-        ]
-
-        var results: [String] = []
-        for source in sources {
-            for line in source.split(whereSeparator: \.isNewline) {
-                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmed.isEmpty else { continue }
-                let lower = trimmed.lowercased()
-                if lower.contains("risk") || lower.contains("concern") || lower.contains("issue")
-                    || lower.contains("blocker") || lower.contains("security") || lower.contains("timeline")
-                    || lower.contains("budget") || lower.contains("delay") || lower.contains("problem") {
-                    results.append(trimmed)
-                    if results.count >= 4 { return results }
+            if let risk = firstRiskLine(from: meeting) {
+                summary.count += 1
+                if summary.preview.count < 3 {
+                    summary.preview.append(
+                        OpenLoop(
+                            meetingID: meeting.id,
+                            meetingTitle: meeting.title,
+                            workspace: meeting.workspace,
+                            kind: .risk,
+                            text: risk
+                        )
+                    )
                 }
             }
         }
-        return results
+        return summary
+    }
+
+    private static func firstRiskLine(from meeting: Meeting) -> String? {
+        guard !meeting.isPersonalCapture else { return nil }
+        if let line = firstRiskLine(in: meeting.rawNotes) { return line }
+        if let line = firstRiskLine(in: meeting.objective) { return line }
+
+        let summaryText = meeting.summaries
+            .flatMap { $0.summary.sections.flatMap(\.bullets) }
+            .joined(separator: "\n")
+        if let line = firstRiskLine(in: summaryText) { return line }
+
+        let transcriptText = meeting.transcript.prefix(12).map(\.text).joined(separator: "\n")
+        return firstRiskLine(in: transcriptText)
+    }
+
+    private static func firstRiskLine(in source: String) -> String? {
+        for line in source.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let lower = trimmed.lowercased()
+            if lower.contains("risk") || lower.contains("concern") || lower.contains("issue")
+                || lower.contains("blocker") || lower.contains("security") || lower.contains("timeline")
+                || lower.contains("budget") || lower.contains("delay") || lower.contains("problem") {
+                return trimmed
+            }
+        }
+        return nil
     }
 
 }

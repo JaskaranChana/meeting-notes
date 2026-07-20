@@ -149,10 +149,8 @@ private struct ActionItemsDateGroup {
     let items: [AggregatedActionItem]
 }
 
-private struct ActionItemsDisplaySnapshot {
-    var filteredItems: [AggregatedActionItem] = []
-    var dateGroups: [ActionItemsDateGroup] = []
-    var meetingGroups: [ActionItemsMeetingGroup] = []
+private struct ActionItemsSummarySnapshot {
+    var allCount = 0
     var openCount = 0
     var atRiskCount = 0
     var doneCount = 0
@@ -161,18 +159,7 @@ private struct ActionItemsDisplaySnapshot {
     var attentionDetail = ""
     var shouldPreferAtRiskFilter = false
 
-    static func make(
-        allItems: [AggregatedActionItem],
-        query: String,
-        filter: ActionItemFilter,
-        sort: ActionItemSort
-    ) -> ActionItemsDisplaySnapshot {
-        let filtered = sortedItems(
-            allItems
-                .filter { filter.matches($0) }
-                .filter { matches(query: query, item: $0) },
-            sort: sort
-        )
+    static func make(allItems: [AggregatedActionItem]) -> ActionItemsSummarySnapshot {
         let overdue = allItems.filter(\.isOverdue)
         let atRisk = allItems.filter { $0.commitment.status == .atRisk }
         let dueSoon = allItems.filter(\.isDueSoon)
@@ -188,17 +175,60 @@ private struct ActionItemsDisplaySnapshot {
         if !atRisk.isEmpty { attentionParts.append("\(atRisk.count) at risk") }
         if !dueSoonNotAtRisk.isEmpty { attentionParts.append("\(dueSoonNotAtRisk.count) due soon") }
 
-        return ActionItemsDisplaySnapshot(
-            filteredItems: filtered,
-            dateGroups: dateGroups(from: filtered),
-            meetingGroups: meetingGroups(from: filtered),
+        return ActionItemsSummarySnapshot(
+            allCount: allItems.count,
             openCount: allItems.filter { $0.commitment.status == .open }.count,
             atRiskCount: atRisk.count,
-            doneCount: allItems.filter { $0.commitment.status == .fulfilled || $0.commitment.status == .superseded }.count,
+            doneCount: allItems.filter {
+                $0.commitment.status == .fulfilled || $0.commitment.status == .superseded
+            }.count,
             attentionCount: attentionCount,
             attentionHeadline: "\(attentionCount) item\(attentionCount == 1 ? "" : "s") need\(attentionCount == 1 ? "s" : "") attention",
             attentionDetail: attentionParts.joined(separator: " · "),
             shouldPreferAtRiskFilter: !atRisk.isEmpty
+        )
+    }
+}
+
+private struct ActionItemsDisplaySnapshot {
+    var filteredItems: [AggregatedActionItem] = []
+    var dateGroups: [ActionItemsDateGroup] = []
+    var meetingGroups: [ActionItemsMeetingGroup] = []
+    var allCount = 0
+    var openCount = 0
+    var atRiskCount = 0
+    var doneCount = 0
+    var attentionCount = 0
+    var attentionHeadline = ""
+    var attentionDetail = ""
+    var shouldPreferAtRiskFilter = false
+
+    static func make(
+        allItems: [AggregatedActionItem],
+        summary: ActionItemsSummarySnapshot,
+        query: String,
+        filter: ActionItemFilter,
+        sort: ActionItemSort
+    ) -> ActionItemsDisplaySnapshot {
+        let filtered = sortedItems(
+            allItems
+                .filter { filter.matches($0) }
+                .filter { matches(query: query, item: $0) },
+            sort: sort
+        )
+
+        return ActionItemsDisplaySnapshot(
+            filteredItems: filtered,
+            dateGroups: dateGroups(from: filtered),
+            meetingGroups: meetingGroups(from: filtered),
+            allCount: summary.allCount,
+            openCount: summary.openCount,
+            atRiskCount: summary.atRiskCount,
+            doneCount: summary.doneCount,
+            attentionCount: summary.attentionCount,
+            attentionHeadline: summary.attentionHeadline,
+            attentionDetail: summary.attentionDetail,
+            shouldPreferAtRiskFilter: summary.shouldPreferAtRiskFilter
         )
     }
 
@@ -275,27 +305,36 @@ private struct ActionItemsDisplaySnapshot {
 }
 
 private actor ActionItemsSnapshotBuilder {
-    func make(meetings: [Meeting], key: ActionItemsSnapshotKey) -> (items: [AggregatedActionItem], snapshot: ActionItemsDisplaySnapshot) {
-        let items = meetings.flatMap { meeting in
-            guard !meeting.isPersonalCapture else { return [AggregatedActionItem]() }
-            return meeting.commitments.map { commitment in
-                AggregatedActionItem(
-                    commitment: commitment,
-                    meetingID: meeting.id,
-                    meetingTitle: meeting.title,
-                    workspace: meeting.workspace,
-                    meetingDate: meeting.when,
-                    isMeetingPinned: meeting.isPinned
-                )
+    private var cachedRevision = -1
+    private var cachedItems: [AggregatedActionItem] = []
+    private var cachedSummary = ActionItemsSummarySnapshot()
+
+    func make(meetings: [Meeting], key: ActionItemsSnapshotKey) -> ActionItemsDisplaySnapshot {
+        if key.revision > cachedRevision {
+            cachedItems = meetings.flatMap { meeting in
+                guard !meeting.isPersonalCapture else { return [AggregatedActionItem]() }
+                return meeting.commitments.map { commitment in
+                    AggregatedActionItem(
+                        commitment: commitment,
+                        meetingID: meeting.id,
+                        meetingTitle: meeting.title,
+                        workspace: meeting.workspace,
+                        meetingDate: meeting.when,
+                        isMeetingPinned: meeting.isPinned
+                    )
+                }
             }
+            cachedSummary = ActionItemsSummarySnapshot.make(allItems: cachedItems)
+            cachedRevision = key.revision
         }
-        let snapshot = ActionItemsDisplaySnapshot.make(
-            allItems: items,
+
+        return ActionItemsDisplaySnapshot.make(
+            allItems: cachedItems,
+            summary: cachedSummary,
             query: key.query,
             filter: key.filter,
             sort: key.sort
         )
-        return (items, snapshot)
     }
 }
 
@@ -317,7 +356,6 @@ struct ActionItemsView: View {
     /// Built once per store change, not on every render — the counts, filters,
     /// and banner all read this instead of re-flattening every meeting's
     /// commitments ~10× per body pass.
-    @State private var cachedItems: [AggregatedActionItem] = []
     @State private var displaySnapshot = ActionItemsDisplaySnapshot()
     @State private var snapshotBuilder = ActionItemsSnapshotBuilder()
 
@@ -406,11 +444,10 @@ struct ActionItemsView: View {
         guard !Task.isCancelled else { return }
 
         let meetings = store.meetings
-        let result = await snapshotBuilder.make(meetings: meetings, key: key)
+        let nextSnapshot = await snapshotBuilder.make(meetings: meetings, key: key)
         guard !Task.isCancelled, key == snapshotKey else { return }
 
-        cachedItems = result.items
-        displaySnapshot = result.snapshot
+        displaySnapshot = nextSnapshot
         hasLoadedSnapshot = true
     }
 
@@ -675,8 +712,6 @@ struct ActionItemsView: View {
 
     // MARK: - Data
 
-    private var allItems: [AggregatedActionItem] { cachedItems }
-
     private var filteredItems: [AggregatedActionItem] {
         displaySnapshot.filteredItems
     }
@@ -715,7 +750,7 @@ struct ActionItemsView: View {
         case .open:   return openCount
         case .atRisk: return atRiskCount
         case .done:   return doneCount
-        case .all:    return allItems.count
+        case .all:    return displaySnapshot.allCount
         }
     }
 

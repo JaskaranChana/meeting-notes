@@ -1,6 +1,12 @@
 import EventKit
 import SwiftUI
 
+private struct MeetingCalendarEventRefreshKey: Hashable {
+    let displayedMonth: Date
+    let refreshRevision: Int
+    let sceneIsActive: Bool
+}
+
 struct MeetingCalendarView: View {
     @Environment(MeetingStore.self) private var store
     @Environment(\.openURL) private var openURL
@@ -18,6 +24,7 @@ struct MeetingCalendarView: View {
     @State private var accessState: CalendarAccessState = .notDetermined
     @State private var calendarEvents: [CalendarEventSnapshot] = []
     @State private var calendarEventRevision = 0
+    @State private var calendarRefreshRevision = 0
     @State private var isRequestingAccess = false
     @State private var snapshot = MeetingCalendarSnapshot()
     @State private var snapshotBuilder = MeetingCalendarSnapshotBuilder()
@@ -100,21 +107,21 @@ struct MeetingCalendarView: View {
                     onOpenSource: openMeeting(_:)
                 )
             }
-            .task(id: isActive ? displayedMonth : nil) {
-                guard isActive else { return }
+            .task(id: isActive ? MeetingCalendarEventRefreshKey(
+                displayedMonth: displayedMonth,
+                refreshRevision: calendarRefreshRevision,
+                sceneIsActive: scenePhase == .active
+            ) : nil) {
+                guard isActive, scenePhase == .active else { return }
                 await refreshCalendarEvents()
             }
             .task(id: isActive ? snapshotKey : nil) {
                 guard isActive else { return }
                 await refreshSnapshot(for: snapshotKey)
             }
-            .onChange(of: scenePhase) { _, phase in
-                guard isActive, phase == .active else { return }
-                Task { await refreshCalendarEvents() }
-            }
             .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
                 guard isActive else { return }
-                Task { await refreshCalendarEvents() }
+                calendarRefreshRevision &+= 1
             }
             .onReceive(NotificationCenter.default.publisher(for: .scribeflowDockScrollToTop)) { note in
                 guard (note.object as? String) == "calendar" else { return }
@@ -691,8 +698,7 @@ struct MeetingCalendarView: View {
         let nextSnapshot = await snapshotBuilder.make(
             meetings: meetings,
             events: events,
-            displayedMonth: key.displayedMonth,
-            selectedDate: key.selectedDate
+            key: key
         )
         guard !Task.isCancelled, key == snapshotKey else { return }
         snapshot = nextSnapshot
@@ -965,21 +971,44 @@ private struct MeetingCalendarSnapshotKey: Hashable {
     let displayedMonth: Date
     let selectedDate: Date
     let eventRevision: Int
+
+    var baseKey: MeetingCalendarSnapshotBaseKey {
+        MeetingCalendarSnapshotBaseKey(
+            revision: revision,
+            displayedMonth: displayedMonth,
+            eventRevision: eventRevision
+        )
+    }
+}
+
+private struct MeetingCalendarSnapshotBaseKey: Hashable {
+    let revision: Int
+    let displayedMonth: Date
+    let eventRevision: Int
 }
 
 private actor MeetingCalendarSnapshotBuilder {
+    private var cachedBaseKey: MeetingCalendarSnapshotBaseKey?
+    private var cachedSnapshot: MeetingCalendarSnapshot?
+
     func make(
         meetings: [Meeting],
         events: [CalendarEventSnapshot],
-        displayedMonth: Date,
-        selectedDate: Date
+        key: MeetingCalendarSnapshotKey
     ) -> MeetingCalendarSnapshot {
-        MeetingCalendarSnapshot(
+        if cachedBaseKey == key.baseKey, let cachedSnapshot {
+            return cachedSnapshot.selecting(key.selectedDate)
+        }
+
+        let snapshot = MeetingCalendarSnapshot(
             meetings: meetings,
             events: events,
-            displayedMonth: displayedMonth,
-            selectedDate: selectedDate
+            displayedMonth: key.displayedMonth,
+            selectedDate: key.selectedDate
         )
+        cachedBaseKey = key.baseKey
+        cachedSnapshot = snapshot
+        return snapshot
     }
 }
 
@@ -992,6 +1021,7 @@ private struct MeetingCalendarSnapshot {
     var selectedEvents: [CalendarEventSnapshot] = []
     var linkedMeetingsByEventID: [String: Meeting] = [:]
     var linkedMeetingsByFingerprint: [String: Meeting] = [:]
+    private var agendaDaysByDate: [Date: MeetingCalendarAgendaDay] = [:]
     var monthMeetingCount = 0
     var monthEventCount = 0
     var selectedOpenLoopCount = 0
@@ -1075,6 +1105,7 @@ private struct MeetingCalendarSnapshot {
                 openLoopCount: day.openLoopCount
             )
         }
+        agendaDaysByDate = Dictionary(uniqueKeysWithValues: agendaDays.map { ($0.date, $0) })
 
         if let selectedWeek = calendar.dateInterval(of: .weekOfYear, for: selectedDay) {
             selectedWeekDays = days.filter { selectedWeek.contains($0.date) }
@@ -1089,6 +1120,34 @@ private struct MeetingCalendarSnapshot {
                 monthInterval.contains(day.date) && day.hasAnyActivity
             }
         }
+    }
+
+    /// Selecting another day changes only 42 lightweight cell flags and the
+    /// selected agenda. Month grouping, event linking, sorting, and counts are
+    /// reused from the revision-scoped base snapshot.
+    func selecting(_ date: Date) -> MeetingCalendarSnapshot {
+        let calendar = Calendar.current
+        let selectedDay = calendar.startOfDay(for: date)
+        var result = self
+        result.days = days.map { $0.selecting(selectedDay, calendar: calendar) }
+
+        let selectedAgenda = agendaDaysByDate[selectedDay]
+        result.selectedMeetings = selectedAgenda?.meetings ?? []
+        result.selectedEvents = selectedAgenda?.events ?? []
+        result.selectedOpenLoopCount = selectedAgenda?.openLoopCount ?? 0
+
+        if let selectedWeek = calendar.dateInterval(of: .weekOfYear, for: selectedDay) {
+            result.selectedWeekDays = result.days.filter { selectedWeek.contains($0.date) }
+            result.selectedWeekAgendaDays = result.selectedWeekDays.compactMap {
+                agendaDaysByDate[$0.date]
+            }
+        } else {
+            result.selectedWeekDays = Array(result.days.prefix(7))
+            result.selectedWeekAgendaDays = result.selectedWeekDays.compactMap {
+                agendaDaysByDate[$0.date]
+            }
+        }
+        return result
     }
 
     func linkedMeeting(for event: CalendarEventSnapshot) -> Meeting? {
@@ -1144,6 +1203,24 @@ private struct MeetingCalendarDay: Identifiable, Hashable {
 
     var hasAnyActivity: Bool {
         noteCount > 0 || eventCount > 0 || hasOpenActions
+    }
+
+    func selecting(_ selectedDate: Date, calendar: Calendar) -> MeetingCalendarDay {
+        let nextIsSelected = calendar.isDate(date, inSameDayAs: selectedDate)
+        guard nextIsSelected != isSelected else { return self }
+        return MeetingCalendarDay(
+            date: date,
+            dayNumber: dayNumber,
+            weekdayLabel: weekdayLabel,
+            agendaTitleLabel: agendaTitleLabel,
+            accessibilityDateLabel: accessibilityDateLabel,
+            isInDisplayedMonth: isInDisplayedMonth,
+            isToday: isToday,
+            isSelected: nextIsSelected,
+            noteCount: noteCount,
+            eventCount: eventCount,
+            openLoopCount: openLoopCount
+        )
     }
 }
 

@@ -504,12 +504,18 @@ struct MeetingSignals: Hashable {
 }
 
 struct OpenLoop: Identifiable, Hashable {
-    var id = UUID()
     var meetingID: Meeting.ID
     var meetingTitle: String
     var workspace: String
     var kind: OpenLoopKind
     var text: String
+
+    /// Open loops are regenerated from saved commitments and risks. Deriving
+    /// identity from their source keeps list rows stable across snapshot
+    /// rebuilds instead of assigning a fresh UUID on every refresh.
+    var id: String {
+        "\(meetingID.uuidString)|\(kind.rawValue)|\(text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current))"
+    }
 }
 
 struct PrepBrief: Hashable {

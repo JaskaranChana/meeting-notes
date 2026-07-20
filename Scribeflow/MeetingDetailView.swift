@@ -11,21 +11,34 @@ private struct MeetingTranscriptDisplaySnapshot {
 }
 
 private actor MeetingTranscriptSnapshotBuilder {
-    func make(lines: [TranscriptLine], query: String) -> MeetingTranscriptDisplaySnapshot {
+    private var cachedRevision = -1
+    private var cachedLines: [TranscriptLine] = []
+    private var cachedWordCount = 0
+
+    func make(
+        lines: [TranscriptLine],
+        revision: Int,
+        query: String
+    ) -> MeetingTranscriptDisplaySnapshot {
+        if revision > cachedRevision {
+            cachedLines = lines
+            cachedWordCount = lines.reduce(into: 0) { count, line in
+                count += line.text.split(whereSeparator: \.isWhitespace).count
+            }
+            cachedRevision = revision
+        }
+
         let cleanedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let filtered: [TranscriptLine]
         if cleanedQuery.isEmpty {
-            filtered = lines
+            filtered = cachedLines
         } else {
-            filtered = lines.filter {
+            filtered = cachedLines.filter {
                 $0.speaker.localizedCaseInsensitiveContains(cleanedQuery)
                     || $0.text.localizedCaseInsensitiveContains(cleanedQuery)
             }
         }
-        let wordCount = lines.reduce(into: 0) { count, line in
-            count += line.text.split(whereSeparator: \.isWhitespace).count
-        }
-        return MeetingTranscriptDisplaySnapshot(lines: filtered, wordCount: wordCount)
+        return MeetingTranscriptDisplaySnapshot(lines: filtered, wordCount: cachedWordCount)
     }
 }
 
@@ -35,47 +48,47 @@ struct MeetingDetailView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @AppStorage("preferredRewriteStyle") private var preferredRewriteStyleRaw = NoteRewriteStyle.concise.rawValue
     let meetingID: Meeting.ID
-    @State var isRewriting = false
-    @State var rewriteMessage: String?
-    @State var isGeneratingPrompt = false
-    @State var promptResponse: String?
-    @State var promptTitle = ""
-    @State var shareText = ""
-    @State var showingShareSheet = false
-    @State var transcriptSearchText = ""
-    @State var exportFormat: MeetingExportFormat = .internalBrief
-    @State var evidenceFilter: EvidenceFilter = .all
-    @State var includeInferredInShare = true
-    @State var includePrivateNotesInShare = true
-    @State var includeTranscriptInShare = false
-    @State var hasAnimatedIn = false
-    @State var showEnhanced = false
-    @State var trustControlsExpanded = false
-    @State var shareOptionsExpanded = false
-    @State var showingChat = false
-    @State var showingContextPicker = false
-    @State var showingShareCustomize = false
-    @State var showingPresentation = false
-    @State var showingPeopleCard: String? = nil
-    @State var showingAttachRecorder = false
-    @State var recordingRenameText = ""
-    @State var recordingPendingRename: AudioRecordingAttachment?
-    @State var recordingPendingDelete: AudioRecordingAttachment?
+    @State private var isRewriting = false
+    @State private var rewriteMessage: String?
+    @State private var isGeneratingPrompt = false
+    @State private var promptResponse: String?
+    @State private var promptTitle = ""
+    @State private var shareText = ""
+    @State private var showingShareSheet = false
+    @State private var transcriptSearchText = ""
+    @State private var exportFormat: MeetingExportFormat = .internalBrief
+    @State private var evidenceFilter: EvidenceFilter = .all
+    @State private var includeInferredInShare = true
+    @State private var includePrivateNotesInShare = true
+    @State private var includeTranscriptInShare = false
+    @State private var hasAnimatedIn = false
+    @State private var showEnhanced = false
+    @State private var trustControlsExpanded = false
+    @State private var shareOptionsExpanded = false
+    @State private var showingChat = false
+    @State private var showingContextPicker = false
+    @State private var showingShareCustomize = false
+    @State private var showingPresentation = false
+    @State private var showingPeopleCard: String? = nil
+    @State private var showingAttachRecorder = false
+    @State private var recordingRenameText = ""
+    @State private var recordingPendingRename: AudioRecordingAttachment?
+    @State private var recordingPendingDelete: AudioRecordingAttachment?
     @State private var recordingTranscriptionIDs: Set<AudioRecordingAttachment.ID> = []
-    @State var showingSpeakerEditor = false
+    @State private var showingSpeakerEditor = false
     @State private var transcriptLinePendingSpeakerEdit: TranscriptLine?
     @State private var selectedSourceProof: SourceProofSelection?
-    @State var rewriteTask: Task<Void, Never>?
-    @State var promptTask: Task<Void, Never>?
-    @State var cachedSignals = MeetingSignals(decisions: [], actions: [], risks: [])
-    @State var cachedPrepBrief = PrepBrief(headline: "", bullets: [], questions: [])
-    @State var cachedSynopsis: String = ""
-    @State var cachedIntelligenceReport: MeetingIntelligenceReport?
+    @State private var rewriteTask: Task<Void, Never>?
+    @State private var promptTask: Task<Void, Never>?
+    @State private var cachedSignals = MeetingSignals(decisions: [], actions: [], risks: [])
+    @State private var cachedPrepBrief = PrepBrief(headline: "", bullets: [], questions: [])
+    @State private var cachedSynopsis: String = ""
+    @State private var cachedIntelligenceReport: MeetingIntelligenceReport?
     @State private var cachedTranscriptLines: [TranscriptLine] = []
     @State private var cachedTranscriptWordCount = 0
     @State private var transcriptSnapshotBuilder = MeetingTranscriptSnapshotBuilder()
-    @State var selectedTab: HubTab = .overview
-    @AppStorage("hasUsedMeetingTabs") var hasUsedTabs = false
+    @State private var selectedTab: HubTab = .overview
+    @AppStorage("hasUsedMeetingTabs") private var hasUsedTabs = false
 
     /// Top-of-page segmented picker. Each tab shows the cards a user most
     /// likely wants in that context — so the meeting page reads as one
@@ -2228,7 +2241,7 @@ struct MeetingDetailView: View {
                     .font(.caption.weight(.bold))
                     .foregroundStyle(tint)
 
-                ForEach(items.prefix(4), id: \.self) { item in
+                ForEach(Array(items.prefix(4).enumerated()), id: \.offset) { _, item in
                     VStack(alignment: .leading, spacing: 6) {
                         Label(item, systemImage: "circle.fill")
                             .font(.subheadline)
@@ -2294,7 +2307,7 @@ struct MeetingDetailView: View {
             .padding(.bottom, 8)
 
             VStack(spacing: 0) {
-                ForEach(items.prefix(4), id: \.self) { item in
+                ForEach(Array(items.prefix(4).enumerated()), id: \.offset) { _, item in
                     HStack(alignment: .top, spacing: 14) {
                         RoundedRectangle(cornerRadius: 2, style: .continuous)
                             .fill(tint)
@@ -2708,7 +2721,7 @@ struct MeetingDetailView: View {
                                             .font(.footnote)
                                             .foregroundStyle(AppPalette.secondaryInk)
                                     } else {
-                                        ForEach(item.supportingSnippets, id: \.self) { snippet in
+                                        ForEach(Array(item.supportingSnippets.enumerated()), id: \.offset) { _, snippet in
                                             Text(snippet)
                                                 .font(.footnote)
                                                 .foregroundStyle(AppPalette.secondaryInk)
@@ -2941,7 +2954,7 @@ struct MeetingDetailView: View {
                             .font(.caption.weight(.bold))
                             .foregroundStyle(AppPalette.secondaryInk)
 
-                        ForEach(prepBrief.bullets, id: \.self) { bullet in
+                        ForEach(Array(prepBrief.bullets.enumerated()), id: \.offset) { _, bullet in
                             Label(bullet, systemImage: "circle.fill")
                                 .font(.subheadline)
                                 .foregroundStyle(AppPalette.secondaryInk)
@@ -2958,7 +2971,7 @@ struct MeetingDetailView: View {
                             .font(.caption.weight(.bold))
                             .foregroundStyle(AppPalette.secondaryInk)
 
-                        ForEach(prepBrief.questions, id: \.self) { question in
+                        ForEach(Array(prepBrief.questions.enumerated()), id: \.offset) { _, question in
                             HStack(alignment: .top, spacing: 10) {
                                 Image(systemName: "arrow.turn.down.right")
                                     .foregroundStyle(AppPalette.accent)
@@ -3334,6 +3347,7 @@ struct MeetingDetailView: View {
 
         let nextSnapshot = await transcriptSnapshotBuilder.make(
             lines: meeting.transcript,
+            revision: key.revision,
             query: key.query
         )
         guard !Task.isCancelled, key == transcriptSnapshotKey else { return }

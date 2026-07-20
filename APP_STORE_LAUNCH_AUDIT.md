@@ -100,6 +100,154 @@ sessions, following the requested verification scope. Its performance
 conclusions remain static code assessments until the device certification
 checklist is completed.
 
+### 18 July Reliability Refinement
+
+This pass removed additional work from common editing paths and tightened
+library-replacement safety:
+
+- After the current library has been validated once, persistence no longer
+  rereads, rehashes, and decodes the complete JSON document before every
+  changed save. Recovery snapshots use an atomic, APFS-friendly file copy, and
+  a missing current file is still repaired on the next write.
+- The root Tasks badge is derived by a debounced actor snapshot instead of
+  scanning every meeting and commitment synchronously on each store revision,
+  including revisions generated while typing.
+- Spotlight indexing is now structured, cancellable, idle-debounced work.
+  Deletes, sample replacement, restore, and full data deletion also remove
+  stale index entries explicitly.
+- Backup restore pauses and drains pending speech processing before swapping
+  the recording directory. A failed install resumes the existing library,
+  while a successful install discards work that belonged to the old library.
+- Processing teardown remains paused until its active task and retry wake have
+  both been cancelled, preventing an orphan retry from reappearing during
+  restore or full deletion.
+- The last root commitment-resolution path now uses the store's validated
+  constant-time meeting lookup.
+
+The compile-only Debug simulator build succeeded for arm64 and x86_64 after
+these changes. Tests, screenshots, Instruments, and physical-device sessions
+were not run, following the requested verification scope.
+
+Whole-library JSON decoding at launch remains the principal scalability limit.
+Replacing it with record-level persistence and paged queries still requires a
+versioned migration, rollback plan, and device measurements; it should be
+treated as a dedicated storage project rather than folded into routine polish.
+
+### 19 July Interaction Refinement
+
+This pass reduced repeated work in the screens and maintenance paths most
+likely to be active during daily use:
+
+- Root launch no longer sorts the complete library merely to preselect an
+  otherwise unread meeting identifier.
+- Tasks caches its flattened commitments and urgency summary by store
+  revision. Typing a search now filters the stable task layer instead of
+  rebuilding every workspace commitment and deadline count per character.
+- Transcript search reuses its revision-scoped lines and word count rather
+  than recounting the full transcript for every query update.
+- Today no longer computes unused collection, duration, and trailing-meeting
+  aggregates. Its visible priority plan uses a bounded top-three selection
+  instead of sorting every commitment, and its open-loop model retains only
+  the three rows the screen can present while preserving the full count.
+- Prepared-calendar-note discovery moved into the Today snapshot actor, so
+  publishing a refreshed snapshot no longer scans the library on the main
+  actor.
+- Calendar caches month grouping, event links, sorted agendas, and counts by
+  data revision. Selecting another date now updates lightweight cell
+  selection and that day's agenda without rebuilding the complete month.
+- Today and Calendar own EventKit refreshes through structured, cancellable
+  tasks, coalescing month changes, foreground transitions, and event-store
+  notifications.
+- Routine automatic-backup interval checks and pruning use file metadata.
+  Existing full-library archives are decoded only when the user opens backup
+  management, and archive reads use mapped data where available.
+
+The compile-only Debug simulator build succeeded for arm64 and x86_64 after
+these changes. Tests, screenshots, Instruments, and physical-device sessions
+were not run, following the requested verification scope. Runtime improvement
+claims still require the same oldest-device interaction trace described by the
+release gate.
+
+### 19 July Mutation Pipeline Refinement
+
+This pass reduced redundant store publication and made background derivation
+ownership explicit:
+
+- Note regeneration is now owned per meeting. Editing one note no longer
+  cancels pending summary, evidence, or intelligence work for another note,
+  and destructive library operations cancel every owned task.
+- No-op guards prevent unchanged titles, notes, modes, consent, retention,
+  reminders, sharing state, processing stages, and live transcript callbacks
+  from advancing the store revision or scheduling persistence.
+- Task, reminder, speaker, transcript, recording, and processing mutations now
+  publish complete meeting values atomically. Speaker rename no longer emits a
+  library-wide observation update for every matching transcript line.
+- Duplicate live recognition callbacks are ignored by semantic content, which
+  avoids redraw and persistence work caused only by regenerated line IDs.
+- Spotlight performs one launch reconciliation and then serially indexes only
+  changed meetings. Failed removals remain queued, and root refreshes run
+  after a five-second idle window at utility priority.
+- Superseded-commitment lookup is linear and no longer sorts the full library
+  after each regeneration.
+- Bulk recording cleanup refreshes only affected meetings and runs the
+  superseded-commitment pass once after the batch.
+- Generated lists that can contain duplicate text use positional identity, so
+  SwiftUI does not merge or unpredictably reuse repeated rows.
+
+The compile-only Debug simulator build completed successfully after these
+changes. Tests, screenshots, Instruments, and physical-device sessions were
+not run, following the requested verification scope.
+
+Whole-library JSON persistence remains the main scaling boundary. Record-level
+storage, migration, rollback, and oldest-device measurements remain a separate
+release project rather than an appropriate speculative change in this pass.
+
+### 20 July State, Identity, And Speech Refinement
+
+This pass tightened the app's highest-frequency state and background paths:
+
+- Regenerated template summaries, summary sections, evidence rows, source
+  references, live transcript lines, and open loops now retain semantic
+  identity. Equivalent regeneration no longer replaces every SwiftUI row or
+  creates a changed persistence payload solely from fresh UUIDs.
+- Derived refresh compares the completed meeting value with its source and
+  skips publication when nothing changed.
+- Store mutations declare their actual effects. Pin, share, reminder, task
+  status, score, and processing-label changes no longer clear semantic caches
+  or rescan retention deadlines.
+- Semantic cache eviction is scoped to the changed meeting. Prep and
+  collection caches remain globally invalidated where their cross-meeting
+  dependencies require it.
+- Title, mode, consent, purpose, template, speaker, transcript, recording, note
+  rewrite, and AI-result paths publish coherent meeting values instead of
+  exposing partially updated intermediate states.
+- Bulk audio cleanup derives affected meetings before one library
+  publication, rather than publishing the batch and then publishing each
+  regenerated meeting again.
+- Cancelled persistence snapshots are discarded before encoding or entering
+  the protected file-write path, reducing stale whole-library work during
+  rapid edits.
+- AI results verify that the title, objective, notes, transcript, purpose, and
+  capture mode still match their input snapshot before publication. Slow model
+  output cannot overwrite newer user edits.
+- Root badge and Spotlight observation now lives in a dedicated maintenance
+  view, so store revisions do not invalidate the complete root tab shell.
+- Legacy live speech rotates its recognition request after debounced context
+  changes, applying newly entered participant names and vocabulary immediately
+  instead of waiting for the next long-session rotation.
+- Meeting Detail state is private to the owning view, matching SwiftUI
+  Observation ownership rules and reducing accidental API surface.
+
+The compile-only Debug simulator build completed successfully after these
+changes. `git diff --check` was clean before documentation. Tests, screenshots,
+Instruments, simulator interaction, and physical-device sessions were not run,
+following the requested verification scope.
+
+Whole-library JSON storage remains the principal long-library scaling limit,
+and speech accuracy still requires representative device recordings across
+rooms, microphones, accents, interruptions, and speaker counts before release
+claims can be certified.
+
 ## Original Audit Verdict
 
 The section below records the audit snapshot that drove the stabilization

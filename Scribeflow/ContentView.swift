@@ -1,6 +1,86 @@
 import CoreSpotlight
 import SwiftUI
 
+private struct RootChromeSnapshot: Sendable {
+    let openActionItemCount: Int
+}
+
+private actor RootChromeSnapshotBuilder {
+    func make(from meetings: [Meeting]) -> RootChromeSnapshot {
+        RootChromeSnapshot(
+            openActionItemCount: meetings.reduce(0) { partial, meeting in
+                guard !meeting.isPersonalCapture else { return partial }
+                return partial + meeting.commitments.reduce(0) { total, commitment in
+                    total + (commitment.status == .open || commitment.status == .atRisk ? 1 : 0)
+                }
+            }
+        )
+    }
+}
+
+private struct SpotlightRefreshKey: Hashable {
+    let revision: Int
+    let sceneIsActive: Bool
+}
+
+/// Owns broad store observation outside the root tab shell. A meeting edit can
+/// restart badge/index maintenance without invalidating every NavigationStack
+/// and tab in `ContentView`.
+private struct RootStoreMaintenanceObserver: View {
+    @Environment(MeetingStore.self) private var store
+    let sceneIsActive: Bool
+    @Binding var openActionItemCount: Int
+    let onToast: (ToastItem) -> Void
+    @State private var snapshotBuilder = RootChromeSnapshotBuilder()
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
+            .allowsHitTesting(false)
+            .task {
+                if store.loadFailed {
+                    onToast(ToastItem(
+                        message: "Some saved data couldn't be read. The original was kept for recovery.",
+                        icon: "exclamationmark.triangle.fill"
+                    ))
+                } else if store.recoveredFromBackup {
+                    onToast(ToastItem(
+                        message: "Restored your notes from a backup.",
+                        icon: "arrow.clockwise"
+                    ))
+                }
+            }
+            .onChange(of: store.lastSaveFailed) { _, failed in
+                guard failed else { return }
+                onToast(ToastItem(
+                    message: "Couldn't save changes - your latest edits may not persist.",
+                    icon: "exclamationmark.triangle.fill"
+                ))
+            }
+            .task(id: store.revision) {
+                let expectedRevision = store.revision
+                try? await Task.sleep(for: .milliseconds(180))
+                guard !Task.isCancelled else { return }
+                let snapshot = await snapshotBuilder.make(from: store.meetings)
+                guard !Task.isCancelled, store.revision == expectedRevision else { return }
+                if openActionItemCount != snapshot.openActionItemCount {
+                    openActionItemCount = snapshot.openActionItemCount
+                }
+            }
+            .task(id: SpotlightRefreshKey(
+                revision: store.revision,
+                sceneIsActive: sceneIsActive
+            ), priority: .utility) {
+                guard sceneIsActive else { return }
+                let expectedRevision = store.revision
+                try? await Task.sleep(for: .seconds(5))
+                guard !Task.isCancelled, store.revision == expectedRevision else { return }
+                await SpotlightIndex.index(store.meetings)
+            }
+    }
+}
+
 /// Root tab shell. Five daily-use tabs: **Today** (briefing), **Library**
 /// (notes), **Tasks** (action items), **Calendar** (meeting schedule), and
 /// **Ask** (workspace-wide AI). Settings is a sheet from Today's toolbar.
@@ -24,7 +104,6 @@ struct ContentView: View {
     @State private var isPrivacyScreenVisible = false
     @State private var toast: ToastItem?
     @State private var toastDismissTask: Task<Void, Never>?
-    @State private var spotlightIndexTask: Task<Void, Never>?
     @State private var openActionItemCount = 0
     @StateObject private var pendingInbox = PendingCaptureInbox.shared
     @AppStorage(AppearancePreference.storageKey) private var appearanceRaw = AppearancePreference.system.rawValue
@@ -72,8 +151,6 @@ struct ContentView: View {
                 #else
                 selectedTab = RootTab(rawValue: lastRootTabRaw) ?? .home
                 #endif
-                selectedMeetingID = selectedMeetingID ?? store.recentMeetings.first?.id
-                refreshRootChromeSnapshot()
             }
 
             if isPrivacyScreenVisible {
@@ -96,6 +173,12 @@ struct ContentView: View {
                 .padding(.top, 60)
                 .allowsHitTesting(toast.actionTitle != nil)
             }
+
+            RootStoreMaintenanceObserver(
+                sceneIsActive: scenePhase == .active,
+                openActionItemCount: $openActionItemCount,
+                onToast: { toast = $0 }
+            )
         }
         .animation(AppMotion.fade, value: isPrivacyScreenVisible)
         .animation(AppMotion.bounce, value: toast != nil)
@@ -109,31 +192,6 @@ struct ContentView: View {
             } else {
                 Task { await store.flushPersistence() }
             }
-        }
-        .onChange(of: store.lastSaveFailed) { _, failed in
-            guard failed else { return }
-            toast = ToastItem(
-                message: "Couldn't save changes — your latest edits may not persist.",
-                icon: "exclamationmark.triangle.fill"
-            )
-        }
-        .task {
-            // Surface launch-time recovery so silent data loss is never silent.
-            if store.loadFailed {
-                toast = ToastItem(
-                    message: "Some saved data couldn't be read. The original was kept for recovery.",
-                    icon: "exclamationmark.triangle.fill"
-                )
-            } else if store.recoveredFromBackup {
-                toast = ToastItem(
-                    message: "Restored your notes from a backup.",
-                    icon: "arrow.clockwise"
-                )
-            }
-        }
-        .onChange(of: store.revision) { _, _ in
-            refreshRootChromeSnapshot()
-            scheduleSpotlightIndex()
         }
         .onChange(of: selectedTab) { _, tab in
             lastRootTabRaw = tab.rawValue
@@ -190,8 +248,6 @@ struct ContentView: View {
         .onDisappear {
             toastDismissTask?.cancel()
             toastDismissTask = nil
-            spotlightIndexTask?.cancel()
-            spotlightIndexTask = nil
         }
     }
 
@@ -366,27 +422,6 @@ struct ContentView: View {
         activateRootTab(.library)
         libraryPath = NavigationPath()
         libraryPath.append(meetingID)
-    }
-
-    private func refreshRootChromeSnapshot() {
-        openActionItemCount = store.meetings.reduce(0) { partial, meeting in
-            guard !meeting.isPersonalCapture else { return partial }
-            return partial + meeting.commitments.reduce(0) { total, commitment in
-                total + (commitment.status == .open || commitment.status == .atRisk ? 1 : 0)
-            }
-        }
-    }
-
-    private func scheduleSpotlightIndex() {
-        spotlightIndexTask?.cancel()
-        spotlightIndexTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(700))
-            guard !Task.isCancelled else { return }
-            let snapshot = store.meetings
-            await Task.detached(priority: .utility) {
-                SpotlightIndex.index(snapshot)
-            }.value
-        }
     }
 
     #if DEBUG

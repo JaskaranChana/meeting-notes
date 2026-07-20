@@ -463,7 +463,15 @@ private final class LegacyLiveSpeechSession: LiveSpeechTranscribing {
     }
 
     func updateContext(_ context: SpeechRecognitionContext) async {
+        let phrasesChanged = context.contextualPhrases != self.context.contextualPhrases
         self.context = context
+        guard phrasesChanged, !isCancelled, !isFinishing else { return }
+
+        // Legacy requests cannot update contextual strings in place. Rotate the
+        // request after the coordinator's debounce so newly entered names and
+        // terminology influence recognition immediately instead of waiting for
+        // the next 50-second long-session rotation.
+        replaceRecognitionSegment()
     }
 
     func cancel() {

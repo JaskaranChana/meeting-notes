@@ -1427,7 +1427,7 @@ struct SmartNotesPreview: View, Equatable {
 
                 if !decisions.isEmpty {
                     smartSection(icon: "checkmark.seal.fill", label: "Decisions", tint: AppPalette.accent)
-                    ForEach(decisions, id: \.self) { decision in
+                    ForEach(Array(decisions.enumerated()), id: \.offset) { _, decision in
                         smartBullet(decision, tint: AppPalette.accent)
                     }
                 }
