@@ -367,6 +367,7 @@ final class LiveMeetingCoordinator {
 
     func requestPermissions() async {
         let hasSpeechRecognizer: Bool
+        #if compiler(>=6.2)
         if #available(iOS 26.0, *), SpeechTranscriber.isAvailable {
             hasSpeechRecognizer = true
         } else {
@@ -374,6 +375,11 @@ final class LiveMeetingCoordinator {
                 locale: recognitionLocale
             ) != nil
         }
+        #else
+        hasSpeechRecognizer = SpeechRecognitionSupport.makeLegacyRecognizer(
+            locale: recognitionLocale
+        ) != nil
+        #endif
 
         let microphoneAllowed = await withCheckedContinuation { continuation in
             if #available(iOS 17.0, *) {
