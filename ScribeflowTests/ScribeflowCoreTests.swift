@@ -541,7 +541,14 @@ struct MeetingCopilotTests {
             "We decided to ship the pilot in Q3 across all teams",
             "I'll send the MSA over before end of day tomorrow"
         ]
-        let signals = MeetingCopilot.detect(paragraphs: paragraphs)
+        let signals = MeetingCopilot.detect(
+            paragraphs: paragraphs,
+            purpose: CapturePurpose(
+                kind: .meeting,
+                confidence: .verified,
+                evidence: [.userOverride]
+            )
+        )
         // Text is distilled and sentence-cased ("Ship the pilot"), so match
         // case-insensitively.
         #expect(signals.contains { $0.kind == .decision && $0.text.localizedCaseInsensitiveContains("ship the pilot") })
