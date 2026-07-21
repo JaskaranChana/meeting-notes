@@ -197,6 +197,13 @@ final class AudioSessionManager {
 // so that call audio is NOT interrupted. The difference is in mode/options.
 
 extension AudioSessionManager {
+    private static var bluetoothHandsFreeOption: AVAudioSession.CategoryOptions {
+        #if compiler(>=6.2)
+        .allowBluetoothHFP
+        #else
+        .allowBluetooth
+        #endif
+    }
 
     // Live meeting — microphone capture in a quiet room.
     // .measurement prevents system noise-reduction from degrading the signal.
@@ -208,7 +215,7 @@ extension AudioSessionManager {
             mode: .measurement,
             options: [
                 .allowBluetoothA2DP,   // AirPods, stereo BT
-                .allowBluetoothHFP,    // HFP profile mics
+                Self.bluetoothHandsFreeOption,
                 .defaultToSpeaker,
                 .mixWithOthers         // don't kill music or phone call audio
             ]
@@ -224,7 +231,7 @@ extension AudioSessionManager {
             mode: .measurement,
             options: [
                 .allowBluetoothA2DP,
-                .allowBluetoothHFP,
+                Self.bluetoothHandsFreeOption,
                 .mixWithOthers
             ]
         )
