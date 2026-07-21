@@ -939,9 +939,7 @@ struct RootTabBar: View {
                 Capsule(style: .continuous)
                     .fill(
                         LinearGradient(
-                            colors: isSelected
-                                ? [Color.white.opacity(0.24), Color.white.opacity(0.05), Color.black.opacity(0.12)]
-                                : [Color.white.opacity(0.58), AppPalette.accentSoft.opacity(0.34), AppPalette.paper.opacity(0.92)],
+                            colors: todayButtonSheenColors(isSelected: isSelected),
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
@@ -949,9 +947,24 @@ struct RootTabBar: View {
             }
             .overlay {
                 Capsule(style: .continuous)
-                    .strokeBorder(isSelected ? Color.white.opacity(0.22) : AppPalette.accent.opacity(0.16), lineWidth: 0.8)
+                    .strokeBorder(
+                        isSelected
+                            ? Color.white.opacity(0.22)
+                            : AppPalette.accent.opacity(colorScheme == .dark ? 0.28 : 0.16),
+                        lineWidth: 0.8
+                    )
             }
             .shadow(color: AppPalette.accent.opacity(isSelected ? 0.20 : 0.09), radius: 10, y: 5)
+    }
+
+    private func todayButtonSheenColors(isSelected: Bool) -> [Color] {
+        if isSelected {
+            return [Color.white.opacity(0.24), Color.white.opacity(0.05), Color.black.opacity(0.12)]
+        }
+        if colorScheme == .dark {
+            return [Color.white.opacity(0.08), AppPalette.accentSoft.opacity(0.24), AppPalette.paper.opacity(0.88)]
+        }
+        return [Color.white.opacity(0.58), AppPalette.accentSoft.opacity(0.34), AppPalette.paper.opacity(0.92)]
     }
 
     private var selectedPillSheen: some View {

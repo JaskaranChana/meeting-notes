@@ -430,8 +430,12 @@ struct ContentView: View {
     @ViewBuilder
     private func qaRoot(for route: AppQARoute) -> some View {
         switch route {
-        case .home, .library, .calendar, .ask:
+        case .home, .library, .tasks, .calendar, .ask:
             mainTabs
+        case .settings:
+            NavigationStack {
+                SettingsView(showsDoneButton: false)
+            }
         case .quickNote:
             CaptureView(initialMode: .type, selectedMeetingID: $selectedMeetingID, toast: $toast)
         case .meetingDetail:
@@ -488,8 +492,10 @@ private struct CaptureModeWrapper: Identifiable {
 private enum AppQARoute: String {
     case home
     case library
+    case tasks
     case calendar
     case ask
+    case settings
     case quickNote
     case meetingDetail
     case liveCapture
@@ -504,6 +510,8 @@ private enum AppQARoute: String {
         switch self {
         case .library:
             return .library
+        case .tasks:
+            return .tasks
         case .calendar:
             return .calendar
         case .ask:

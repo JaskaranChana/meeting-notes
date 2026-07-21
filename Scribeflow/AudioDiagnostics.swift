@@ -430,7 +430,7 @@ struct AudioDiagnosticsView: View {
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 14)
-                    .background(AppPalette.ink, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .background(AppPalette.inkButton, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
             .buttonStyle(PressScaleButtonStyle(scale: 0.97))
         default:

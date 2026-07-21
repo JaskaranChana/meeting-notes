@@ -4,6 +4,7 @@ import SwiftUI
 
 private struct ShimmerModifier: ViewModifier {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
     @State private var phase: CGFloat = -1
 
     func body(content: Content) -> some View {
@@ -22,8 +23,8 @@ private struct ShimmerModifier: ViewModifier {
                 LinearGradient(
                     stops: [
                         .init(color: .clear, location: 0),
-                        .init(color: .white.opacity(0.52), location: 0.45),
-                        .init(color: .white.opacity(0.52), location: 0.55),
+                        .init(color: shimmerTint, location: 0.45),
+                        .init(color: shimmerTint, location: 0.55),
                         .init(color: .clear, location: 1),
                     ],
                     startPoint: .leading,
@@ -35,6 +36,10 @@ private struct ShimmerModifier: ViewModifier {
             }
         }
         .clipped()
+    }
+
+    private var shimmerTint: Color {
+        Color.white.opacity(colorScheme == .dark ? 0.16 : 0.52)
     }
 }
 

@@ -256,7 +256,11 @@ struct MeetingCalendarView: View {
                         .frame(width: 54, height: 76)
                         .background(
                             RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
-                                .fill(day.isSelected ? AppPalette.ink : AppPalette.cardBackground)
+                                .fill(
+                                    day.isSelected
+                                        ? AnyShapeStyle(AppPalette.inkButton)
+                                        : AnyShapeStyle(AppPalette.cardBackground)
+                                )
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: AppRadius.lg, style: .continuous)
@@ -1416,7 +1420,10 @@ private struct MeetingCalendarDayCell: View {
         }
         .frame(maxWidth: .infinity)
         .aspectRatio(1, contentMode: .fit)
-        .background(background)
+        .background {
+            RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous)
+                .fill(background)
+        }
         .overlay(
             RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous)
                 .strokeBorder(border, lineWidth: day.isToday || day.isSelected ? 1.1 : 0.7)
@@ -1432,7 +1439,7 @@ private struct MeetingCalendarDayCell: View {
 
     private var background: some ShapeStyle {
         if day.isSelected {
-            return AnyShapeStyle(AppPalette.ink)
+            return AnyShapeStyle(AppPalette.inkButton)
         }
         if day.isToday {
             return AnyShapeStyle(AppPalette.accent.opacity(0.12))
@@ -1444,7 +1451,7 @@ private struct MeetingCalendarDayCell: View {
     }
 
     private var border: Color {
-        if day.isSelected { return AppPalette.ink }
+        if day.isSelected { return AppPalette.accent.opacity(0.55) }
         if day.isToday { return AppPalette.accent.opacity(0.45) }
         return AppPalette.border.opacity(day.noteCount > 0 || day.eventCount > 0 ? 0.55 : 0.22)
     }
@@ -1474,7 +1481,12 @@ private struct MeetingCalendarAgendaDayRow: View {
                     .foregroundStyle(isSelected ? .white.opacity(0.72) : AppPalette.tertiaryInk)
             }
             .frame(width: 48, height: 54)
-            .background(isSelected ? AppPalette.ink : AppPalette.softSurface, in: RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous))
+            .background(
+                isSelected
+                    ? AnyShapeStyle(AppPalette.inkButton)
+                    : AnyShapeStyle(AppPalette.softSurface),
+                in: RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous)
+            )
 
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 6) {

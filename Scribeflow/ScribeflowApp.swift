@@ -243,7 +243,7 @@ private struct LaunchOnboardingView: View {
             }
 
             if showCompletionPulse {
-                Color.white.opacity(0.45)
+                AppPalette.accent.opacity(0.20)
                     .ignoresSafeArea()
                     .transition(.opacity)
             }

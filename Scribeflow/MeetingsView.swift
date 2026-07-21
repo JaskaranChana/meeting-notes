@@ -244,7 +244,11 @@ struct MeetingsView: View {
                         .padding(.vertical, 7)
                         .frame(minHeight: AppLayout.minimumTapTarget)
                         .background(
-                            Capsule().fill(segment == seg ? AppPalette.ink : AppPalette.softSurface)
+                            Capsule().fill(
+                                segment == seg
+                                    ? AnyShapeStyle(AppPalette.inkButton)
+                                    : AnyShapeStyle(AppPalette.softSurface)
+                            )
                         )
                         .overlay(
                             Capsule().strokeBorder(segment == seg ? .clear : AppPalette.border.opacity(0.6), lineWidth: 0.8)
@@ -339,7 +343,7 @@ struct MeetingsView: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 14)
                 .frame(minHeight: 44)
-                .background(AppPalette.ink, in: Capsule())
+                .background(AppPalette.inkButton, in: Capsule())
         }
         .buttonStyle(PressScaleButtonStyle(scale: 0.94))
         .accessibilityLabel("Ask across your library")

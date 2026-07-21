@@ -241,7 +241,7 @@ struct VoiceRecorderView: View {
             Button {
                 Task { await viewModel.stopAndTranscribe() }
             } label: {
-                controlLabel("Finish", icon: "checkmark", tint: AppPalette.ink)
+                controlLabel("Finish", icon: "checkmark", tint: AppPalette.dockBackground)
             }
             .buttonStyle(.plain)
         } else if viewModel.phase == .processing {
