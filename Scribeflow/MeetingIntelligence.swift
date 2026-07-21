@@ -1026,7 +1026,7 @@ enum MeetingIntelligenceEngine {
             return "Decision captured: \(lowerFirst(decision))"
         }
         if let action = actions.first {
-            return "Follow-through needed: \(lowerFirst(action))"
+            return "Follow-up needed: \(lowerFirst(action))"
         }
         if let question = questions.first {
             return "Open question: \(lowerFirst(question))"

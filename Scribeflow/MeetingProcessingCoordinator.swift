@@ -17,6 +17,7 @@ struct PendingMeetingRecoveryPayload: Codable, Hashable, Sendable {
     var durationMinutes: Int
     var durationSeconds: Int? = nil
     var selectedTemplate: NoteTemplate
+    var purposeOverride: CapturePurposeKind? = nil
     var meetingMode: MeetingMode
     var consentState: ConsentState
     var retentionPolicy: RetentionPolicy

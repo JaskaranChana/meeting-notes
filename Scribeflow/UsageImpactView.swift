@@ -260,7 +260,7 @@ struct UsageImpactView: View {
                 tint: AppPalette.success
             )
             ImpactMetricCard(
-                title: "Follow-through",
+                title: "Task progress",
                 value: snapshot.followThroughLabel,
                 detail: "Closed vs active loops",
                 icon: "arrow.triangle.2.circlepath",
@@ -308,9 +308,9 @@ struct UsageImpactView: View {
             Text("Accountability")
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(AppPalette.ink)
-            impactLine("Open loops", value: "\(snapshot.openLoops)", tint: AppPalette.coral)
+            impactLine("Open tasks", value: "\(snapshot.openLoops)", tint: AppPalette.coral)
             impactLine("Skipped loops", value: "\(snapshot.skippedLoops)", tint: AppPalette.secondaryInk)
-            impactLine("Source-backed items", value: "\(snapshot.sourceBackedItems)", tint: AppPalette.accent)
+            impactLine("Verified items", value: "\(snapshot.sourceBackedItems)", tint: AppPalette.accent)
             impactLine("Active capture days", value: "\(snapshot.activeDays)", tint: AppPalette.gold)
         }
     }

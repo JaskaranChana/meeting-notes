@@ -420,7 +420,7 @@ struct TodayView: View {
                 .background(AppPalette.accent.opacity(0.12), in: Circle())
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("Investor demo mode")
+                Text("Presentation mode")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(AppPalette.ink)
                 Text("Curated workspace is loaded for a repeatable walkthrough.")
@@ -580,14 +580,14 @@ struct TodayView: View {
                 if dynamicTypeSize.isAccessibilitySize {
                     VStack(alignment: .leading, spacing: 10) {
                         briefStat("\(weekMeetingCount)", weekMeetingCount == 1 ? "meeting" : "meetings")
-                        briefStat("\(followThroughPct)%", "follow-through")
+                        briefStat("\(followThroughPct)%", "tasks done")
                         allTasksButton
                     }
                 } else {
                     HStack(spacing: 8) {
                         briefStat("\(weekMeetingCount)", weekMeetingCount == 1 ? "meeting" : "meetings")
                         Circle().fill(AppPalette.tertiaryInk.opacity(0.5)).frame(width: 3, height: 3)
-                        briefStat("\(followThroughPct)%", "follow-through")
+                        briefStat("\(followThroughPct)%", "tasks done")
                         if followThroughPct >= 60 {
                             Image(systemName: "arrow.up.right")
                                 .font(.caption2.weight(.bold))
@@ -2881,7 +2881,7 @@ private struct DonePreview: View {
         ("waveform.badge.mic", "Capture meetings", AppPalette.accent),
         ("sparkles", "Notes write themselves", AppPalette.gold),
         ("quote.bubble.fill", "Ask across every meeting", AppPalette.success),
-        ("checkmark.seal.fill", "Action turns into follow-through", AppPalette.coral)
+        ("checkmark.seal.fill", "Tasks stay visible until done", AppPalette.coral)
     ]
 
     var body: some View {
@@ -3945,14 +3945,14 @@ private struct EditorialInbox: View {
     var body: some View {
         let visible = Array(loops.prefix(3))
         VStack(alignment: .leading, spacing: 6) {
-            EditorialSectionHead(title: "Inbox") {
+            EditorialSectionHead(title: "Open tasks") {
                 if total > visible.count {
                     Button { HapticEngine.tap(.light); onSeeAll() } label: {
                         EditorialMeta(text: "\(total) open", tint: AppPalette.accent)
                     }
                     .buttonStyle(.plain)
                 } else {
-                    EditorialMeta(text: "\(total) open \(total == 1 ? "loop" : "loops")")
+                    EditorialMeta(text: "\(total) open")
                 }
             }
             VStack(spacing: 0) {
@@ -4355,7 +4355,7 @@ private struct HeroFocus: View {
 
     private var progress: Double { min(1.0, Double(model.streak) / 7.0) }
     private var focusLine: String {
-        if model.open > 0 { return "Clear \(model.open) open loop\(model.open == 1 ? "" : "s")" }
+        if model.open > 0 { return "Review \(model.open) open task\(model.open == 1 ? "" : "s")" }
         if model.today > 0 { return "\(model.today) captured today" }
         return "Capture your first note"
     }

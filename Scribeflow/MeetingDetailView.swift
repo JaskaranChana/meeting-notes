@@ -258,6 +258,20 @@ struct MeetingDetailView: View {
         nonmutating set { preferredRewriteStyleRaw = newValue.rawValue }
     }
 
+    private func availableExportFormats(for meeting: Meeting) -> [MeetingExportFormat] {
+        resolvedPurpose(for: meeting).allowsAccountabilityExtraction
+            ? MeetingExportFormat.allCases
+            : [.internalBrief, .markdown]
+    }
+
+    private func exportFormatTitle(_ format: MeetingExportFormat, for meeting: Meeting) -> String {
+        if !resolvedPurpose(for: meeting).allowsAccountabilityExtraction,
+           format == .internalBrief {
+            return "Clean note"
+        }
+        return format.title
+    }
+
     var body: some View {
         Group {
             if let meeting {
@@ -942,7 +956,7 @@ struct MeetingDetailView: View {
 
             Label(
                 report.speakerDetection.detectedCount == 0
-                    ? "No speaker labels"
+                    ? "Speakers not identified"
                     : "\(report.speakerDetection.detectedCount) speaker label\(report.speakerDetection.detectedCount == 1 ? "" : "s")",
                 systemImage: "person.wave.2"
             )
@@ -1007,7 +1021,7 @@ struct MeetingDetailView: View {
         } else if purpose.confidence == .conservative {
             heading = "Review: \(purpose.displayTitle)"
         } else {
-            heading = "Understood as \(purpose.displayTitle)"
+            heading = purpose.displayTitle
         }
 
         var detailParts: [String] = []
@@ -1521,15 +1535,15 @@ struct MeetingDetailView: View {
         let title = isProcessing ? "Draft transcript" : "Transcript ready"
         let detail: String
         if isProcessing {
-            detail = "Audio secured · wording and speaker labels may update"
+            detail = "Audio saved · wording and speaker names may improve"
         } else if voiceCount > 1 {
-            detail = "\(voiceCount) speaker labels detected · review names before sharing"
+            detail = "\(voiceCount) speakers detected · review names before sharing"
         } else if voiceCount == 1 {
             detail = resolvedPurpose(for: meeting).isPersonalCapture
                 ? "Single voice detected · label can be renamed"
                 : "1 speaker label detected · review if others spoke"
         } else {
-            detail = "No speaker labels detected · transcript remains searchable"
+            detail = "Speakers not identified · transcript remains searchable"
         }
 
         return HStack(spacing: 12) {
@@ -2073,7 +2087,7 @@ struct MeetingDetailView: View {
         if detectedVoices > 0 {
             parts.append("\(detectedVoices) voice\(detectedVoices == 1 ? "" : "s")")
         } else if !meeting.attendees.isEmpty {
-            parts.append("\(meeting.attendees.count) people listed")
+            parts.append("\(meeting.attendees.count) participant\(meeting.attendees.count == 1 ? "" : "s")")
         }
         if words > 0 { parts.append("\(words) words") }
         return parts.joined(separator: " · ")
@@ -2552,7 +2566,7 @@ struct MeetingDetailView: View {
                             .font(.footnote.weight(.semibold))
                             .foregroundStyle(AppPalette.secondaryInk)
                         Spacer()
-                        Text(exportFormat.title)
+                        Text(exportFormatTitle(exportFormat, for: meeting))
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(AppPalette.accent)
                             .padding(.horizontal, 8)
@@ -2585,8 +2599,8 @@ struct MeetingDetailView: View {
                             .foregroundStyle(AppPalette.secondaryInk)
 
                         Picker("Share format", selection: $exportFormat) {
-                            ForEach(MeetingExportFormat.allCases) { format in
-                                Text(format.title).tag(format)
+                            ForEach(availableExportFormats(for: meeting)) { format in
+                                Text(exportFormatTitle(format, for: meeting)).tag(format)
                             }
                         }
                         .pickerStyle(.segmented)
@@ -3093,7 +3107,7 @@ struct MeetingDetailView: View {
         return SurfaceCard(
             title: allowsAccountability ? "Commitments" : "Personal note",
             subtitle: allowsAccountability
-                ? "Track promises, owners, timing, and whether follow-through is still at risk."
+                ? "Track promises, owners, timing, and anything that still needs attention."
                 : "Personal captures stay as notes unless you move them into a meeting context."
         ) {
             VStack(alignment: .leading, spacing: 12) {

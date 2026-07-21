@@ -157,7 +157,7 @@ struct MeetingCalendarView: View {
                         EditorialRule()
                         calendarStat("\(visibleEventCount)", "events", AppPalette.gold)
                         EditorialRule()
-                        calendarStat("\(snapshot.selectedOpenLoopCount)", "day open", AppPalette.coral)
+                        calendarStat("\(snapshot.selectedOpenLoopCount)", "open tasks", AppPalette.coral)
                     }
                 } else {
                     HStack(spacing: 0) {
@@ -165,7 +165,7 @@ struct MeetingCalendarView: View {
                         calendarRule
                         calendarStat("\(visibleEventCount)", "events", AppPalette.gold)
                         calendarRule
-                        calendarStat("\(snapshot.selectedOpenLoopCount)", "day open", AppPalette.coral)
+                        calendarStat("\(snapshot.selectedOpenLoopCount)", "open tasks", AppPalette.coral)
                     }
                 }
             }
@@ -282,7 +282,7 @@ struct MeetingCalendarView: View {
             HStack(spacing: 8) {
                 legendChip("Notes", tint: AppPalette.accent)
                 legendChip("Events", tint: AppPalette.gold)
-                legendChip("Open loops", tint: AppPalette.coral)
+                legendChip("Tasks", tint: AppPalette.coral)
             }
         }
     }
@@ -541,7 +541,7 @@ struct MeetingCalendarView: View {
             } else {
                 VStack(alignment: .leading, spacing: 10) {
                     if !meetings.isEmpty {
-                        agendaSectionTitle(calendarFilter == .openLoops ? "Open-loop notes" : "Scribeflow notes", count: meetings.count)
+                        agendaSectionTitle(calendarFilter == .openLoops ? "Notes with tasks" : "Scribeflow notes", count: meetings.count)
                         ForEach(meetings) { meeting in
                             NavigationLink(value: meeting.id) {
                                 MeetingCalendarMeetingRow(
@@ -607,7 +607,7 @@ struct MeetingCalendarView: View {
         case .events:
             "No connected calendar events match this date yet."
         case .openLoops:
-            "No open action loops are attached to this date."
+            "No open tasks are attached to this date."
         }
     }
 
@@ -948,7 +948,7 @@ private enum CalendarContentFilter: String, CaseIterable, Identifiable {
         case .all: "All"
         case .notes: "Notes"
         case .events: "Events"
-        case .openLoops: "Open loops"
+        case .openLoops: "Tasks"
         }
     }
 
@@ -1338,7 +1338,7 @@ private struct MeetingCalendarDayDetailView: View {
                     )
                 } else {
                     if !meetings.isEmpty {
-                        EditorialSectionHead(title: filter == .openLoops ? "Open-loop notes" : "Scribeflow notes", titleSize: 20)
+                        EditorialSectionHead(title: filter == .openLoops ? "Notes with tasks" : "Scribeflow notes", titleSize: 20)
                         ForEach(meetings) { meeting in
                             NavigationLink(value: meeting.id) {
                                 MeetingCalendarMeetingRow(

@@ -506,7 +506,7 @@ struct AskView: View {
                             let status = AIIntelligenceStatus.current
                             HStack(spacing: 4) {
                                 Image(systemName: status.systemImage).font(.caption2.weight(.bold))
-                                Text(status.isOnDevice ? "Apple Intelligence" : "Basic mode · keyword match")
+                                Text(status.isOnDevice ? "On-device AI" : "On-device search")
                                     .font(.caption2.weight(.semibold))
                                 Text("· \(turn.askedAt.formatted(date: .omitted, time: .shortened))")
                                     .font(.caption2.weight(.semibold))

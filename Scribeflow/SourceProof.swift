@@ -13,7 +13,7 @@ enum SourceProofConfidence: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .confirmed: "Direct source"
         case .likely: "Partial match"
-        case .inferred: "Context only"
+        case .inferred: "Inferred"
         case .needsReview: "Needs review"
         }
     }

@@ -1310,7 +1310,7 @@ final class MeetingStore {
         if followUpCount > 0 {
             signals.append(
                 WorkspaceSignal(
-                    title: "Open follow-through",
+                    title: "Open tasks",
                     detail: "\(followUpCount) meeting\(followUpCount == 1 ? "" : "s") still \(followUpCount == 1 ? "needs" : "need") a next move.",
                     systemImage: "checklist.checked"
                 )
@@ -3072,7 +3072,8 @@ final class MeetingStore {
         calendarEndDate: Date? = nil,
         selectedTemplate: NoteTemplate = .general,
         shouldScheduleAIProcessing: Bool = true,
-        shouldScheduleDerivedProcessing: Bool = true
+        shouldScheduleDerivedProcessing: Bool = true,
+        purposeOverride: CapturePurposeKind? = nil
     ) -> Meeting.ID {
         let normalizedAttendees = attendees.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         var meeting = Meeting(
@@ -3100,6 +3101,7 @@ final class MeetingStore {
             retentionPolicy: retentionPolicy,
             transcriptVisibilityEnabled: transcript.isEmpty == false,
             audioRecordings: audioRecordings,
+            purposeOverride: purposeOverride,
             calendarEventID: calendarEventID,
             calendarStartDate: calendarStartDate,
             calendarEndDate: calendarEndDate
@@ -3258,6 +3260,7 @@ final class MeetingStore {
         when: Date = .now,
         durationMinutes: Int,
         selectedTemplate: NoteTemplate,
+        purposeOverride: CapturePurposeKind? = nil,
         meetingMode: MeetingMode,
         consentState: ConsentState,
         retentionPolicy: RetentionPolicy,
@@ -3304,7 +3307,8 @@ final class MeetingStore {
             calendarStartDate: calendarStartDate,
             calendarEndDate: calendarEndDate,
             selectedTemplate: selectedTemplate,
-            shouldScheduleAIProcessing: false
+            shouldScheduleAIProcessing: false,
+            purposeOverride: purposeOverride
         )
         return (meetingID, pendingNotes)
     }
@@ -3331,6 +3335,7 @@ final class MeetingStore {
             when: recovery.capturedAt,
             durationMinutes: recovery.durationMinutes,
             selectedTemplate: recovery.selectedTemplate,
+            purposeOverride: recovery.purposeOverride,
             meetingMode: recovery.meetingMode,
             consentState: recovery.consentState,
             retentionPolicy: recovery.retentionPolicy,
@@ -4334,7 +4339,7 @@ final class MeetingStore {
                 sections: sections("Decisions", "Next steps", "Key points"))),
             TemplateSummary(template: .exec, summary: MeetingSummary(
                 eyebrow: "Exec view", title: "Quick readout for \(meeting.workspace).",
-                sections: sections("What was decided", "Owns the follow-through", "Context"))),
+                sections: sections("What was decided", "Next steps and owners", "Context"))),
             TemplateSummary(template: .manager, summary: MeetingSummary(
                 eyebrow: "Coach angle", title: "Turn this capture into coaching and accountability.",
                 sections: sections("Decisions to reinforce", "Hold owners to", "Observed"))),
@@ -5042,33 +5047,45 @@ final class MeetingStore {
             ? "- No safe bullets available yet."
             : noteLines.prefix(format == .execUpdate ? 4 : 6).joined(separator: "\n")
 
-        let commitmentsBlock = meeting.allowsAccountabilityExtraction
+        let hasAccountability = meeting.allowsAccountabilityExtraction
+        let commitmentsBlock = hasAccountability
             ? meeting.commitments
                 .filter { $0.status != .superseded || format != .clientRecap }
                 .prefix(4)
                 .map { "- \($0.formattedLine)" }
                 .joined(separator: "\n")
             : ""
-        let emptyCommitmentsLine = meeting.allowsAccountabilityExtraction
-            ? "- No commitments captured."
-            : "- Personal note. No meeting tasks were extracted."
-        let emptyNextStepsLine = meeting.allowsAccountabilityExtraction
-            ? "- We'll confirm the next step in writing."
-            : "- Personal note. No client next steps were extracted."
-        let emptyFollowThroughLine = meeting.allowsAccountabilityExtraction
-            ? "- No executive follow-through captured yet."
-            : "- Personal note. No meeting follow-through was extracted."
-        let emptyActionItemsLine = meeting.allowsAccountabilityExtraction
-            ? "- No action items captured."
-            : "- Personal note. No action items were extracted."
+        let internalTasksSection = hasAccountability
+            ? "\nCommitments:\n\(commitmentsBlock.isEmpty ? "- No commitments captured." : commitmentsBlock)"
+            : ""
+        let clientTasksSection = hasAccountability
+            ? "\nNext steps:\n\(commitmentsBlock.isEmpty ? "- We'll confirm the next step in writing." : commitmentsBlock)"
+            : ""
+        let executiveTasksSection = hasAccountability
+            ? "\nNext steps:\n\(commitmentsBlock.isEmpty ? "- No executive next steps captured yet." : commitmentsBlock)"
+            : ""
+        let markdownTasksSection = hasAccountability
+            ? "\n## Action items\n\n\(commitmentsBlock.isEmpty ? "- No action items captured." : commitmentsBlock)"
+            : ""
 
         let transcriptBlock = includeTranscript
             ? meeting.transcript.prefix(3).map { "- \($0.speaker): \($0.text)" }.joined(separator: "\n")
             : ""
 
-        let privateNoteFooter = includePrivateNotes
+        let privateNoteFooter = includePrivateNotes && !meeting.sensitiveFlags.isEmpty
             ? "\nInternal flags: \(meeting.sensitiveFlags.map(\.title).joined(separator: ", "))"
             : ""
+
+        if !hasAccountability, format == .internalBrief {
+            var sections = [meeting.title]
+            let objective = meeting.objective.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !objective.isEmpty { sections.append(objective) }
+            sections.append(notesBlock + privateNoteFooter)
+            if !transcriptBlock.isEmpty {
+                sections.append("Transcript context:\n\(transcriptBlock)")
+            }
+            return sections.joined(separator: "\n\n")
+        }
 
         switch format {
         case .internalBrief:
@@ -5079,10 +5096,7 @@ final class MeetingStore {
             Consent: \(meeting.consentState.title)
 
             What happened:
-            \(notesBlock)
-
-            Commitments:
-            \(commitmentsBlock.isEmpty ? emptyCommitmentsLine : commitmentsBlock)\(privateNoteFooter)
+            \(notesBlock)\(internalTasksSection)\(privateNoteFooter)
             \(transcriptBlock.isEmpty ? "" : "\nTranscript context:\n\(transcriptBlock)")
             """
         case .clientRecap:
@@ -5093,10 +5107,7 @@ final class MeetingStore {
 
             Thanks again for the conversation. Here’s the clean recap:
 
-            \(notesBlock)
-
-            Next steps:
-            \(commitmentsBlock.isEmpty ? emptyNextStepsLine : commitmentsBlock)
+            \(notesBlock)\(clientTasksSection)
 
             Best,
             """
@@ -5107,14 +5118,16 @@ final class MeetingStore {
             \(meeting.summary(for: .exec).title)
 
             Decisions and signals:
-            \(notesBlock)
-
-            Follow-through:
-            \(commitmentsBlock.isEmpty ? emptyFollowThroughLine : commitmentsBlock)
+            \(notesBlock)\(executiveTasksSection)
             """
         case .markdown:
             let dateLine = ISO8601DateFormatter().string(from: meeting.when)
-            let attendeesLine = meeting.attendees.isEmpty ? "" : "**Attendees:** \(meeting.attendees.joined(separator: ", "))\n"
+            let visibleAttendees = meeting.attendees.filter {
+                !["you", "me"].contains($0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+            }
+            let attendeesLine = visibleAttendees.isEmpty ? "" : "**Attendees:** \(visibleAttendees.joined(separator: ", "))\n"
+            let objective = meeting.objective.trimmingCharacters(in: .whitespacesAndNewlines)
+            let objectiveLine = objective.isEmpty ? "" : "**About:** \(objective)\n"
             let transcriptSection = includeTranscript && !meeting.transcript.isEmpty
                 ? "\n## Transcript\n\n" + meeting.transcript.map { "**\($0.speaker):** \($0.text)" }.joined(separator: "\n\n")
                 : ""
@@ -5122,15 +5135,11 @@ final class MeetingStore {
             # \(meeting.title)
 
             \(attendeesLine)**Date:** \(dateLine)
-            **Objective:** \(meeting.objective)
+            \(objectiveLine)
 
             ## Notes
 
-            \(notesBlock)
-
-            ## Action items
-
-            \(commitmentsBlock.isEmpty ? emptyActionItemsLine : commitmentsBlock)\(transcriptSection)
+            \(notesBlock)\(markdownTasksSection)\(transcriptSection)
             """
         }
     }

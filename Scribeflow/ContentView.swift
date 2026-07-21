@@ -9,6 +9,7 @@ private actor RootChromeSnapshotBuilder {
     func make(from meetings: [Meeting]) -> RootChromeSnapshot {
         RootChromeSnapshot(
             openActionItemCount: meetings.reduce(0) { partial, meeting in
+                guard meeting.allowsAccountabilityExtraction else { return partial }
                 return partial + meeting.commitments.reduce(0) { total, commitment in
                     total + (commitment.status == .open || commitment.status == .atRisk ? 1 : 0)
                 }

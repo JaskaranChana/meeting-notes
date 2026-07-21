@@ -194,6 +194,8 @@ final class LiveMeetingCoordinator {
     var permissionState: CapturePermissionState = .unknown
     var recognitionLocaleIdentifier = SpeechRecognitionSupport.selectedLocaleIdentifier
     var expectedSpeakerCount: Int?
+    var purposeOverride: CapturePurposeKind? { didSet { refreshPurposeUnderstanding() } }
+    var hasCalendarContext = false { didSet { refreshPurposeUnderstanding() } }
     var isRecording = false
     var isPaused = false
     var errorMessage: String?
@@ -673,7 +675,7 @@ final class LiveMeetingCoordinator {
             return speaker.isEmpty ? nil : speaker
         }).count
 
-        currentPurpose = MeetingPurposeClassifier.standard.classifyCapture(
+        let inferredPurpose = MeetingPurposeClassifier.standard.classifyCapture(
             title: title,
             workspace: workspace,
             objective: objective,
@@ -681,8 +683,25 @@ final class LiveMeetingCoordinator {
             notes: manualNotes,
             transcriptParagraphs: Array(transcriptParagraphs.suffix(40)),
             distinctSpeakerCount: speakerCount,
+            hasCalendarContext: hasCalendarContext,
             meetingMode: meetingMode,
             consentState: consentState
+        )
+
+        guard let purposeOverride else {
+            currentPurpose = inferredPurpose
+            return
+        }
+
+        let domain = purposeOverride.allowsMeetingSignals
+            ? "Work"
+            : (inferredPurpose.domain ?? (purposeOverride == .learning ? "Education" : "Personal"))
+        currentPurpose = CapturePurpose(
+            kind: purposeOverride,
+            confidence: .verified,
+            evidence: [.userOverride],
+            topic: inferredPurpose.topic,
+            domain: domain
         )
     }
 
@@ -730,6 +749,7 @@ final class LiveMeetingCoordinator {
         let capturedParagraphs = transcriptParagraphs
         let capturedSegments = transcriptSegments
         let capturedTemplate = selectedTemplate
+        let capturedPurposeOverride = purposeOverride
         let capturedMeetingMode = meetingMode
         let capturedConsentState = consentState
         let capturedRetentionPolicy = retentionPolicy
@@ -760,6 +780,7 @@ final class LiveMeetingCoordinator {
                 when: capturedAt,
                 durationMinutes: durationMinutes,
                 selectedTemplate: capturedTemplate,
+                purposeOverride: capturedPurposeOverride,
                 meetingMode: capturedMeetingMode,
                 consentState: capturedConsentState,
                 retentionPolicy: capturedRetentionPolicy,
@@ -839,6 +860,7 @@ final class LiveMeetingCoordinator {
                     durationMinutes: durationMinutes,
                     durationSeconds: capturedDurationSeconds,
                     selectedTemplate: capturedTemplate,
+                    purposeOverride: capturedPurposeOverride,
                     meetingMode: capturedMeetingMode,
                     consentState: capturedConsentState,
                     retentionPolicy: capturedRetentionPolicy,
@@ -896,7 +918,8 @@ final class LiveMeetingCoordinator {
             retentionPolicy: capturedRetentionPolicy,
             calendarEventID: calendarEvent?.id,
             calendarStartDate: calendarEvent?.startDate,
-            calendarEndDate: calendarEvent?.endDate
+            calendarEndDate: calendarEvent?.endDate,
+            purposeOverride: capturedPurposeOverride
         )
         store.selectTemplate(capturedTemplate, for: id)
         return id
@@ -1112,7 +1135,7 @@ final class LiveMeetingCoordinator {
             attendees: participantNames,
             notes: manualNotes,
             templateTitle: selectedTemplate.title,
-            templateGuidance: "\(selectedTemplate.description) \(selectedTemplate.aiHint)",
+            templateGuidance: "Capture type: \(currentPurpose.displayTitle). \(selectedTemplate.description) \(selectedTemplate.aiHint)",
             vocabulary: includeLiveVocabulary ? finalPassVocabulary : [],
             localeIdentifier: recognitionLocale.identifier,
             expectedSpeakerCount: expectedSpeakerCount

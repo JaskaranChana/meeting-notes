@@ -628,7 +628,7 @@ struct FolderDetailView: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(AppPalette.ink)
                 Spacer(minLength: 8)
-                Text("Source-linked")
+                Text("Uses your notes")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(AppPalette.accent)
             }
