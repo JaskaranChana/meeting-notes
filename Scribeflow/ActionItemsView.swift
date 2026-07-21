@@ -654,7 +654,11 @@ struct ActionItemsView: View {
                         .frame(minHeight: AppLayout.minimumTapTarget)
                         .background(
                             Capsule()
-                                .fill(filter == mode ? AppPalette.ink : AppPalette.softSurface)
+                                .fill(
+                                    filter == mode
+                                        ? AnyShapeStyle(AppPalette.inkButton)
+                                        : AnyShapeStyle(AppPalette.softSurface)
+                                )
                         )
                         .overlay(
                             Capsule()

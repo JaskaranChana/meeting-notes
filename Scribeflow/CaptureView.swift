@@ -24,6 +24,7 @@ struct CaptureView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
     @Binding var selectedMeetingID: Meeting.ID?
     @Binding var toast: ToastItem?
 
@@ -280,7 +281,7 @@ struct CaptureView: View {
                 "",
                 text: $coordinator.title,
                 prompt: Text(mode == .record ? "Capture title" : "Note title")
-                    .foregroundStyle(AppPalette.ink.opacity(0.42))
+                    .foregroundStyle(AppPalette.ink.opacity(colorScheme == .dark ? 0.58 : 0.42))
             )
             .scaledFont(size: 28, weight: .medium, design: .serif, relativeTo: .title)
             .foregroundStyle(AppPalette.ink)
@@ -289,9 +290,9 @@ struct CaptureView: View {
             HStack(alignment: .top, spacing: 8) {
                 TextField(
                     "",
-                    text: $coordinator.objective,
-                    prompt: Text("What is this about?")
-                        .foregroundStyle(AppPalette.secondaryInk.opacity(0.55)),
+                text: $coordinator.objective,
+                prompt: Text("What is this about?")
+                        .foregroundStyle(AppPalette.secondaryInk.opacity(colorScheme == .dark ? 0.82 : 0.55)),
                     axis: .vertical
                 )
                 .font(.subheadline)
@@ -1077,7 +1078,7 @@ struct CaptureView: View {
                         ? "Key points, decisions, owners, risks…"
                         : "Thoughts, ideas, and details worth remembering…")
                         .font(.body)
-                        .foregroundStyle(AppPalette.secondaryInk.opacity(0.42))
+                        .foregroundStyle(AppPalette.secondaryInk.opacity(colorScheme == .dark ? 0.78 : 0.42))
                         .padding(.top, 14)
                         .padding(.leading, 17)
                         .allowsHitTesting(false)

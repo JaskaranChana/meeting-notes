@@ -4128,7 +4128,6 @@ struct MeetingPresentationSheet: View {
             }
         }
         .statusBarHidden(true)
-        .preferredColorScheme(.light)
         .sensoryFeedback(.selection, trigger: page)
         .onAppear { replayReveal() }
         .onChange(of: page) { _, _ in

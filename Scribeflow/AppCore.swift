@@ -11,9 +11,8 @@ private let metricsLog = Logger(subsystem: "ai.scribeflow.app", category: "Metri
 
 // MARK: - Palette
 
-/// Light-mode-only palette. The whole app is locked to light at the scene
-/// root, so every token below is a fixed value — no `Color(uiColor:)` system
-/// references that would shift in dark mode.
+/// Adaptive palette shared by every app surface. Neutral and semantic tokens
+/// respond to the active appearance while showpiece gradients remain stable.
 ///
 /// Brand structure:
 /// - **Paper neutrals** (warm cream → white) carry the bulk of the UI.
@@ -128,7 +127,7 @@ enum AppPalette {
     /// Pale wash of accent — chip backgrounds, hover fills, focus tints.
     static let accentSoft = dyn((0.851, 0.902, 0.890), (0.110, 0.208, 0.208))      // #D9E6E3 / #1C3535
     /// Deeper accent for pressed gradients and emphasized rails.
-    static let accentDeep = dyn((0.055, 0.227, 0.231), (0.039, 0.157, 0.161))      // #0E3A3B / #0A2829
+    static let accentDeep = dyn((0.055, 0.227, 0.231), (0.278, 0.569, 0.576))      // #0E3A3B / #479193
     /// Elevated surface above `cardBackground` — used for nested cards.
     static let elevated   = dyn((0.992, 0.984, 0.961), (0.106, 0.122, 0.149))      // #FDFBF5 / #1B1F26
     /// Hairline divider, slightly stronger than `border`.

@@ -51,6 +51,7 @@ private struct AuthLoadingView: View {
 struct AuthenticationView: View {
     @Environment(AuthSessionStore.self) private var authSession
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
 
     @State private var appeared = false
 
@@ -163,7 +164,7 @@ struct AuthenticationView: View {
             } onCompletion: { result in
                 Task { await authSession.completeAppleSignIn(result: result) }
             }
-            .signInWithAppleButtonStyle(.black)
+            .signInWithAppleButtonStyle(colorScheme == .dark ? .white : .black)
             .frame(height: 50)
             .clipShape(RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous))
             .accessibilityIdentifier("auth.signInWithApple")

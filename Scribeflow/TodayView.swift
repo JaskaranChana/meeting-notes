@@ -2036,7 +2036,7 @@ private struct CalendarAccessRecoveryCard: View {
                     .foregroundStyle(.white)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .background(AppPalette.ink, in: Capsule())
+                    .background(AppPalette.inkButton, in: Capsule())
             }
             .buttonStyle(PressScaleButtonStyle(scale: 0.95))
         }
