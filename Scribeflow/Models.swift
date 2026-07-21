@@ -968,6 +968,14 @@ struct AIBriefData: Codable, Hashable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard !container.allKeys.isEmpty else {
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "AI brief contains no recognized fields."
+                )
+            )
+        }
         capturePurpose = try container.decodeIfPresent(CapturePurposeKind.self, forKey: .capturePurpose)
         captureTopic = try container.decodeIfPresent(String.self, forKey: .captureTopic) ?? ""
         captureDomain = try container.decodeIfPresent(String.self, forKey: .captureDomain) ?? ""
