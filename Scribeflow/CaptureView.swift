@@ -240,7 +240,7 @@ struct CaptureView: View {
     private func modePill(_ pill: Mode, label: String, icon: String) -> some View {
         Button {
             HapticEngine.tap(.light)
-            withAnimation(AppMotion.smooth) { mode = pill }
+            withAnimation(reduceMotion ? nil : AppMotion.smooth) { mode = pill }
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: icon)
@@ -587,10 +587,10 @@ struct CaptureView: View {
     private func flashMark() {
         HapticEngine.notify(.success)
         coordinator.bookmarkCurrentMoment()
-        withAnimation(AppMotion.snappy) { markFlash = true }
+        withAnimation(reduceMotion ? nil : AppMotion.snappy) { markFlash = true }
         Task {
             try? await Task.sleep(for: .seconds(0.9))
-            withAnimation(AppMotion.fade) { markFlash = false }
+            withAnimation(reduceMotion ? nil : AppMotion.fade) { markFlash = false }
         }
     }
 
@@ -842,7 +842,7 @@ struct CaptureView: View {
                     Capsule()
                         .fill(stageTint.opacity(0.85))
                         .frame(width: geo.size.width * min(1, Double(coordinator.elapsedSeconds) / 3600.0), height: 2)
-                        .animation(.linear(duration: 1), value: coordinator.elapsedSeconds)
+                        .animation(reduceMotion ? nil : .linear(duration: 1), value: coordinator.elapsedSeconds)
                 }
                 .frame(height: 2)
             }
@@ -867,10 +867,10 @@ struct CaptureView: View {
                 .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
         )
         .appShadow(coordinator.isRecording ? AppShadow.hero : AppShadow.floating)
-        .animation(AppMotion.smooth, value: coordinator.isRecording)
-        .animation(AppMotion.smooth, value: coordinator.isPaused)
-        .animation(AppMotion.smooth, value: coordinator.bookmarks.count)
-        .animation(AppMotion.smooth, value: coordinator.catchUpSummary)
+        .animation(reduceMotion ? nil : AppMotion.smooth, value: coordinator.isRecording)
+        .animation(reduceMotion ? nil : AppMotion.smooth, value: coordinator.isPaused)
+        .animation(reduceMotion ? nil : AppMotion.smooth, value: coordinator.bookmarks.count)
+        .animation(reduceMotion ? nil : AppMotion.smooth, value: coordinator.catchUpSummary)
     }
 
     // MARK: Live controls (during recording)
@@ -1005,7 +1005,7 @@ struct CaptureView: View {
     private var pauseButton: some View {
         Button {
             HapticEngine.tap(.light)
-            withAnimation(AppMotion.snappy) {
+            withAnimation(reduceMotion ? nil : AppMotion.snappy) {
                 if coordinator.isPaused { coordinator.resumeCapture() }
                 else { coordinator.pauseCapture() }
             }
@@ -1099,7 +1099,7 @@ struct CaptureView: View {
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
-            .animation(AppMotion.smooth, value: coordinator.isRecording)
+            .animation(reduceMotion ? nil : AppMotion.smooth, value: coordinator.isRecording)
 
             RadialGradient(
                 colors: [.clear, .black.opacity(0.28)],
@@ -1306,7 +1306,7 @@ struct CaptureView: View {
                 .foregroundStyle(AppPalette.tertiaryInk)
                 .fixedSize(horizontal: false, vertical: true)
                 .contentTransition(.opacity)
-                .animation(AppMotion.smooth, value: coordinator.selectedTemplate)
+                .animation(reduceMotion ? nil : AppMotion.smooth, value: coordinator.selectedTemplate)
         }
     }
 
@@ -1314,7 +1314,7 @@ struct CaptureView: View {
         let selected = coordinator.selectedTemplate == template
         return Button {
             HapticEngine.tap(.light)
-            withAnimation(AppMotion.snappy) { coordinator.selectedTemplate = template }
+            withAnimation(reduceMotion ? nil : AppMotion.snappy) { coordinator.selectedTemplate = template }
             persistTemplate(template, for: mode)
         } label: {
             Text(template.title)

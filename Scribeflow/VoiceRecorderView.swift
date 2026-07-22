@@ -75,9 +75,7 @@ struct VoiceRecorderView: View {
                 if case .saved = viewModel.phase {
                     return
                 }
-                if viewModel.phase == .recording || viewModel.phase == .paused {
-                    viewModel.discard()
-                }
+                viewModel.discard()
             }
             .onChange(of: scenePhase) { _, phase in
                 if phase != .active {
@@ -89,11 +87,7 @@ struct VoiceRecorderView: View {
             }
         }
         .modifier(ScribeflowChrome())
-        .interactiveDismissDisabled(
-            viewModel.phase == .recording
-                || viewModel.phase == .paused
-                || viewModel.phase == .saving
-        )
+        .interactiveDismissDisabled(dismissalDisabled)
     }
 
     private var recorderHero: some View {
@@ -175,7 +169,8 @@ struct VoiceRecorderView: View {
                 .background(AppPalette.accent, in: RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous))
             } else if viewModel.permissions.isBlocked {
                 Button {
-                    openURL(URL(string: UIApplication.openSettingsURLString)!)
+                    guard let settingsURL = URL(string: UIApplication.openSettingsURLString) else { return }
+                    openURL(settingsURL)
                 } label: {
                     Label("Open Settings", systemImage: "gearshape")
                         .font(.footnote.weight(.semibold))
@@ -195,6 +190,14 @@ struct VoiceRecorderView: View {
     private var recordingControls: some View {
         SurfaceCard(title: "Recorder", subtitle: "Audio is saved locally with file protection.") {
             VStack(spacing: 14) {
+                HStack(spacing: 12) {
+                    Label("Speaker separation", systemImage: "person.wave.2")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(AppPalette.secondaryInk)
+                    Spacer(minLength: 8)
+                    expectedSpeakerCountMenu
+                }
+
                 VoiceRecordingLevelBars(viewModel: viewModel)
                     .frame(maxWidth: .infinity, alignment: .center)
 
@@ -212,6 +215,41 @@ struct VoiceRecorderView: View {
             }
             .frame(maxWidth: .infinity)
         }
+    }
+
+    private var expectedSpeakerCountMenu: some View {
+        Menu {
+            Button {
+                viewModel.expectedSpeakerCount = nil
+            } label: {
+                Label(
+                    "Automatic",
+                    systemImage: viewModel.expectedSpeakerCount == nil ? "checkmark" : "person.wave.2"
+                )
+            }
+
+            Divider()
+
+            ForEach(1...6, id: \.self) { count in
+                Button {
+                    viewModel.expectedSpeakerCount = count
+                } label: {
+                    Label(
+                        "\(count) speaker\(count == 1 ? "" : "s")",
+                        systemImage: viewModel.expectedSpeakerCount == count ? "checkmark" : "person.wave.2"
+                    )
+                }
+            }
+        } label: {
+            Text(viewModel.expectedSpeakerCountTitle)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(AppPalette.accent)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(AppPalette.accentSoft, in: Capsule())
+        }
+        .disabled(viewModel.phase == .processing || viewModel.phase == .saving)
+        .accessibilityLabel("Expected speakers, \(viewModel.expectedSpeakerCountTitle)")
     }
 
     @ViewBuilder
@@ -418,6 +456,12 @@ struct VoiceRecorderView: View {
         }
     }
 
+    private var dismissalDisabled: Bool {
+        viewModel.hasUnsavedRecording
+            || viewModel.phase == .requestingPermission
+            || viewModel.phase == .saving
+    }
+
     private var permissionTint: Color {
         if viewModel.permissions.isReady { return AppPalette.accent }
         if viewModel.permissions.isBlocked { return AppPalette.coral }
@@ -479,7 +523,7 @@ struct VoiceRecorderView: View {
     }
 
     private func close() {
-        if viewModel.phase == .recording || viewModel.phase == .paused || viewModel.completedRecording != nil {
+        if viewModel.hasUnsavedRecording {
             showingDiscardConfirmation = true
         } else {
             dismiss()

@@ -3,6 +3,7 @@ import SwiftUI
 struct MeetingsView: View {
     @Environment(MeetingStore.self) private var store
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let isActive: Bool
     @Binding var selectedMeetingID: Meeting.ID?
     let onAskTap: () -> Void
@@ -17,7 +18,6 @@ struct MeetingsView: View {
     @AppStorage("hasUsedLibraryFilters") private var hasUsedFilters = false
     @State private var hasAnimatedIn = false
     @State private var pendingDeleteMeeting: Meeting?
-    @State private var pendingDeleteFinalizeID: UUID?
     @State private var snapshot = LibrarySnapshot()
     @State private var snapshotBuilder = LibrarySnapshotBuilder()
     @State private var hasLoadedSnapshot = false
@@ -153,42 +153,23 @@ struct MeetingsView: View {
                 Button("Delete \(pendingDeleteMeeting.title)", role: .destructive) {
                     let id = pendingDeleteMeeting.id
                     self.pendingDeleteMeeting = nil
-                    var removed: (Meeting, Int)?
-                    withAnimation(AppMotion.snappy) {
-                        removed = store.softDeleteMeeting(id)
+                    let undoToast = withAnimation(reduceMotion ? nil : AppMotion.snappy) {
+                        MeetingDeletionCoordinator.shared.deleteMeeting(id, from: store)
                     }
-                    guard let (snapshot, index) = removed else { return }
+                    guard let undoToast else { return }
                     HapticEngine.notify(.warning)
-                    let toastID = UUID()
-                    pendingDeleteFinalizeID = toastID
-                    toast = ToastItem(
-                        message: "Deleted \"\(snapshot.title)\"",
-                        icon: "trash",
-                        actionTitle: "Undo",
-                        action: { [weak store] in
-                            pendingDeleteFinalizeID = nil
-                            withAnimation(AppMotion.snappy) {
-                                store?.restoreMeeting(snapshot, at: index)
-                            }
-                        }
-                    )
-                    Task { @MainActor in
-                        try? await Task.sleep(for: .seconds(5))
-                        guard pendingDeleteFinalizeID == toastID else { return }
-                        pendingDeleteFinalizeID = nil
-                        store.finalizeDelete(snapshot)
-                    }
+                    toast = undoToast
                 }
             }
             Button("Cancel", role: .cancel) {
                 pendingDeleteMeeting = nil
             }
         } message: {
-            Text("This cannot be undone. Pinning is safer if you only want to move it out of the way.")
+            Text("The note disappears now, and you can undo for a few seconds.")
         }
         .onReceive(NotificationCenter.default.publisher(for: .scribeflowDockScrollToTop)) { note in
             guard (note.object as? String) == "library" else { return }
-            withAnimation(AppMotion.smooth) {
+            withAnimation(reduceMotion ? nil : AppMotion.smooth) {
                 proxy.scrollTo("top", anchor: .top)
             }
         }
@@ -196,7 +177,10 @@ struct MeetingsView: View {
     }
 
     private func actionableLibraryRow(_ meeting: Meeting) -> some View {
-        EditorialLibraryRow(meeting: meeting, searchQuery: searchText)
+        EditorialLibraryRow(
+            meeting: meeting,
+            searchMatch: snapshot.searchMatches[meeting.id]
+        )
     }
 
     private func refreshSnapshot(for key: LibrarySnapshotKey) async {
@@ -208,9 +192,7 @@ struct MeetingsView: View {
         let nextSnapshot = await snapshotBuilder.snapshot(for: key, meetings: meetings)
         guard !Task.isCancelled, key == snapshotKey else { return }
 
-        if snapshot != nextSnapshot {
-            snapshot = nextSnapshot
-        }
+        snapshot = nextSnapshot
         hasLoadedSnapshot = true
     }
 
@@ -226,7 +208,7 @@ struct MeetingsView: View {
                 ForEach(LibrarySegment.allCases) { seg in
                     Button {
                         HapticEngine.select()
-                        withAnimation(AppMotion.snappy) { segment = seg }
+                        withAnimation(reduceMotion ? nil : AppMotion.snappy) { segment = seg }
                     } label: {
                         HStack(spacing: 6) {
                             if let icon = seg.icon {
@@ -391,7 +373,7 @@ struct MeetingsView: View {
             RoundedRectangle(cornerRadius: AppRadius.md, style: .continuous)
                 .strokeBorder(searchFocused ? AppPalette.accent : AppPalette.border, lineWidth: searchFocused ? 1.4 : 1)
         )
-        .animation(AppMotion.snappy, value: searchFocused)
+        .animation(reduceMotion ? nil : AppMotion.snappy, value: searchFocused)
     }
 
     /// Compact filter strip. Active filters appear as chips with tap-to-clear.
@@ -404,17 +386,17 @@ struct MeetingsView: View {
                     HStack(spacing: 8) {
                         if typeFilter != .all {
                             activeChip(filter: typeFilter.title, systemImage: typeFilter.systemImage) {
-                                withAnimation(AppMotion.snappy) { typeFilter = .all }
+                                withAnimation(reduceMotion ? nil : AppMotion.snappy) { typeFilter = .all }
                             }
                         }
                         if dateFilter != .all {
                             activeChip(filter: dateFilter.title, systemImage: "calendar") {
-                                withAnimation(AppMotion.snappy) { dateFilter = .all }
+                                withAnimation(reduceMotion ? nil : AppMotion.snappy) { dateFilter = .all }
                             }
                         }
                         if sortMode != .newest {
                             activeChip(filter: sortMode.title, systemImage: "arrow.up.arrow.down") {
-                                withAnimation(AppMotion.snappy) { sortMode = .newest }
+                                withAnimation(reduceMotion ? nil : AppMotion.snappy) { sortMode = .newest }
                             }
                         }
                     }
@@ -509,7 +491,7 @@ struct MeetingsView: View {
                                 isSelected: typeFilter == filter
                             ) {
                                 HapticEngine.tap(.light)
-                                withAnimation(AppMotion.snappy) { typeFilter = filter }
+                                withAnimation(reduceMotion ? nil : AppMotion.snappy) { typeFilter = filter }
                             }
                         }
                     }
@@ -521,7 +503,7 @@ struct MeetingsView: View {
                                 isSelected: dateFilter == filter
                             ) {
                                 HapticEngine.tap(.light)
-                                withAnimation(AppMotion.snappy) { dateFilter = filter }
+                                withAnimation(reduceMotion ? nil : AppMotion.snappy) { dateFilter = filter }
                             }
                         }
                     }
@@ -533,7 +515,7 @@ struct MeetingsView: View {
                                 isSelected: sortMode == mode
                             ) {
                                 HapticEngine.tap(.light)
-                                withAnimation(AppMotion.snappy) { sortMode = mode }
+                                withAnimation(reduceMotion ? nil : AppMotion.snappy) { sortMode = mode }
                             }
                         }
                     }
@@ -541,7 +523,7 @@ struct MeetingsView: View {
                     if activeFilterCount > 0 {
                         Button {
                             HapticEngine.tap(.light)
-                            withAnimation(AppMotion.snappy) {
+                            withAnimation(reduceMotion ? nil : AppMotion.snappy) {
                                 typeFilter = .all
                                 dateFilter = .all
                                 sortMode = .newest

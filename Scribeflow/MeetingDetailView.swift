@@ -60,7 +60,7 @@ private actor MeetingTranscriptSnapshotBuilder {
         revision: Int,
         query: String
     ) -> MeetingTranscriptDisplaySnapshot {
-        if revision > cachedRevision {
+        if revision != cachedRevision {
             cachedLines = lines
             cachedWordCount = lines.reduce(into: 0) { count, line in
                 count += line.text.split(whereSeparator: \.isWhitespace).count
@@ -73,10 +73,16 @@ private actor MeetingTranscriptSnapshotBuilder {
         if cleanedQuery.isEmpty {
             filtered = cachedLines
         } else {
-            filtered = cachedLines.filter {
-                $0.speaker.localizedCaseInsensitiveContains(cleanedQuery)
-                    || $0.text.localizedCaseInsensitiveContains(cleanedQuery)
+            var matches: [TranscriptLine] = []
+            matches.reserveCapacity(min(cachedLines.count, 32))
+            for line in cachedLines {
+                guard !Task.isCancelled else { break }
+                if line.speaker.localizedCaseInsensitiveContains(cleanedQuery)
+                    || line.text.localizedCaseInsensitiveContains(cleanedQuery) {
+                    matches.append(line)
+                }
             }
+            filtered = matches
         }
         return MeetingTranscriptDisplaySnapshot(lines: filtered, wordCount: cachedWordCount)
     }
@@ -86,6 +92,7 @@ struct MeetingDetailView: View {
     @Environment(MeetingStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("preferredRewriteStyle") private var preferredRewriteStyleRaw = NoteRewriteStyle.concise.rawValue
     let meetingID: Meeting.ID
     @State private var isRewriting = false
@@ -211,7 +218,7 @@ struct MeetingDetailView: View {
 
     private var transcriptSnapshotKey: MeetingTranscriptSnapshotKey {
         MeetingTranscriptSnapshotKey(
-            revision: store.revision,
+            revision: store.semanticRevision(for: meetingID),
             query: transcriptSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
         )
     }
@@ -228,12 +235,12 @@ struct MeetingDetailView: View {
         meetingDigestMarkdown(m, signals: store.signals(for: m))
     }
 
-    private func refreshDerived() async {
+    private func refreshDerived(expectedSemanticRevision: Int) async {
         guard let m = meeting else { return }
         let bundle = await store.analysisBundle(for: m)
         guard !Task.isCancelled,
-              let current = store.meeting(withID: m.id),
-              current == m
+              store.meeting(withID: m.id) != nil,
+              store.semanticRevision(for: m.id) == expectedSemanticRevision
         else { return }
         cachedSignals = bundle.signals
         cachedSynopsis = synopsisFor(m, summary: m.summary(for: m.selectedTemplate))
@@ -311,10 +318,7 @@ struct MeetingDetailView: View {
                         hubTabContent(meeting)
                     }
                 }
-                .id(selectedTab)
-                .transition(.opacity)
                 .appScreenContent(top: AppSpacing.md, bottom: 40)
-                .animation(.easeOut(duration: 0.16), value: selectedTab)
             }
         }
         .background(AppPalette.background.ignoresSafeArea())
@@ -501,13 +505,25 @@ struct MeetingDetailView: View {
                 isPresented: $showingDeleteConfirmation,
                 titleVisibility: .visible
             ) {
-                Button("Delete permanently", role: .destructive) {
-                    store.deleteMeeting(meeting.id)
+                Button("Delete", role: .destructive) {
+                    let meetingID = meeting.id
                     dismiss()
+                    Task { @MainActor in
+                        await Task.yield()
+                        let undoToast = withAnimation(reduceMotion ? nil : AppMotion.snappy) {
+                            MeetingDeletionCoordinator.shared.deleteMeeting(meetingID, from: store)
+                        }
+                        guard let undoToast else { return }
+                        HapticEngine.notify(.warning)
+                        NotificationCenter.default.post(
+                            name: .scribeflowToast,
+                            object: undoToast
+                        )
+                    }
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This removes the note, transcript, and local recordings from this device. This cannot be undone.")
+                Text("The note, transcript, and recordings disappear now, and you can undo for a few seconds.")
             }
     }
 
@@ -580,18 +596,24 @@ struct MeetingDetailView: View {
             .onAppear {
                 hasAnimatedIn = true
             }
-            .task(id: store.revision) {
-                // Store changes cancel and restart this task. Debounce derived
-                // reads so typing in notes does not repeatedly rebuild the page.
+            .task(id: store.semanticRevision(for: meetingID)) {
+                // Only source-content changes restart intelligence work. Pin,
+                // share, reminder, and score mutations still redraw their
+                // affected controls without re-running note analysis.
+                let expectedSemanticRevision = store.semanticRevision(for: meetingID)
                 if cachedIntelligenceReport != nil {
                     try? await Task.sleep(for: .milliseconds(300))
                 }
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled,
+                      store.semanticRevision(for: meetingID) == expectedSemanticRevision
+                else { return }
                 if !visibleTabs(for: meeting).contains(selectedTab) {
                     selectedTab = .overview
                 }
-                await refreshDerived()
-                guard !Task.isCancelled else { return }
+                await refreshDerived(expectedSemanticRevision: expectedSemanticRevision)
+                guard !Task.isCancelled,
+                      store.semanticRevision(for: meetingID) == expectedSemanticRevision
+                else { return }
                 await store.scoreAndSave(
                     for: meeting.id,
                     allowsAccountability: resolvedPurpose(for: meeting).allowsAccountabilityExtraction
@@ -772,7 +794,7 @@ struct MeetingDetailView: View {
                     Button {
                         HapticEngine.select()
                         hasUsedTabs = true
-                        withAnimation(AppMotion.smooth) { selectedTab = tab }
+                        withAnimation(reduceMotion ? nil : AppMotion.smooth) { selectedTab = tab }
                     } label: {
                         VStack(spacing: 6) {
                             HStack(spacing: 5) {
@@ -932,8 +954,8 @@ struct MeetingDetailView: View {
             .padding(.leading, 14)
         }
         .padding(.top, 4)
-        .animation(AppMotion.smooth, value: store.isProcessingAI(meeting.id))
-        .animation(AppMotion.smooth, value: meeting.aiBrief != nil)
+        .animation(reduceMotion ? nil : AppMotion.smooth, value: store.isProcessingAI(meeting.id))
+        .animation(reduceMotion ? nil : AppMotion.smooth, value: meeting.aiBrief != nil)
     }
 
     private func briefFocusRow(_ meeting: Meeting) -> some View {
@@ -1686,7 +1708,7 @@ struct MeetingDetailView: View {
                     transcriptLinePendingSpeakerEdit = line
                 }
                 Button("Delete snippet", role: .destructive) {
-                    store.deleteTranscriptLine(for: meeting?.id ?? UUID(), lineID: line.id)
+                    store.deleteTranscriptLine(for: meetingID, lineID: line.id)
                 }
         }
         .editorialReveal()
@@ -3565,9 +3587,11 @@ struct MeetingDetailView: View {
                 await MainActor.run {
                     sendingWebhookIDs.remove(config.id)
                     HapticEngine.notify(.error)
+                    let failure = error as NSError
                     AnalyticsLog.shared.log("webhook.failed", [
                         "target": config.target.rawValue,
-                        "error": error.localizedDescription
+                        "domain": failure.domain,
+                        "code": "\(failure.code)"
                     ])
                     NotificationCenter.default.post(
                         name: .scribeflowToast,

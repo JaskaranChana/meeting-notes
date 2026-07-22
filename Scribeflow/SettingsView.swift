@@ -8,6 +8,7 @@ struct SettingsView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var showsDoneButton = true
 
     @AppStorage("hasCompletedLaunchOnboarding") private var hasCompletedLaunchOnboarding = false
@@ -226,7 +227,7 @@ struct SettingsView: View {
                             subtitle: "Replay the first-run guide"
                         ) {
                             HapticEngine.tap(.medium)
-                            withAnimation(AppMotion.smooth) {
+                            withAnimation(reduceMotion ? nil : AppMotion.smooth) {
                                 hasCompletedLaunchOnboarding = false
                             }
                         }
@@ -505,7 +506,7 @@ struct SettingsView: View {
         let isSelected = appearanceRaw == option.rawValue
         return Button {
             HapticEngine.tap(.light)
-            withAnimation(AppMotion.snappy) {
+            withAnimation(reduceMotion ? nil : AppMotion.snappy) {
                 appearanceRaw = option.rawValue
             }
         } label: {

@@ -12,6 +12,7 @@ struct MeetingCalendarView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let isActive: Bool
     @Binding var selectedMeetingID: Meeting.ID?
     let onCapture: (CaptureView.Mode) -> Void
@@ -126,7 +127,7 @@ struct MeetingCalendarView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: .scribeflowDockScrollToTop)) { note in
                 guard (note.object as? String) == "calendar" else { return }
-                withAnimation(AppMotion.smooth) {
+                withAnimation(reduceMotion ? nil : AppMotion.smooth) {
                     proxy.scrollTo("calendar.top", anchor: .top)
                 }
             }
@@ -652,7 +653,7 @@ struct MeetingCalendarView: View {
     ) -> some View {
         Button {
             HapticEngine.select()
-            withAnimation(AppMotion.snappy) { action() }
+            withAnimation(reduceMotion ? nil : AppMotion.snappy) { action() }
         } label: {
             Image(systemName: systemImage)
                 .font(.subheadline.weight(.bold))
@@ -672,7 +673,7 @@ struct MeetingCalendarView: View {
     }
 
     private func selectDate(_ date: Date) {
-        withAnimation(AppMotion.snappy) {
+        withAnimation(reduceMotion ? nil : AppMotion.snappy) {
             selectedDate = Calendar.current.startOfDay(for: date)
             if !Calendar.current.isDate(date, equalTo: displayedMonth, toGranularity: .month) {
                 displayedMonth = Self.startOfMonth(for: date)
@@ -729,9 +730,7 @@ struct MeetingCalendarView: View {
             key: key
         )
         guard !Task.isCancelled, key == snapshotKey else { return }
-        if snapshot != nextSnapshot {
-            snapshot = nextSnapshot
-        }
+        snapshot = nextSnapshot
         hasLoadedSnapshot = true
     }
 

@@ -680,10 +680,20 @@ final class MeetingStore {
     var meetings: [Meeting] {
         didSet {
             let effects = pendingMutationEffects
+            let inferredChanges = pendingChangedMeetingIDs == nil
+                ? Self.inferredMeetingChanges(from: oldValue, to: meetings)
+                : nil
             let changedMeetingIDs = pendingChangedMeetingIDs
+                ?? inferredChanges?.changedIDs
+                ?? []
             pendingMutationEffects = .all
             pendingChangedMeetingIDs = nil
             revision &+= 1
+            advanceMeetingRevisions(
+                for: changedMeetingIDs,
+                currentMeetingIDs: inferredChanges?.currentIDs,
+                effects: effects
+            )
             if !isApplyingInitialLoad {
                 save()
             }
@@ -697,31 +707,20 @@ final class MeetingStore {
                 _smartCollectionsCache = nil
             }
             if effects.contains(.semanticCaches) {
-                if let changedMeetingIDs {
-                    for meetingID in changedMeetingIDs {
-                        _signalsCache.removeValue(forKey: meetingID)
-                        _intelligenceReportCache.removeValue(forKey: meetingID)
-                        _purposeCache.removeValue(forKey: meetingID)
-                        _evidenceNoteLinesCache.removeValue(forKey: meetingID)
-                        _sourceReferencesByClaimCache.removeValue(forKey: meetingID)
-                        _sensitiveFlagsCache.removeValue(forKey: meetingID)
-                        _workspaceTagsCache.removeValue(forKey: meetingID)
-                    }
-                    let staleProofKeys = _sourceProofCache.keys.filter {
-                        changedMeetingIDs.contains($0.meetingID)
-                    }
-                    for key in staleProofKeys {
-                        _sourceProofCache.removeValue(forKey: key)
-                    }
-                } else {
-                    _signalsCache.removeAll(keepingCapacity: true)
-                    _intelligenceReportCache.removeAll(keepingCapacity: true)
-                    _purposeCache.removeAll(keepingCapacity: true)
-                    _evidenceNoteLinesCache.removeAll(keepingCapacity: true)
-                    _sourceReferencesByClaimCache.removeAll(keepingCapacity: true)
-                    _sensitiveFlagsCache.removeAll(keepingCapacity: true)
-                    _workspaceTagsCache.removeAll(keepingCapacity: true)
-                    _sourceProofCache.removeAll(keepingCapacity: true)
+                for meetingID in changedMeetingIDs {
+                    _signalsCache.removeValue(forKey: meetingID)
+                    _intelligenceReportCache.removeValue(forKey: meetingID)
+                    _purposeCache.removeValue(forKey: meetingID)
+                    _evidenceNoteLinesCache.removeValue(forKey: meetingID)
+                    _sourceReferencesByClaimCache.removeValue(forKey: meetingID)
+                    _sensitiveFlagsCache.removeValue(forKey: meetingID)
+                    _workspaceTagsCache.removeValue(forKey: meetingID)
+                }
+                let staleProofKeys = _sourceProofCache.keys.filter {
+                    changedMeetingIDs.contains($0.meetingID)
+                }
+                for key in staleProofKeys {
+                    _sourceProofCache.removeValue(forKey: key)
                 }
             }
             if effects.contains(.prepCaches) {
@@ -735,6 +734,21 @@ final class MeetingStore {
     }
 
     private(set) var revision = 0
+
+    /// Per-note tokens let detail screens ignore unrelated library mutations.
+    /// The global revision still drives collection projections such as Today,
+    /// while these counters keep expensive note analysis and transcript work
+    /// scoped to the note that actually changed.
+    @ObservationIgnored private var meetingRevisions: [Meeting.ID: Int] = [:]
+    @ObservationIgnored private var semanticRevisions: [Meeting.ID: Int] = [:]
+
+    func meetingRevision(for id: Meeting.ID) -> Int {
+        meetingRevisions[id] ?? 0
+    }
+
+    func semanticRevision(for id: Meeting.ID) -> Int {
+        semanticRevisions[id] ?? 0
+    }
 
     /// Launch never waits for JSON decoding on the UI actor. The app renders a
     /// lightweight progress surface until this store has applied its library.
@@ -778,6 +792,70 @@ final class MeetingStore {
     @ObservationIgnored private var _recallIndexRevision = -1
     @ObservationIgnored private var pendingMutationEffects: MutationEffects = .all
     @ObservationIgnored private var pendingChangedMeetingIDs: Set<Meeting.ID>?
+
+    /// Releases only derived, rebuildable state when iOS reports memory
+    /// pressure. Meetings, pending edits, revision tokens, and persistence
+    /// tasks remain intact, so the user never trades data safety for recovery.
+    func releaseTransientCaches() {
+        _recentMeetings = nil
+        _pinnedMeetings = nil
+        _openLoopsCache = nil
+        _smartCollectionsCache = nil
+        _signalsCache.removeAll(keepingCapacity: false)
+        _prepBriefCache.removeAll(keepingCapacity: false)
+        _eventPrepCache.removeAll(keepingCapacity: false)
+        _intelligenceReportCache.removeAll(keepingCapacity: false)
+        _purposeCache.removeAll(keepingCapacity: false)
+        _evidenceNoteLinesCache.removeAll(keepingCapacity: false)
+        _sourceReferencesByClaimCache.removeAll(keepingCapacity: false)
+        _sensitiveFlagsCache.removeAll(keepingCapacity: false)
+        _workspaceTagsCache.removeAll(keepingCapacity: false)
+        _sourceProofCache.removeAll(keepingCapacity: false)
+        _recallIndex = nil
+        _recallIndexRevision = -1
+    }
+
+    private struct InferredMeetingChanges {
+        let changedIDs: Set<Meeting.ID>
+        let currentIDs: Set<Meeting.ID>
+    }
+
+    private static func inferredMeetingChanges(
+        from previous: [Meeting],
+        to current: [Meeting]
+    ) -> InferredMeetingChanges {
+        let previousIDs = Set(previous.map(\.id))
+        let currentIDs = Set(current.map(\.id))
+        let membershipChanges = previousIDs.symmetricDifference(currentIDs)
+
+        // Direct insert/remove operations can be scoped to the affected rows.
+        // A bulk replacement with the same identities may have changed every
+        // value, so conservatively advance all current rows in that case.
+        return InferredMeetingChanges(
+            changedIDs: membershipChanges.isEmpty ? currentIDs : membershipChanges,
+            currentIDs: currentIDs
+        )
+    }
+
+    private func advanceMeetingRevisions(
+        for changedMeetingIDs: Set<Meeting.ID>,
+        currentMeetingIDs: Set<Meeting.ID>?,
+        effects: MutationEffects
+    ) {
+        guard !changedMeetingIDs.isEmpty else { return }
+
+        for id in changedMeetingIDs {
+            if let currentMeetingIDs, !currentMeetingIDs.contains(id) {
+                meetingRevisions.removeValue(forKey: id)
+                semanticRevisions.removeValue(forKey: id)
+                continue
+            }
+            meetingRevisions[id, default: 0] &+= 1
+            if effects.contains(.semanticCaches) {
+                semanticRevisions[id, default: 0] &+= 1
+            }
+        }
+    }
 
     /// Dictionary index for O(1) `meeting(withID:)` lookup. Previously a
     /// linear `first(where:)` scan — measurable lag on libraries >100.
@@ -855,10 +933,11 @@ final class MeetingStore {
 
     private func replaceMeetings(
         _ updatedMeetings: [Meeting],
-        effects: MutationEffects = .all
+        effects: MutationEffects = .all,
+        changedMeetingIDs: Set<Meeting.ID>? = nil
     ) {
         pendingMutationEffects = effects
-        pendingChangedMeetingIDs = nil
+        pendingChangedMeetingIDs = changedMeetingIDs
         meetings = updatedMeetings
     }
 
@@ -1115,10 +1194,11 @@ final class MeetingStore {
                       forceRefresh || Self.needsDerivedDataRefresh(self.meetings[index])
                 else { continue }
                 let source = self.meetings[index]
+                let sourceRevision = self.semanticRevision(for: id)
                 let analysis = await self.analysisWorker.analyze(source)
                 guard !Task.isCancelled,
                       let currentIndex = self.index(for: id),
-                      self.meetings[currentIndex] == source
+                      self.semanticRevision(for: id) == sourceRevision
                 else { continue }
                 self.refreshSummariesIfNeeded(
                     at: currentIndex,
@@ -1559,7 +1639,8 @@ final class MeetingStore {
                     return actionLoops + riskLoops
                 }
         }
-        return Array((_openLoopsCache!).prefix(limit))
+        guard let openLoops = _openLoopsCache else { return [] }
+        return Array(openLoops.prefix(limit))
     }
 
     func workspacePrepBrief() -> PrepBrief {
@@ -1770,10 +1851,11 @@ final class MeetingStore {
             guard !Task.isCancelled else { return }
             guard let index = self.index(for: id) else { return }
             let source = self.meetings[index]
+            let sourceRevision = self.semanticRevision(for: id)
             let analysis = await self.analysisWorker.analyze(source)
             guard !Task.isCancelled,
                   let currentIndex = self.index(for: id),
-                  self.meetings[currentIndex] == source
+                  self.semanticRevision(for: id) == sourceRevision
             else { return }
             self.refreshSummariesIfNeeded(at: currentIndex, analysis: analysis)
             if self.regenerationDerivedRunIDs[id] == runID {
@@ -2116,6 +2198,7 @@ final class MeetingStore {
     func scoreAndSave(for id: Meeting.ID, allowsAccountability: Bool) async {
         guard let sourceIndex = index(for: id) else { return }
         let meeting = meetings[sourceIndex]
+        let sourceRevision = meetingRevision(for: id)
         guard allowsAccountability else {
             if meeting.score != nil {
                 var updated = meeting
@@ -2131,7 +2214,7 @@ final class MeetingStore {
         )
         guard !Task.isCancelled,
               let currentIndex = index(for: id),
-              meetings[currentIndex] == meeting,
+              meetingRevision(for: id) == sourceRevision,
               !Self.sameScoreResult(meeting.score, nextScore)
         else { return }
 
@@ -2241,8 +2324,10 @@ final class MeetingStore {
             )
         }
 
+        let sourceRevision = semanticRevision(for: sourceMeeting.id)
         let bundle = await analysisWorker.analyze(sourceMeeting)
-        if let current = meeting(withID: sourceMeeting.id), current == sourceMeeting {
+        if meeting(withID: sourceMeeting.id) != nil,
+           semanticRevision(for: sourceMeeting.id) == sourceRevision {
             cacheAnalysis(bundle, for: sourceMeeting.id)
         }
         return bundle
@@ -2382,6 +2467,7 @@ final class MeetingStore {
     }
 
     func restorePreparedBackup(_ preparedRestore: PreparedBackupRestore) async throws {
+        MeetingDeletionCoordinator.shared.discardAllPending()
         // Commit the current in-memory state first. The persistence writer then
         // preserves it as the rollback file when the restored library is saved.
         await flushPersistence()
@@ -2457,6 +2543,7 @@ final class MeetingStore {
     }
 
     func deleteAllUserData() async {
+        MeetingDeletionCoordinator.shared.discardAllPending()
         await MeetingProcessingCoordinator.shared.discardAll()
         aiProcessingTasks.values.forEach { $0.cancel() }
         aiProcessingTasks.removeAll()
@@ -3673,7 +3760,10 @@ final class MeetingStore {
 
         guard deletedCount > 0 else { return 0 }
 
-        replaceMeetings(updatedMeetings)
+        replaceMeetings(
+            updatedMeetings,
+            changedMeetingIDs: Set(changedMeetingIDs)
+        )
         scheduleDerivedDataMigration(
             for: changedMeetingIDs,
             forceRefresh: true
@@ -3771,6 +3861,7 @@ final class MeetingStore {
         }
 
         let meeting = meetings[index]
+        let sourceRevision = semanticRevision(for: id)
         let preservedMoments = extractedBookmarkMoments(from: meeting.rawNotes)
         let outcome = await polishNotes(
             title: meeting.title,
@@ -3785,11 +3876,7 @@ final class MeetingStore {
             return "Meeting was removed before note polishing finished."
         }
         let current = meetings[currentIndex]
-        guard current.rawNotes == meeting.rawNotes,
-              current.transcript == meeting.transcript,
-              current.title == meeting.title,
-              current.objective == meeting.objective
-        else {
+        guard semanticRevision(for: id) == sourceRevision else {
             return "Kept your newer edits instead of replacing them."
         }
 
@@ -3884,6 +3971,7 @@ final class MeetingStore {
         if #available(iOS 26.0, *) {
             guard case .available = AppleIntelligenceBriefExtractor.availability() else { return }
             guard let meeting = meeting(withID: id) else { return }
+            let sourceRevision = semanticRevision(for: id)
             let runID = UUID()
             aiProcessingRunIDs[id] = runID
             aiProcessingIDs.insert(id)
@@ -3899,15 +3987,7 @@ final class MeetingStore {
                 guard aiProcessingRunIDs[id] == runID else { return }
                 guard let index = index(for: id) else { return }
                 let current = meetings[index]
-                guard current.title == meeting.title,
-                      current.objective == meeting.objective,
-                      current.rawNotes == meeting.rawNotes,
-                      current.transcript == meeting.transcript,
-                      current.contextMode == meeting.contextMode,
-                      current.purposeOverride == meeting.purposeOverride,
-                      current.meetingMode == meeting.meetingMode,
-                      current.consentState == meeting.consentState
-                else {
+                guard semanticRevision(for: id) == sourceRevision else {
                     // The model answered an older source snapshot. A newer
                     // scheduled run owns the current note, so never publish
                     // stale intelligence over fresh user edits.
@@ -4996,7 +5076,7 @@ final class MeetingStore {
     ) {
         guard !supersededIDs.isEmpty else { return }
         var updatedMeetings = meetings
-        var changed = false
+        var changedMeetingIDs: Set<Meeting.ID> = []
 
         for (meetingID, commitmentIDs) in supersededIDs {
             guard let meetingIndex = indexByID[meetingID],
@@ -5009,13 +5089,17 @@ final class MeetingStore {
                 ) else { continue }
                 if updatedMeetings[meetingIndex].commitments[commitmentIndex].status == .open {
                     updatedMeetings[meetingIndex].commitments[commitmentIndex].status = .superseded
-                    changed = true
+                    changedMeetingIDs.insert(meetingID)
                 }
             }
         }
 
-        if changed {
-            replaceMeetings(updatedMeetings, effects: .commitments)
+        if !changedMeetingIDs.isEmpty {
+            replaceMeetings(
+                updatedMeetings,
+                effects: .commitments,
+                changedMeetingIDs: changedMeetingIDs
+            )
         }
     }
 

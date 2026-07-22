@@ -23,6 +23,7 @@ struct TodayView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let isActive: Bool
     @Binding var selectedMeetingID: Meeting.ID?
     /// Open the unified capture surface in either `.record` or `.type` mode.
@@ -172,7 +173,7 @@ struct TodayView: View {
                 heroView
                     .id(heroStyle)
                     .motionEntrance(step: 0, active: hasAnimatedIn)
-                    .animation(AppMotion.smooth, value: heroStyle)
+                    .animation(reduceMotion ? nil : AppMotion.smooth, value: heroStyle)
 
                 if !snap.processingMeetings.isEmpty {
                     HomeProcessingSection(meetings: snap.processingMeetings)
@@ -404,7 +405,7 @@ struct TodayView: View {
         .onReceive(NotificationCenter.default.publisher(for: .scribeflowDockScrollToTop)) { note in
             // Re-tap of the Today dock tab → scroll to top.
             guard (note.object as? String) == "home" else { return }
-            withAnimation(AppMotion.smooth) {
+            withAnimation(reduceMotion ? nil : AppMotion.smooth) {
                 proxy.scrollTo("top", anchor: .top)
             }
         }
@@ -780,7 +781,7 @@ struct TodayView: View {
 
                     Button {
                         HapticEngine.notify(.success)
-                        withAnimation(AppMotion.snappy) {
+                        withAnimation(reduceMotion ? nil : AppMotion.snappy) {
                             store.updateCommitmentStatus(.fulfilled, commitmentID: item.commitment.id, for: item.meetingID)
                         }
                         toast = ToastItem(message: "One off the list", icon: "checkmark.circle.fill")
@@ -923,7 +924,7 @@ struct TodayView: View {
             event.startDate.timeIntervalSince(now) >= -300
         }
         if imminentEvent?.id != candidate?.id {
-            withAnimation(AppMotion.smooth) {
+            withAnimation(reduceMotion ? nil : AppMotion.smooth) {
                 imminentEvent = candidate
             }
         }
@@ -969,7 +970,7 @@ struct TodayView: View {
                     HapticEngine.notify(.success)
                     UpcomingCaptureContext.shared.preferredEvent = event
                     dismissedEventIDs.insert(event.id)
-                    AnalyticsLog.shared.log("calendar.autoRecord.armed", ["title": event.title])
+                    AnalyticsLog.shared.log("calendar.autoRecord.armed", ["source": "calendar"])
                     onCapture(.record)
                 } label: {
                     HStack(spacing: 6) {
@@ -1027,7 +1028,7 @@ struct TodayView: View {
     private var workspaceFeedToggle: some View {
         Button {
             HapticEngine.tap(.light)
-            withAnimation(.easeOut(duration: 0.16)) {
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.16)) {
                 showsWorkspaceFeed.toggle()
             }
         } label: {
@@ -1142,7 +1143,11 @@ struct TodayView: View {
                         HapticEngine.notify(.success)
                     }
                 } catch {
-                    AnalyticsLog.shared.log("audioImport.failed", ["error": error.localizedDescription])
+                    let failure = error as NSError
+                    AnalyticsLog.shared.log("audioImport.failed", [
+                        "domain": failure.domain,
+                        "code": "\(failure.code)"
+                    ])
                     await MainActor.run {
                         toast = ToastItem(message: error.localizedDescription, icon: "exclamationmark.triangle.fill")
                         HapticEngine.notify(.error)
@@ -1217,13 +1222,11 @@ struct TodayView: View {
     private func refreshSnapshot(from meetings: [Meeting]) async {
         let nextSnapshot = await snapshotBuilder.make(from: meetings)
         guard !Task.isCancelled else { return }
-        if snap != nextSnapshot {
-            snap = nextSnapshot
-            if savedPrepEvent != nextSnapshot.savedPrepEvent {
-                savedPrepEvent = nextSnapshot.savedPrepEvent
-            }
-            rebuildHeroModel()
+        snap = nextSnapshot
+        if savedPrepEvent != nextSnapshot.savedPrepEvent {
+            savedPrepEvent = nextSnapshot.savedPrepEvent
         }
+        rebuildHeroModel()
         hasLoadedSnapshot = true
     }
 }
@@ -1529,10 +1532,8 @@ struct TodaySnapshot: Equatable {
             var meetingActionCount = 0
             for commitment in meeting.commitments
             where commitment.status == .open || commitment.status == .atRisk {
-                guard meetingActionCount < 2 else { break }
                 summary.count += 1
-                meetingActionCount += 1
-                if summary.preview.count < 3 {
+                if meetingActionCount < 2, summary.preview.count < 3 {
                     summary.preview.append(
                         OpenLoop(
                             meetingID: meeting.id,
@@ -1542,6 +1543,7 @@ struct TodaySnapshot: Equatable {
                             text: commitment.formattedLine
                         )
                     )
+                    meetingActionCount += 1
                 }
             }
 
