@@ -144,7 +144,7 @@ struct InvestorPresentationView: View {
             presentationMetricStrip([
                 PresentationMetric(id: "open", value: "\(impact.openLoops)", label: "OPEN", tint: AppPalette.coral),
                 PresentationMetric(id: "closed", value: "\(impact.closedLoops)", label: "CLOSED", tint: AppPalette.success),
-                PresentationMetric(id: "follow-through", value: impact.followThroughLabel, label: "FOLLOW-THROUGH", tint: AppPalette.accent)
+                PresentationMetric(id: "follow-through", value: impact.followThroughLabel, label: "TASKS DONE", tint: AppPalette.accent)
             ])
             .overlay(alignment: .top) { Divider() }
             .overlay(alignment: .bottom) { Divider() }

@@ -35,7 +35,8 @@ struct ScribeflowCoreTests {
     func complianceCopyDoesNotPromiseRestrictedCallRecording() {
         #expect(RecordingCompliance.restrictedCallRecordingNotice.contains("cannot record cellular"))
         #expect(RecordingCompliance.restrictedCallRecordingNotice.contains("App Store-safe"))
-        #expect(RecordingCompliance.providerCallRequirement.contains("app-owned VoIP"))
+        #expect(RecordingCompliance.providerCallRequirement.contains("supported calling service"))
+        #expect(RecordingCompliance.providerCallRequirement.contains("participant consent"))
     }
 
     @Test
@@ -172,7 +173,7 @@ struct ScribeflowCoreTests {
 
     @Test
     func evidenceItemsExposeTrustLabels() {
-        #expect(EvidenceItem(text: "Decision captured", level: .verified, supportingSnippets: ["Maya: yes"]).confidenceLabel == "High confidence")
+        #expect(EvidenceItem(text: "Decision captured", level: .verified, supportingSnippets: ["Maya: yes"]).confidenceLabel == "Saved source")
         #expect(EvidenceItem(text: "Possible risk", level: .inferred, supportingSnippets: []).confidenceLabel == "Needs review")
         #expect(EvidenceItem(text: "Bookmark", level: .personalNote, supportingSnippets: []).confidenceLabel == "Personal note")
     }
@@ -218,7 +219,8 @@ struct ScribeflowCoreTests {
             destinations: [],
             selectedTemplate: .exec,
             selectedPromptID: nil,
-            isPinned: false
+            isPinned: false,
+            purposeOverride: .meeting
         )
 
         let report = try await LocalMeetingSummarizer().summarize(meeting: meeting)
@@ -353,7 +355,8 @@ struct ScribeflowCoreTests {
             selectedTemplate: .discovery,
             selectedPromptID: nil,
             isPinned: false,
-            commitments: commitments
+            commitments: commitments,
+            purposeOverride: .meeting
         )
     }
 
@@ -541,7 +544,14 @@ struct MeetingCopilotTests {
             "We decided to ship the pilot in Q3 across all teams",
             "I'll send the MSA over before end of day tomorrow"
         ]
-        let signals = MeetingCopilot.detect(paragraphs: paragraphs)
+        let signals = MeetingCopilot.detect(
+            paragraphs: paragraphs,
+            purpose: CapturePurpose(
+                kind: .meeting,
+                confidence: .verified,
+                evidence: [.userOverride]
+            )
+        )
         // Text is distilled and sentence-cased ("Ship the pilot"), so match
         // case-insensitively.
         #expect(signals.contains { $0.kind == .decision && $0.text.localizedCaseInsensitiveContains("ship the pilot") })
@@ -570,9 +580,14 @@ struct MeetingExtractionTests {
     private func meeting(notes: String, attendees: [String] = []) -> Meeting {
         var m = Meeting.seed[0]
         m.rawNotes = notes
+        m.authoredNotes = notes
+        m.originalCaptureNotes = notes
+        m.notesAreGenerated = false
         m.attendees = attendees
         m.transcript = []
         m.commitments = []
+        m.aiBrief = nil
+        m.purposeOverride = .meeting
         return m
     }
 

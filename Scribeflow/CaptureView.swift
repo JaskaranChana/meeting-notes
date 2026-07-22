@@ -220,6 +220,7 @@ struct CaptureView: View {
             coordinator.attendees,
             coordinator.manualNotes,
             coordinator.selectedTemplate.rawValue,
+            coordinator.purposeOverride?.rawValue ?? "automatic",
             coordinator.expectedSpeakerCount.map { String($0) } ?? "auto"
         ]
     }
@@ -239,7 +240,7 @@ struct CaptureView: View {
     private func modePill(_ pill: Mode, label: String, icon: String) -> some View {
         Button {
             HapticEngine.tap(.light)
-            withAnimation(AppMotion.smooth) { mode = pill }
+            withAnimation(reduceMotion ? nil : AppMotion.smooth) { mode = pill }
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: icon)
@@ -327,6 +328,7 @@ struct CaptureView: View {
     private var captureDetails: some View {
         DisclosureGroup(isExpanded: $showsCaptureDetails) {
             VStack(alignment: .leading, spacing: 16) {
+                noteTypeRow
                 templateStrip
                 if mode == .record {
                     attendeeDetails
@@ -339,7 +341,7 @@ struct CaptureView: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(AppPalette.ink)
                 Spacer(minLength: 8)
-                Text(coordinator.selectedTemplate.title)
+                Text(selectedPurposeTitle)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(AppPalette.secondaryInk)
             }
@@ -354,6 +356,75 @@ struct CaptureView: View {
                 .strokeBorder(AppPalette.border.opacity(0.45), lineWidth: 0.7)
         )
         .accessibilityIdentifier("capture.details")
+    }
+
+    private var selectedPurposeTitle: String {
+        coordinator.purposeOverride?.title ?? coordinator.currentPurpose.displayTitle
+    }
+
+    private var noteTypeRow: some View {
+        HStack(spacing: 12) {
+            Image(systemName: coordinator.purposeOverride?.systemImage ?? "wand.and.stars")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(AppPalette.accent)
+                .frame(width: 24, height: 24)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Note type")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(AppPalette.ink)
+                Text(coordinator.purposeOverride == nil ? "Detected automatically" : "Chosen for this capture")
+                    .font(.caption)
+                    .foregroundStyle(AppPalette.tertiaryInk)
+            }
+
+            Spacer(minLength: 8)
+
+            Menu {
+                Button {
+                    HapticEngine.select()
+                    coordinator.purposeOverride = nil
+                } label: {
+                    Label("Automatic", systemImage: coordinator.purposeOverride == nil ? "checkmark" : "wand.and.stars")
+                }
+
+                Section("Personal") {
+                    ForEach([CapturePurposeKind.personalNote, .reflection, .idea, .personalPlan], id: \.self) { purpose in
+                        purposeMenuButton(purpose)
+                    }
+                }
+
+                Section("Conversations") {
+                    ForEach([CapturePurposeKind.conversation, .appointment, .learning, .meeting, .call], id: \.self) { purpose in
+                        purposeMenuButton(purpose)
+                    }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Text(selectedPurposeTitle)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(AppPalette.secondaryInk)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(AppPalette.tertiaryInk)
+                }
+                .frame(minHeight: AppLayout.minimumTapTarget)
+            }
+            .accessibilityLabel("Note type, \(selectedPurposeTitle)")
+        }
+    }
+
+    private func purposeMenuButton(_ purpose: CapturePurposeKind) -> some View {
+        Button {
+            HapticEngine.select()
+            coordinator.purposeOverride = purpose
+        } label: {
+            Label(
+                purpose.title,
+                systemImage: coordinator.purposeOverride == purpose ? "checkmark" : purpose.systemImage
+            )
+        }
     }
 
     private var attendeeDetails: some View {
@@ -516,10 +587,10 @@ struct CaptureView: View {
     private func flashMark() {
         HapticEngine.notify(.success)
         coordinator.bookmarkCurrentMoment()
-        withAnimation(AppMotion.snappy) { markFlash = true }
+        withAnimation(reduceMotion ? nil : AppMotion.snappy) { markFlash = true }
         Task {
             try? await Task.sleep(for: .seconds(0.9))
-            withAnimation(AppMotion.fade) { markFlash = false }
+            withAnimation(reduceMotion ? nil : AppMotion.fade) { markFlash = false }
         }
     }
 
@@ -771,7 +842,7 @@ struct CaptureView: View {
                     Capsule()
                         .fill(stageTint.opacity(0.85))
                         .frame(width: geo.size.width * min(1, Double(coordinator.elapsedSeconds) / 3600.0), height: 2)
-                        .animation(.linear(duration: 1), value: coordinator.elapsedSeconds)
+                        .animation(reduceMotion ? nil : .linear(duration: 1), value: coordinator.elapsedSeconds)
                 }
                 .frame(height: 2)
             }
@@ -796,10 +867,10 @@ struct CaptureView: View {
                 .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
         )
         .appShadow(coordinator.isRecording ? AppShadow.hero : AppShadow.floating)
-        .animation(AppMotion.smooth, value: coordinator.isRecording)
-        .animation(AppMotion.smooth, value: coordinator.isPaused)
-        .animation(AppMotion.smooth, value: coordinator.bookmarks.count)
-        .animation(AppMotion.smooth, value: coordinator.catchUpSummary)
+        .animation(reduceMotion ? nil : AppMotion.smooth, value: coordinator.isRecording)
+        .animation(reduceMotion ? nil : AppMotion.smooth, value: coordinator.isPaused)
+        .animation(reduceMotion ? nil : AppMotion.smooth, value: coordinator.bookmarks.count)
+        .animation(reduceMotion ? nil : AppMotion.smooth, value: coordinator.catchUpSummary)
     }
 
     // MARK: Live controls (during recording)
@@ -934,7 +1005,7 @@ struct CaptureView: View {
     private var pauseButton: some View {
         Button {
             HapticEngine.tap(.light)
-            withAnimation(AppMotion.snappy) {
+            withAnimation(reduceMotion ? nil : AppMotion.snappy) {
                 if coordinator.isPaused { coordinator.resumeCapture() }
                 else { coordinator.pauseCapture() }
             }
@@ -1028,7 +1099,7 @@ struct CaptureView: View {
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
-            .animation(AppMotion.smooth, value: coordinator.isRecording)
+            .animation(reduceMotion ? nil : AppMotion.smooth, value: coordinator.isRecording)
 
             RadialGradient(
                 colors: [.clear, .black.opacity(0.28)],
@@ -1092,7 +1163,7 @@ struct CaptureView: View {
                 Text(mode == .record
                     ? "Write while you record"
                     : (coordinator.currentPurpose.allowsMeetingSignals
-                        ? "Capture outcomes and follow-through"
+                        ? "Capture decisions and next steps"
                         : "Capture what matters in your own words"))
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(AppPalette.secondaryInk)
@@ -1160,7 +1231,7 @@ struct CaptureView: View {
                 }
             }
 
-            Label("Final wording and speaker labels update after Save", systemImage: "person.wave.2")
+            Label("Final wording and speaker names improve after Save", systemImage: "person.wave.2")
                 .font(.system(size: 10.5, weight: .medium, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.42))
         }
@@ -1205,6 +1276,7 @@ struct CaptureView: View {
         guard coordinator.title.isEmpty else { return }
         if let event = UpcomingCaptureContext.shared.consume() {
             calendarEvent = event
+            coordinator.hasCalendarContext = true
             coordinator.title = event.title
             coordinator.workspace = event.isVideoCall ? "Calls" : "Meetings"
             coordinator.objective = event.objective
@@ -1218,7 +1290,7 @@ struct CaptureView: View {
     /// templates are explicit choices for conversations that need them.
     private var templateStrip: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("TEMPLATE")
+            Text("SUMMARY STYLE")
                 .font(.caption2.weight(.medium))
                 .foregroundStyle(AppPalette.tertiaryInk)
             ScrollView(.horizontal, showsIndicators: false) {
@@ -1234,7 +1306,7 @@ struct CaptureView: View {
                 .foregroundStyle(AppPalette.tertiaryInk)
                 .fixedSize(horizontal: false, vertical: true)
                 .contentTransition(.opacity)
-                .animation(AppMotion.smooth, value: coordinator.selectedTemplate)
+                .animation(reduceMotion ? nil : AppMotion.smooth, value: coordinator.selectedTemplate)
         }
     }
 
@@ -1242,7 +1314,7 @@ struct CaptureView: View {
         let selected = coordinator.selectedTemplate == template
         return Button {
             HapticEngine.tap(.light)
-            withAnimation(AppMotion.snappy) { coordinator.selectedTemplate = template }
+            withAnimation(reduceMotion ? nil : AppMotion.snappy) { coordinator.selectedTemplate = template }
             persistTemplate(template, for: mode)
         } label: {
             Text(template.title)
@@ -1322,7 +1394,8 @@ struct CaptureView: View {
                 calendarEventID: calendarEvent?.id,
                 calendarStartDate: calendarEvent?.startDate,
                 calendarEndDate: calendarEvent?.endDate,
-                selectedTemplate: coordinator.selectedTemplate
+                selectedTemplate: coordinator.selectedTemplate,
+                purposeOverride: coordinator.purposeOverride
             )
         }
 

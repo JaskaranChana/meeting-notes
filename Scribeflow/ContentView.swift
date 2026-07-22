@@ -9,6 +9,7 @@ private actor RootChromeSnapshotBuilder {
     func make(from meetings: [Meeting]) -> RootChromeSnapshot {
         RootChromeSnapshot(
             openActionItemCount: meetings.reduce(0) { partial, meeting in
+                guard meeting.allowsAccountabilityExtraction else { return partial }
                 return partial + meeting.commitments.reduce(0) { total, commitment in
                     total + (commitment.status == .open || commitment.status == .atRisk ? 1 : 0)
                 }
@@ -54,7 +55,25 @@ private struct RootStoreMaintenanceObserver: View {
                 guard failed else { return }
                 onToast(ToastItem(
                     message: "Couldn't save changes - your latest edits may not persist.",
-                    icon: "exclamationmark.triangle.fill"
+                    icon: "exclamationmark.triangle.fill",
+                    actionTitle: "Retry",
+                    action: { [weak store] in
+                        Task { @MainActor in
+                            guard let store else { return }
+                            await store.flushPersistence()
+                            NotificationCenter.default.post(
+                                name: .scribeflowToast,
+                                object: ToastItem(
+                                    message: store.lastSaveFailed
+                                        ? "Still couldn't save. Check available storage."
+                                        : "Changes saved",
+                                    icon: store.lastSaveFailed
+                                        ? "exclamationmark.triangle.fill"
+                                        : "checkmark.circle.fill"
+                                )
+                            )
+                        }
+                    }
                 ))
             }
             .task(id: store.revision) {
@@ -87,6 +106,7 @@ struct ContentView: View {
     @Environment(MeetingStore.self) private var store
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     #if DEBUG
     @State private var selectedTab: RootTab = AppQARoute.current?.defaultTab ?? .home
     #else
@@ -159,13 +179,13 @@ struct ContentView: View {
                         .zIndex(100)
                 }
             }
-            .animation(AppMotion.fade, value: isPrivacyScreenVisible)
+            .animation(reduceMotion ? nil : AppMotion.fade, value: isPrivacyScreenVisible)
 
             Group {
                 if let toast {
                     ToastView(item: toast, onDismiss: {
                         toastDismissTask?.cancel()
-                        withAnimation(AppMotion.smooth) { self.toast = nil }
+                        withAnimation(reduceMotion ? nil : AppMotion.smooth) { self.toast = nil }
                     })
                     .transition(.asymmetric(
                         insertion: .move(edge: .top).combined(with: .opacity).combined(with: .scale(scale: 0.9, anchor: .top)),
@@ -177,7 +197,7 @@ struct ContentView: View {
                     .allowsHitTesting(toast.actionTitle != nil)
                 }
             }
-            .animation(AppMotion.bounce, value: toast?.id)
+            .animation(reduceMotion ? nil : AppMotion.bounce, value: toast?.id)
 
             RootStoreMaintenanceObserver(
                 sceneIsActive: scenePhase == .active,
@@ -186,7 +206,7 @@ struct ContentView: View {
             )
         }
         .onChange(of: scenePhase) { _, phase in
-            withAnimation(AppMotion.fade) {
+            withAnimation(reduceMotion ? nil : AppMotion.fade) {
                 isPrivacyScreenVisible = phase != .active
             }
             if phase == .active {
@@ -245,7 +265,7 @@ struct ContentView: View {
             toastDismissTask = Task { @MainActor in
                 try? await Task.sleep(for: lifetime)
                 guard !Task.isCancelled else { return }
-                withAnimation(AppMotion.smooth) { toast = nil }
+                withAnimation(reduceMotion ? nil : AppMotion.smooth) { toast = nil }
             }
         }
         .onDisappear {
@@ -270,36 +290,32 @@ struct ContentView: View {
         }
     }
 
-    @ViewBuilder
     private var rootDock: some View {
-        if selectedNavigationDepth == 0 {
-            RootTabBar(
-                items: [
-                    RootTabBarItem(id: RootTab.home.rawValue, label: AppStrings.Navigation.today, systemImage: "house"),
-                    RootTabBarItem(id: RootTab.library.rawValue, label: AppStrings.Navigation.library, systemImage: "rectangle.stack"),
-                    RootTabBarItem(id: RootTab.tasks.rawValue, label: AppStrings.Navigation.tasks, systemImage: "checklist", badge: openActionItemCount),
-                    RootTabBarItem(id: RootTab.calendar.rawValue, label: AppStrings.Navigation.calendar, systemImage: "calendar"),
-                    RootTabBarItem(id: RootTab.ask.rawValue, label: AppStrings.Navigation.ask, systemImage: "magnifyingglass")
-                ],
-                selection: Binding(
-                    get: { selectedTab.rawValue },
-                    set: { newValue in
-                        if let tab = RootTab(rawValue: newValue) {
-                            selectedTab = tab
-                        }
+        RootTabBar(
+            items: [
+                RootTabBarItem(id: RootTab.home.rawValue, label: AppStrings.Navigation.today, systemImage: "house"),
+                RootTabBarItem(id: RootTab.library.rawValue, label: AppStrings.Navigation.library, systemImage: "rectangle.stack"),
+                RootTabBarItem(id: RootTab.tasks.rawValue, label: AppStrings.Navigation.tasks, systemImage: "checklist", badge: openActionItemCount),
+                RootTabBarItem(id: RootTab.calendar.rawValue, label: AppStrings.Navigation.calendar, systemImage: "calendar"),
+                RootTabBarItem(id: RootTab.ask.rawValue, label: AppStrings.Navigation.ask, systemImage: "magnifyingglass")
+            ],
+            selection: Binding(
+                get: { selectedTab.rawValue },
+                set: { newValue in
+                    if let tab = RootTab(rawValue: newValue) {
+                        selectedTab = tab
                     }
-                )
+                }
             )
-            .transition(.move(edge: .bottom).combined(with: .opacity))
-        }
+        )
     }
 
     private var mainTabs: some View {
-        VStack(spacing: 0) {
+        ZStack(alignment: .bottom) {
             TabView(selection: $selectedTab) {
                 NavigationStack(path: $homePath) {
                     TodayView(
-                        isActive: selectedTab == .home,
+                        isActive: selectedTab == .home && homePath.isEmpty,
                         selectedMeetingID: $selectedMeetingID,
                         onCapture: { mode in captureMode = mode },
                         onSettingsTap: { showingSettings = true },
@@ -314,7 +330,7 @@ struct ContentView: View {
 
                 NavigationStack(path: $libraryPath) {
                     MeetingsView(
-                        isActive: selectedTab == .library,
+                        isActive: selectedTab == .library && libraryPath.isEmpty,
                         selectedMeetingID: $selectedMeetingID,
                         onAskTap: { activateRootTab(.ask) },
                         toast: $toast
@@ -325,7 +341,7 @@ struct ContentView: View {
 
                 NavigationStack(path: $tasksPath) {
                     ActionItemsView(
-                        isActive: selectedTab == .tasks,
+                        isActive: selectedTab == .tasks && tasksPath.isEmpty,
                         selectedMeetingID: $selectedMeetingID,
                         toast: $toast
                     )
@@ -335,7 +351,7 @@ struct ContentView: View {
 
                 NavigationStack(path: $calendarPath) {
                     MeetingCalendarView(
-                        isActive: selectedTab == .calendar,
+                        isActive: selectedTab == .calendar && calendarPath.isEmpty,
                         selectedMeetingID: $selectedMeetingID,
                         onCapture: { mode in captureMode = mode },
                         toast: $toast
@@ -345,7 +361,7 @@ struct ContentView: View {
                 .tag(RootTab.calendar)
 
                 NavigationStack(path: $askPath) {
-                    AskView(isActive: selectedTab == .ask)
+                    AskView(isActive: selectedTab == .ask && askPath.isEmpty)
                         .toolbar(.hidden, for: .tabBar)
                 }
                 .tag(RootTab.ask)
@@ -353,12 +369,16 @@ struct ContentView: View {
             .toolbar(.hidden, for: .tabBar)
             .tint(AppPalette.accent)
 
-            if selectedNavigationDepth == 0 {
-                RootDockChrome {
-                    rootDock
-                }
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+            RootDockChrome {
+                rootDock
             }
+            .offset(y: isRootDockVisible ? 0 : AppDockMetrics.chromeHeight + 24)
+            .opacity(isRootDockVisible ? 1 : 0)
+            .allowsHitTesting(isRootDockVisible)
+            .accessibilityHidden(!isRootDockVisible)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: isRootDockVisible)
+            .ignoresSafeArea(.keyboard, edges: .bottom)
+            .zIndex(10)
         }
         .background(AppPalette.background.ignoresSafeArea())
         .modifier(ScribeflowChrome())
@@ -372,6 +392,10 @@ struct ContentView: View {
         case .calendar: calendarPath.count
         case .ask: askPath.count
         }
+    }
+
+    private var isRootDockVisible: Bool {
+        selectedNavigationDepth == 0
     }
 
     private func activateRootTab(_ tab: RootTab) {

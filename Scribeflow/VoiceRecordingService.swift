@@ -390,11 +390,11 @@ final class LocalVoiceRecordingService: NSObject, AVAudioRecorderDelegate, Trans
             )
             : transcriptionContext
         var usedFallback = false
-        let baseResult: TranscriptionResult
 
+        #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
             do {
-                baseResult = try await SpeechAnalyzerFileTranscriber.transcribe(
+                let baseResult = try await SpeechAnalyzerFileTranscriber.transcribe(
                     audioURL: audioURL,
                     context: context,
                     defaultSpeaker: "Voice note"
@@ -408,6 +408,7 @@ final class LocalVoiceRecordingService: NSObject, AVAudioRecorderDelegate, Trans
                 usedFallback = true
             }
         }
+        #endif
 
         let legacy = try await transcribeLegacy(
             url: audioURL,

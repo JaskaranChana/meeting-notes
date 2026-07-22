@@ -387,6 +387,7 @@ enum SpeechRecognitionPipeline {
         onTranscript: @escaping @MainActor (String, Bool) -> Void,
         onError: @escaping @MainActor (String) -> Void
     ) async throws -> any LiveSpeechTranscribing {
+        #if compiler(>=6.2)
         if #available(iOS 26.0, *), SpeechTranscriber.isAvailable,
            let session = try? await AnalyzerLiveSpeechSession.make(
                inputFormat: inputFormat,
@@ -396,6 +397,7 @@ enum SpeechRecognitionPipeline {
            ) {
             return session
         }
+        #endif
 
         guard let recognizer = SpeechRecognitionSupport.makeLegacyRecognizer(
             locale: context.recognitionLocale
@@ -696,6 +698,7 @@ private final class LegacyLiveSpeechSession: LiveSpeechTranscribing {
     }
 }
 
+#if compiler(>=6.2)
 @available(iOS 26.0, *)
 @MainActor
 private final class AnalyzerLiveSpeechSession: LiveSpeechTranscribing {
@@ -1091,3 +1094,4 @@ private final class SpeechPCMBufferConverter: @unchecked Sendable {
         return output
     }
 }
+#endif

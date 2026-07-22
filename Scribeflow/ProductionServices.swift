@@ -495,6 +495,20 @@ actor TranscriptionRetryQueue {
         if let data = try? Data(contentsOf: fileURL),
            let decoded = try? decoder.decode([TranscriptionRetryJob].self, from: data) {
             jobs = decoded
+            var recoveredInterruptedJob = false
+            for index in jobs.indices where jobs[index].state == .running {
+                // A running state cannot survive process termination. Make it
+                // immediately retryable on the next launch instead of leaving
+                // a job permanently stuck or starting duplicate work.
+                jobs[index].state = .failed
+                jobs[index].lastError = "The previous transcription was interrupted and will retry."
+                jobs[index].nextRetryAt = nil
+                jobs[index].updatedAt = .now
+                recoveredInterruptedJob = true
+            }
+            if recoveredInterruptedJob {
+                persist()
+            }
         }
     }
 
@@ -529,10 +543,24 @@ actor TranscriptionRetryQueue {
             .filter { job in
                 job.meetingID != nil
                     && job.canRetry
+                    && job.state != .running
                     && job.state != .completed
                     && (job.nextRetryAt == nil || job.nextRetryAt! <= now)
             }
             .sorted { $0.createdAt < $1.createdAt }
+    }
+
+    func nextRetryDate(now: Date = .now) -> Date? {
+        loadIfNeeded()
+        return jobs.lazy
+            .filter {
+                $0.meetingID != nil
+                    && $0.canRetry
+                    && $0.state != .running
+                    && $0.state != .completed
+            }
+            .map { $0.nextRetryAt ?? now }
+            .min()
     }
 
     func job(id: TranscriptionRetryJob.ID) -> TranscriptionRetryJob? {
@@ -564,6 +592,7 @@ final class TranscriptionRecoveryCoordinator {
     static let shared = TranscriptionRecoveryCoordinator()
 
     private var isProcessing = false
+    private var retryWakeTask: Task<Void, Never>?
 
     enum RequestOutcome: Equatable {
         case completed
@@ -611,6 +640,8 @@ final class TranscriptionRecoveryCoordinator {
     func processPending(using store: MeetingStore) async {
         guard !isProcessing else { return }
         isProcessing = true
+        retryWakeTask?.cancel()
+        retryWakeTask = nil
         defer { isProcessing = false }
 
         let queue = TranscriptionRetryQueue.shared
@@ -685,5 +716,21 @@ final class TranscriptionRecoveryCoordinator {
         }
 
         await EnhancedMeetingTranscriptionService.shared.releaseModels()
+        await scheduleNextRetry(using: store)
+    }
+
+    private func scheduleNextRetry(using store: MeetingStore) async {
+        guard let retryDate = await TranscriptionRetryQueue.shared.nextRetryDate() else { return }
+        let delay = max(1, retryDate.timeIntervalSinceNow)
+        retryWakeTask = Task { @MainActor [weak self, weak store] in
+            do {
+                try await Task.sleep(for: .seconds(delay))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, let self, let store else { return }
+            self.retryWakeTask = nil
+            await self.processPending(using: store)
+        }
     }
 }

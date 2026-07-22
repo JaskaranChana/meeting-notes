@@ -36,7 +36,7 @@ enum NoteTemplate: String, Codable, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .general:
-            "General"
+            "Automatic"
         case .discovery:
             "Discovery"
         case .exec:
@@ -55,13 +55,13 @@ enum NoteTemplate: String, Codable, CaseIterable, Identifiable {
     var description: String {
         switch self {
         case .general:
-            "Organizes what matters without assuming work, tasks, or risks."
+            "Adapts to the content without assuming work, tasks, or risks."
         case .discovery:
             "Pulls out buyer pain, signals, and next steps."
         case .exec:
             "Summarizes the meeting for fast leadership review."
         case .manager:
-            "Frames the conversation as coaching and follow-through."
+            "Frames the conversation around coaching and clear next steps."
         case .standup:
             "Pulls blockers, progress, and ownership from a daily or weekly sync."
         case .interview:
@@ -78,7 +78,7 @@ enum NoteTemplate: String, Codable, CaseIterable, Identifiable {
         case .discovery:
             "Help the note owner understand needs, constraints, intent signals, and the agreed next step."
         case .exec:
-            "Lead with the bottom line, business impact, decisions, risks, and only the follow-through leadership needs."
+            "Lead with the bottom line, business impact, decisions, risks, and only the next steps leadership needs."
         case .manager:
             "Focus on the other person's perspective, goals, blockers, commitments, and the next useful coaching conversation."
         case .standup:
@@ -118,7 +118,7 @@ enum MeetingContextMode: String, Codable, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .general:  "General"
+        case .general:  "Standard"
         case .coaching: "Coach"
         case .sales:    "Sales"
         case .legal:    "Legal"
@@ -256,7 +256,7 @@ enum NoteRewriteStyle: String, CaseIterable, Identifiable {
         case .executive:
             "Higher-level summary for leadership updates."
         case .actionFocused:
-            "Pushes ownership, next steps, and follow-through."
+            "Highlights ownership, deadlines, and next steps."
         }
     }
 }
@@ -968,6 +968,14 @@ struct AIBriefData: Codable, Hashable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard !container.allKeys.isEmpty else {
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "AI brief contains no recognized fields."
+                )
+            )
+        }
         capturePurpose = try container.decodeIfPresent(CapturePurposeKind.self, forKey: .capturePurpose)
         captureTopic = try container.decodeIfPresent(String.self, forKey: .captureTopic) ?? ""
         captureDomain = try container.decodeIfPresent(String.self, forKey: .captureDomain) ?? ""

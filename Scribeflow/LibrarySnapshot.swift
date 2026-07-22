@@ -28,6 +28,7 @@ struct LibrarySnapshot: Equatable {
     var isMeetingStoreEmpty = true
     var segmentCounts: [LibrarySegment: Int] = [:]
     var dateGroups: [LibraryDateGroup] = []
+    var searchMatches: [Meeting.ID: LibrarySearchMatch] = [:]
 }
 
 struct LibraryDateGroup: Equatable {
@@ -36,21 +37,24 @@ struct LibraryDateGroup: Equatable {
 }
 
 actor LibrarySnapshotBuilder {
+    private var cachedRevision = -1
+    private var cachedRecentMeetings: [Meeting] = []
+    private var cachedPinnedMeetings: [Meeting] = []
+    private var cachedAccountabilityMeetingIDs: Set<Meeting.ID> = []
+    private var cachedOpenLoopCount = 0
+
     func snapshot(for key: LibrarySnapshotKey, meetings: [Meeting]) -> LibrarySnapshot {
-        let recentMeetings = meetings.sorted(by: Meeting.sortDescending)
-        let pinnedMeetings = recentMeetings.filter(\.isPinned)
-        let accountabilityMeetingIDs = Set(meetings.compactMap { meeting in
-            meeting.allowsAccountabilityExtraction ? meeting.id : nil
-        })
-        let scopedMeetings = scopedMeetings(
-            from: recentMeetings,
+        refreshBaseIfNeeded(meetings: meetings, revision: key.revision)
+        let scoped = scopedMeetings(
+            from: cachedRecentMeetings,
             key: key,
-            accountabilityMeetingIDs: accountabilityMeetingIDs
+            accountabilityMeetingIDs: cachedAccountabilityMeetingIDs
         )
-        let pinnedIDs = Set(pinnedMeetings.map(\.id))
+        let scopedMeetings = scoped.meetings
+        let pinnedIDs = Set(cachedPinnedMeetings.map(\.id))
         var segmentCounts: [LibrarySegment: Int] = [:]
         for meeting in scopedMeetings {
-            let allowsAccountability = accountabilityMeetingIDs.contains(meeting.id)
+            let allowsAccountability = cachedAccountabilityMeetingIDs.contains(meeting.id)
             for segment in LibrarySegment.allCases
             where segment.matches(meeting, allowsAccountability: allowsAccountability) {
                 segmentCounts[segment, default: 0] += 1
@@ -65,7 +69,7 @@ actor LibrarySnapshotBuilder {
            key.dateFilter == .all,
            key.sortMode == .newest,
            key.segment == .all {
-            pinnedResults = pinnedMeetings
+            pinnedResults = cachedPinnedMeetings
         } else {
             pinnedResults = []
         }
@@ -77,7 +81,7 @@ actor LibrarySnapshotBuilder {
             baseResults = scopedMeetings.filter {
                 key.segment.matches(
                     $0,
-                    allowsAccountability: accountabilityMeetingIDs.contains($0.id)
+                    allowsAccountability: cachedAccountabilityMeetingIDs.contains($0.id)
                 )
             }
         }
@@ -91,15 +95,27 @@ actor LibrarySnapshotBuilder {
             // though no view consumed it.
             folderResults: [],
             smartCollections: [],
-            totalMeetingsCount: meetings.count,
-            pinnedCount: pinnedMeetings.count,
-            openLoopCount: openLoopCount(
-                from: recentMeetings,
-                accountabilityMeetingIDs: accountabilityMeetingIDs
-            ),
-            isMeetingStoreEmpty: meetings.isEmpty,
+            totalMeetingsCount: cachedRecentMeetings.count,
+            pinnedCount: cachedPinnedMeetings.count,
+            openLoopCount: cachedOpenLoopCount,
+            isMeetingStoreEmpty: cachedRecentMeetings.isEmpty,
             segmentCounts: segmentCounts,
-            dateGroups: dateGroups(from: libraryResults)
+            dateGroups: dateGroups(from: libraryResults),
+            searchMatches: scoped.searchMatches
+        )
+    }
+
+    private func refreshBaseIfNeeded(meetings: [Meeting], revision: Int) {
+        guard revision != cachedRevision else { return }
+        cachedRevision = revision
+        cachedRecentMeetings = meetings.sorted(by: Meeting.sortDescending)
+        cachedPinnedMeetings = cachedRecentMeetings.filter(\.isPinned)
+        cachedAccountabilityMeetingIDs = Set(meetings.compactMap { meeting in
+            meeting.allowsAccountabilityExtraction ? meeting.id : nil
+        })
+        cachedOpenLoopCount = openLoopCount(
+            from: cachedRecentMeetings,
+            accountabilityMeetingIDs: cachedAccountabilityMeetingIDs
         )
     }
 
@@ -137,7 +153,7 @@ actor LibrarySnapshotBuilder {
         from meetings: [Meeting],
         key: LibrarySnapshotKey,
         accountabilityMeetingIDs: Set<Meeting.ID>
-    ) -> [Meeting] {
+    ) -> (meetings: [Meeting], searchMatches: [Meeting.ID: LibrarySearchMatch]) {
         let collectionScoped = meetingsMatching(
             key.collection,
             in: meetings,
@@ -146,8 +162,18 @@ actor LibrarySnapshotBuilder {
             .filter { matchesTypeFilter(key.typeFilter, meeting: $0) }
             .filter { matchesDateFilter(key.dateFilter, meeting: $0) }
 
-        guard key.hasSearchQuery else { return collectionScoped }
-        return collectionScoped.filter { LibrarySearchMatcher.matches($0, query: key.query) }
+        guard key.hasSearchQuery else { return (collectionScoped, [:]) }
+        var results: [Meeting] = []
+        var searchMatches: [Meeting.ID: LibrarySearchMatch] = [:]
+        results.reserveCapacity(min(collectionScoped.count, 32))
+
+        for meeting in collectionScoped {
+            guard !Task.isCancelled else { break }
+            guard let match = LibrarySearchMatcher.match(in: meeting, query: key.query) else { continue }
+            results.append(meeting)
+            searchMatches[meeting.id] = match
+        }
+        return (results, searchMatches)
     }
 
     private func sorted(_ meetings: [Meeting], mode: LibrarySortMode) -> [Meeting] {
@@ -267,9 +293,11 @@ actor LibrarySnapshotBuilder {
         accountabilityMeetingIDs: Set<Meeting.ID>
     ) -> Int {
         guard accountabilityMeetingIDs.contains(meeting.id) else { return 0 }
-        return meeting.commitments
-            .filter { $0.status == .open || $0.status == .atRisk }
-            .count
+        return meeting.commitments.reduce(into: 0) { count, commitment in
+            if commitment.status == .open || commitment.status == .atRisk {
+                count += 1
+            }
+        }
     }
 
 }

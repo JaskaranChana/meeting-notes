@@ -14,14 +14,14 @@ enum CapturePurposeKind: String, Codable, CaseIterable, Hashable {
     var title: String {
         switch self {
         case .personalNote: "Personal note"
-        case .reflection: "Personal reflection"
-        case .idea: "Idea capture"
-        case .personalPlan: "Personal planning"
+        case .reflection: "Reflection"
+        case .idea: "Idea"
+        case .personalPlan: "Plan"
         case .conversation: "Conversation"
         case .appointment: "Appointment"
-        case .learning: "Learning notes"
-        case .meeting: "Work meeting"
-        case .call: "Structured call"
+        case .learning: "Class or learning"
+        case .meeting: "Meeting"
+        case .call: "Call"
         }
     }
 

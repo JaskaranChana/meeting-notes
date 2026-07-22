@@ -51,19 +51,33 @@ enum LibrarySearchMatcher {
     }
 
     private static func snippet(in text: String, query: String) -> String? {
-        let cleanedText = collapsedWhitespace(text)
-        guard let range = cleanedText.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) else {
-            return nil
+        let options: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+        if let range = text.range(of: query, options: options) {
+            return contextualSnippet(in: text, around: range)
         }
 
-        let leadingCharacters = min(44, cleanedText.distance(from: cleanedText.startIndex, to: range.lowerBound))
-        let trailingCharacters = min(58, cleanedText.distance(from: range.upperBound, to: cleanedText.endIndex))
-        let start = cleanedText.index(range.lowerBound, offsetBy: -leadingCharacters)
-        let end = cleanedText.index(range.upperBound, offsetBy: trailingCharacters)
+        // A multi-word query may span a line break or repeated whitespace.
+        // Only normalize the complete field for that less-common case; single
+        // word searches avoid allocating a second full transcript string.
+        guard query.contains(where: \.isWhitespace) else { return nil }
+        let cleanedText = collapsedWhitespace(text)
+        guard let range = cleanedText.range(of: query, options: options) else { return nil }
+        return contextualSnippet(in: cleanedText, around: range)
+    }
 
-        var result = String(cleanedText[start..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
-        if start > cleanedText.startIndex { result = "..." + result }
-        if end < cleanedText.endIndex { result += "..." }
+    private static func contextualSnippet(
+        in text: String,
+        around range: Range<String.Index>
+    ) -> String {
+        let leadingCharacters = min(44, text.distance(from: text.startIndex, to: range.lowerBound))
+        let trailingCharacters = min(58, text.distance(from: range.upperBound, to: text.endIndex))
+        let start = text.index(range.lowerBound, offsetBy: -leadingCharacters)
+        let end = text.index(range.upperBound, offsetBy: trailingCharacters)
+
+        var result = collapsedWhitespace(String(text[start..<end]))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if start > text.startIndex { result = "..." + result }
+        if end < text.endIndex { result += "..." }
         return result
     }
 
@@ -238,7 +252,7 @@ struct ActionableCompactMeetingRow: View {
 struct EditorialLibraryRow: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let meeting: Meeting
-    var searchQuery: String = ""
+    var searchMatch: LibrarySearchMatch? = nil
 
     private static let relativeFormatter: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
@@ -250,6 +264,9 @@ struct EditorialLibraryRow: View {
     }
 
     private var summaryLine: String {
+        if let searchMatch {
+            return "\(searchMatch.label): \(searchMatch.snippet)"
+        }
         if meeting.status == .processing { return meeting.stage }
         if let title = (meeting.summaries.first(where: { $0.template == meeting.selectedTemplate })
             ?? meeting.summaries.first)?.summary.title,
@@ -439,6 +456,7 @@ private struct FolderDetailSnapshotKey: Hashable {
 private struct FolderDetailSnapshot: Equatable {
     var meetings: [Meeting] = []
     var visibleMeetings: [Meeting] = []
+    var searchMatches: [Meeting.ID: LibrarySearchMatch] = [:]
 }
 
 private actor FolderDetailSnapshotBuilder {
@@ -461,21 +479,20 @@ private actor FolderDetailSnapshotBuilder {
         }
 
         var matches: [Meeting] = []
+        var searchMatches: [Meeting.ID: LibrarySearchMatch] = [:]
         matches.reserveCapacity(min(cachedMeetings.count, 24))
         for meeting in cachedMeetings {
             guard !Task.isCancelled else { break }
-            if Self.matches(meeting, query: key.query) {
+            if let match = LibrarySearchMatcher.match(in: meeting, query: key.query) {
                 matches.append(meeting)
+                searchMatches[meeting.id] = match
             }
         }
-        return FolderDetailSnapshot(meetings: cachedMeetings, visibleMeetings: matches)
-    }
-
-    private static func matches(_ meeting: Meeting, query: String) -> Bool {
-        meeting.title.localizedStandardContains(query)
-            || meeting.objective.localizedStandardContains(query)
-            || meeting.attendees.contains(where: { $0.localizedStandardContains(query) })
-            || meeting.rawNotes.localizedStandardContains(query)
+        return FolderDetailSnapshot(
+            meetings: cachedMeetings,
+            visibleMeetings: matches,
+            searchMatches: searchMatches
+        )
     }
 }
 
@@ -536,7 +553,10 @@ struct FolderDetailView: View {
                 } else {
                     LazyVStack(spacing: 0) {
                         ForEach(snapshot.visibleMeetings) { meeting in
-                            EditorialLibraryRow(meeting: meeting, searchQuery: searchText)
+                            EditorialLibraryRow(
+                                meeting: meeting,
+                                searchMatch: snapshot.searchMatches[meeting.id]
+                            )
                         }
                     }
                 }
@@ -558,9 +578,7 @@ struct FolderDetailView: View {
             let meetings = store.meetings
             let nextSnapshot = await snapshotBuilder.make(meetings: meetings, key: key)
             guard !Task.isCancelled, snapshotKey == key else { return }
-            if snapshot != nextSnapshot {
-                snapshot = nextSnapshot
-            }
+            snapshot = nextSnapshot
             hasLoadedSnapshot = true
         }
     }
@@ -628,7 +646,7 @@ struct FolderDetailView: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(AppPalette.ink)
                 Spacer(minLength: 8)
-                Text("Source-linked")
+                Text("Uses your notes")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(AppPalette.accent)
             }

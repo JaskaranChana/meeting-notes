@@ -23,6 +23,7 @@ struct TodayView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let isActive: Bool
     @Binding var selectedMeetingID: Meeting.ID?
     /// Open the unified capture surface in either `.record` or `.type` mode.
@@ -172,7 +173,7 @@ struct TodayView: View {
                 heroView
                     .id(heroStyle)
                     .motionEntrance(step: 0, active: hasAnimatedIn)
-                    .animation(AppMotion.smooth, value: heroStyle)
+                    .animation(reduceMotion ? nil : AppMotion.smooth, value: heroStyle)
 
                 if !snap.processingMeetings.isEmpty {
                     HomeProcessingSection(meetings: snap.processingMeetings)
@@ -404,7 +405,7 @@ struct TodayView: View {
         .onReceive(NotificationCenter.default.publisher(for: .scribeflowDockScrollToTop)) { note in
             // Re-tap of the Today dock tab → scroll to top.
             guard (note.object as? String) == "home" else { return }
-            withAnimation(AppMotion.smooth) {
+            withAnimation(reduceMotion ? nil : AppMotion.smooth) {
                 proxy.scrollTo("top", anchor: .top)
             }
         }
@@ -420,7 +421,7 @@ struct TodayView: View {
                 .background(AppPalette.accent.opacity(0.12), in: Circle())
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("Investor demo mode")
+                Text("Presentation mode")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(AppPalette.ink)
                 Text("Curated workspace is loaded for a repeatable walkthrough.")
@@ -580,14 +581,14 @@ struct TodayView: View {
                 if dynamicTypeSize.isAccessibilitySize {
                     VStack(alignment: .leading, spacing: 10) {
                         briefStat("\(weekMeetingCount)", weekMeetingCount == 1 ? "meeting" : "meetings")
-                        briefStat("\(followThroughPct)%", "follow-through")
+                        briefStat("\(followThroughPct)%", "tasks done")
                         allTasksButton
                     }
                 } else {
                     HStack(spacing: 8) {
                         briefStat("\(weekMeetingCount)", weekMeetingCount == 1 ? "meeting" : "meetings")
                         Circle().fill(AppPalette.tertiaryInk.opacity(0.5)).frame(width: 3, height: 3)
-                        briefStat("\(followThroughPct)%", "follow-through")
+                        briefStat("\(followThroughPct)%", "tasks done")
                         if followThroughPct >= 60 {
                             Image(systemName: "arrow.up.right")
                                 .font(.caption2.weight(.bold))
@@ -780,7 +781,7 @@ struct TodayView: View {
 
                     Button {
                         HapticEngine.notify(.success)
-                        withAnimation(AppMotion.snappy) {
+                        withAnimation(reduceMotion ? nil : AppMotion.snappy) {
                             store.updateCommitmentStatus(.fulfilled, commitmentID: item.commitment.id, for: item.meetingID)
                         }
                         toast = ToastItem(message: "One off the list", icon: "checkmark.circle.fill")
@@ -923,7 +924,7 @@ struct TodayView: View {
             event.startDate.timeIntervalSince(now) >= -300
         }
         if imminentEvent?.id != candidate?.id {
-            withAnimation(AppMotion.smooth) {
+            withAnimation(reduceMotion ? nil : AppMotion.smooth) {
                 imminentEvent = candidate
             }
         }
@@ -969,7 +970,7 @@ struct TodayView: View {
                     HapticEngine.notify(.success)
                     UpcomingCaptureContext.shared.preferredEvent = event
                     dismissedEventIDs.insert(event.id)
-                    AnalyticsLog.shared.log("calendar.autoRecord.armed", ["title": event.title])
+                    AnalyticsLog.shared.log("calendar.autoRecord.armed", ["source": "calendar"])
                     onCapture(.record)
                 } label: {
                     HStack(spacing: 6) {
@@ -1027,7 +1028,7 @@ struct TodayView: View {
     private var workspaceFeedToggle: some View {
         Button {
             HapticEngine.tap(.light)
-            withAnimation(.easeOut(duration: 0.16)) {
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.16)) {
                 showsWorkspaceFeed.toggle()
             }
         } label: {
@@ -1142,7 +1143,11 @@ struct TodayView: View {
                         HapticEngine.notify(.success)
                     }
                 } catch {
-                    AnalyticsLog.shared.log("audioImport.failed", ["error": error.localizedDescription])
+                    let failure = error as NSError
+                    AnalyticsLog.shared.log("audioImport.failed", [
+                        "domain": failure.domain,
+                        "code": "\(failure.code)"
+                    ])
                     await MainActor.run {
                         toast = ToastItem(message: error.localizedDescription, icon: "exclamationmark.triangle.fill")
                         HapticEngine.notify(.error)
@@ -1217,13 +1222,11 @@ struct TodayView: View {
     private func refreshSnapshot(from meetings: [Meeting]) async {
         let nextSnapshot = await snapshotBuilder.make(from: meetings)
         guard !Task.isCancelled else { return }
-        if snap != nextSnapshot {
-            snap = nextSnapshot
-            if savedPrepEvent != nextSnapshot.savedPrepEvent {
-                savedPrepEvent = nextSnapshot.savedPrepEvent
-            }
-            rebuildHeroModel()
+        snap = nextSnapshot
+        if savedPrepEvent != nextSnapshot.savedPrepEvent {
+            savedPrepEvent = nextSnapshot.savedPrepEvent
         }
+        rebuildHeroModel()
         hasLoadedSnapshot = true
     }
 }
@@ -1529,10 +1532,8 @@ struct TodaySnapshot: Equatable {
             var meetingActionCount = 0
             for commitment in meeting.commitments
             where commitment.status == .open || commitment.status == .atRisk {
-                guard meetingActionCount < 2 else { break }
                 summary.count += 1
-                meetingActionCount += 1
-                if summary.preview.count < 3 {
+                if meetingActionCount < 2, summary.preview.count < 3 {
                     summary.preview.append(
                         OpenLoop(
                             meetingID: meeting.id,
@@ -1542,6 +1543,7 @@ struct TodaySnapshot: Equatable {
                             text: commitment.formattedLine
                         )
                     )
+                    meetingActionCount += 1
                 }
             }
 
@@ -2881,7 +2883,7 @@ private struct DonePreview: View {
         ("waveform.badge.mic", "Capture meetings", AppPalette.accent),
         ("sparkles", "Notes write themselves", AppPalette.gold),
         ("quote.bubble.fill", "Ask across every meeting", AppPalette.success),
-        ("checkmark.seal.fill", "Action turns into follow-through", AppPalette.coral)
+        ("checkmark.seal.fill", "Tasks stay visible until done", AppPalette.coral)
     ]
 
     var body: some View {
@@ -3945,14 +3947,14 @@ private struct EditorialInbox: View {
     var body: some View {
         let visible = Array(loops.prefix(3))
         VStack(alignment: .leading, spacing: 6) {
-            EditorialSectionHead(title: "Inbox") {
+            EditorialSectionHead(title: "Open tasks") {
                 if total > visible.count {
                     Button { HapticEngine.tap(.light); onSeeAll() } label: {
                         EditorialMeta(text: "\(total) open", tint: AppPalette.accent)
                     }
                     .buttonStyle(.plain)
                 } else {
-                    EditorialMeta(text: "\(total) open \(total == 1 ? "loop" : "loops")")
+                    EditorialMeta(text: "\(total) open")
                 }
             }
             VStack(spacing: 0) {
@@ -4355,7 +4357,7 @@ private struct HeroFocus: View {
 
     private var progress: Double { min(1.0, Double(model.streak) / 7.0) }
     private var focusLine: String {
-        if model.open > 0 { return "Clear \(model.open) open loop\(model.open == 1 ? "" : "s")" }
+        if model.open > 0 { return "Review \(model.open) open task\(model.open == 1 ? "" : "s")" }
         if model.today > 0 { return "\(model.today) captured today" }
         return "Capture your first note"
     }

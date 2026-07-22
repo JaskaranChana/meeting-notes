@@ -741,7 +741,9 @@ enum AppDockMetrics {
     static let chromeVerticalPadding: CGFloat = 8
     static let chromeHeight: CGFloat = height + chromeVerticalPadding * 2 + abs(centerButtonLift)
     static let chromeCornerRadius: CGFloat = 30
-    static let scrollEndPadding: CGFloat = 14
+    /// Root lists scroll beyond the overlaid dock instead of changing the
+    /// TabView's height when navigation pushes or pops a detail screen.
+    static let scrollEndPadding: CGFloat = chromeHeight + 14
 }
 
 /// Tab item shown in `RootTabBar`. The `id` is the tab's raw value;

@@ -234,6 +234,79 @@ struct ToastItem: Equatable {
     static func == (lhs: ToastItem, rhs: ToastItem) -> Bool { lhs.id == rhs.id }
 }
 
+/// Owns the short Undo window for note deletion independently of whichever
+/// screen initiated it. Keeping finalization out of a transient view prevents
+/// navigation or tab changes from leaking audio files or deleting them while
+/// the Undo action is still visible.
+@MainActor
+final class MeetingDeletionCoordinator {
+    static let shared = MeetingDeletionCoordinator()
+
+    private struct PendingDeletion {
+        let store: MeetingStore
+        let meeting: Meeting
+        let originalIndex: Int
+        let finalizationTask: Task<Void, Never>
+    }
+
+    private static let finalizationDelay: Duration = .seconds(6)
+    private var pending: [UUID: PendingDeletion] = [:]
+
+    private init() {}
+
+    func deleteMeeting(_ id: Meeting.ID, from store: MeetingStore) -> ToastItem? {
+        guard let (meeting, originalIndex) = store.softDeleteMeeting(id) else { return nil }
+
+        let deletionID = UUID()
+        let task = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: Self.finalizationDelay)
+            } catch {
+                return
+            }
+            self?.finalize(deletionID)
+        }
+        pending[deletionID] = PendingDeletion(
+            store: store,
+            meeting: meeting,
+            originalIndex: originalIndex,
+            finalizationTask: task
+        )
+
+        return ToastItem(
+            message: "Deleted \"\(meeting.title)\"",
+            icon: "trash",
+            actionTitle: "Undo",
+            action: { [weak self] in
+                guard self?.undo(deletionID) == true else { return }
+                HapticEngine.notify(.success)
+            }
+        )
+    }
+
+    /// Invalidates receipts that belong to a library being replaced or wiped.
+    /// Their recordings are handled by the owning destructive operation.
+    func discardAllPending() {
+        for deletion in pending.values {
+            deletion.finalizationTask.cancel()
+        }
+        pending.removeAll()
+    }
+
+    @discardableResult
+    private func undo(_ deletionID: UUID) -> Bool {
+        guard let deletion = pending.removeValue(forKey: deletionID) else { return false }
+        deletion.finalizationTask.cancel()
+        deletion.store.restoreMeeting(deletion.meeting, at: deletion.originalIndex)
+        return true
+    }
+
+    private func finalize(_ deletionID: UUID) {
+        guard let deletion = pending.removeValue(forKey: deletionID) else { return }
+        deletion.store.finalizeDelete(deletion.meeting)
+    }
+}
+
 struct ToastView: View {
     let item: ToastItem
     var onDismiss: (() -> Void)? = nil
@@ -1712,7 +1785,12 @@ final class AnalyticsLog {
 
     func log(_ name: String, _ context: [String: String] = [:]) {
         guard isEnabled else { return }
-        let event = AnalyticsEvent(name: name, context: context)
+        let sanitizedName = Self.sanitizedEventName(name)
+        guard !sanitizedName.isEmpty else { return }
+        let event = AnalyticsEvent(
+            name: sanitizedName,
+            context: Self.sanitizedContext(context)
+        )
         events.append(event)
         // Cap log to 2,000 events so it stays bounded.
         if events.count > 2_000 { events.removeFirst(events.count - 2_000) }
@@ -1771,6 +1849,49 @@ final class AnalyticsLog {
         return (try? decoder.decode([AnalyticsEvent].self, from: data)) ?? []
     }
 
+    nonisolated private static func sanitizedEventName(_ value: String) -> String {
+        let allowedPunctuation = CharacterSet(charactersIn: "._-")
+        let allowed = CharacterSet.alphanumerics.union(allowedPunctuation)
+        let scalars = value.unicodeScalars.filter { allowed.contains($0) }
+        return String(String.UnicodeScalarView(scalars).prefix(64))
+    }
+
+    nonisolated private static func sanitizedContext(
+        _ context: [String: String]
+    ) -> [String: String] {
+        context.reduce(into: [:]) { result, entry in
+            let normalizedKey = entry.key.lowercased()
+            guard isAllowedContextKey(normalizedKey) else { return }
+
+            let cleanedValue = entry.value
+                .replacingOccurrences(of: "\n", with: " ")
+                .replacingOccurrences(of: "\r", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanedValue.isEmpty else { return }
+
+            let looksSensitive = cleanedValue.contains("://")
+                || cleanedValue.contains("@")
+                || cleanedValue.hasPrefix("/")
+                || cleanedValue.hasPrefix("~")
+            result[entry.key] = looksSensitive
+                ? "[redacted]"
+                : String(cleanedValue.prefix(80))
+        }
+    }
+
+    /// Activity history is intentionally structural. Restricting context at
+    /// the persistence boundary prevents future call sites from accidentally
+    /// writing note text, people, URLs, or other user-authored content.
+    nonisolated private static func isAllowedContextKey(_ key: String) -> Bool {
+        switch key {
+        case "code", "count", "domain", "mode", "provider",
+             "resultcount", "source", "status", "target":
+            return true
+        default:
+            return false
+        }
+    }
+
     private func save() {
         saveTask?.cancel()
         let snapshot = events
@@ -1783,7 +1904,7 @@ final class AnalyticsLog {
             guard let data = try? encoder.encode(snapshot) else { return }
             try? data.write(to: destination, options: .atomic)
             try? FileManager.default.setAttributes(
-                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                [.protectionKey: FileProtectionType.complete],
                 ofItemAtPath: destination.path
             )
         }

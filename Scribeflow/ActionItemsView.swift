@@ -382,6 +382,7 @@ private actor ActionItemsSnapshotBuilder {
 struct ActionItemsView: View {
     @Environment(MeetingStore.self) private var store
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let isActive: Bool
     @Binding var selectedMeetingID: Meeting.ID?
     @Binding var toast: ToastItem?
@@ -479,7 +480,7 @@ struct ActionItemsView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .scribeflowDockScrollToTop)) { note in
             guard (note.object as? String) == "tasks" else { return }
-            withAnimation(AppMotion.smooth) {
+            withAnimation(reduceMotion ? nil : AppMotion.smooth) {
                 proxy.scrollTo("tasks.top", anchor: .top)
             }
         }
@@ -495,9 +496,7 @@ struct ActionItemsView: View {
         let nextSnapshot = await snapshotBuilder.make(meetings: meetings, key: key)
         guard !Task.isCancelled, key == snapshotKey else { return }
 
-        if displaySnapshot != nextSnapshot {
-            displaySnapshot = nextSnapshot
-        }
+        displaySnapshot = nextSnapshot
         hasLoadedSnapshot = true
     }
 
@@ -555,7 +554,7 @@ struct ActionItemsView: View {
     private func statButton(_ target: ActionItemFilter, _ value: Int, _ label: String, _ tint: Color) -> some View {
         Button {
             HapticEngine.select()
-            withAnimation(AppMotion.snappy) { filter = target }
+            withAnimation(reduceMotion ? nil : AppMotion.snappy) { filter = target }
         } label: {
             statCell(value, label, tint)
                 .overlay(alignment: .bottom) {
@@ -576,7 +575,7 @@ struct ActionItemsView: View {
                 font: AppFont.serif(.title3, weight: .medium),
                 color: tint
             )
-            .animation(.easeOut(duration: 0.8), value: hasAnimatedIn)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.8), value: hasAnimatedIn)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 12)
@@ -591,7 +590,7 @@ struct ActionItemsView: View {
         if attentionCount > 0 {
             Button {
                 HapticEngine.tap(.light)
-                withAnimation(AppMotion.snappy) {
+                withAnimation(reduceMotion ? nil : AppMotion.snappy) {
                     filter = displaySnapshot.shouldPreferAtRiskFilter ? .atRisk : .open
                 }
             } label: {
@@ -637,7 +636,7 @@ struct ActionItemsView: View {
                 ForEach(ActionItemFilter.allCases) { mode in
                     Button {
                         HapticEngine.select()
-                        withAnimation(AppMotion.snappy) { filter = mode }
+                        withAnimation(reduceMotion ? nil : AppMotion.snappy) { filter = mode }
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: mode.systemImage)

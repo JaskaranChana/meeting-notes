@@ -87,6 +87,7 @@ private actor AskDerivedSnapshotBuilder {
 struct AskView: View {
     @Environment(MeetingStore.self) private var store
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let isActive: Bool
 
     @State private var prompt = ""
@@ -162,27 +163,28 @@ struct AskView: View {
                 .background(AppPalette.background.ignoresSafeArea())
                 .onChange(of: turns.last?.id) { _, id in
                     guard let id else { return }
-                    withAnimation(AppMotion.smooth) { proxy.scrollTo(id, anchor: .bottom) }
+                    withAnimation(reduceMotion ? nil : AppMotion.smooth) { proxy.scrollTo(id, anchor: .bottom) }
                 }
                 .onChange(of: turns.last?.answer) { _, _ in
                     guard let id = turns.last?.id else { return }
-                    withAnimation(AppMotion.smooth) { proxy.scrollTo(id, anchor: .bottom) }
+                    withAnimation(reduceMotion ? nil : AppMotion.smooth) { proxy.scrollTo(id, anchor: .bottom) }
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .scribeflowDockScrollToTop)) { note in
                     guard note.object as? String == "ask" else { return }
                     composerFocused = false
-                    withAnimation(AppMotion.smooth) {
+                    withAnimation(reduceMotion ? nil : AppMotion.smooth) {
                         proxy.scrollTo("ask.top", anchor: .top)
                     }
                 }
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            // The root dock reserves the bottom safe-area inset, so the
-            // composer only needs a little breathing room at rest.
             inputBar
-                .padding(.bottom, composerFocused ? 0 : AppSpacing.xs)
-                .animation(AppMotion.smooth, value: composerFocused)
+                .padding(
+                    .bottom,
+                    composerFocused ? 0 : AppDockMetrics.chromeHeight + AppSpacing.xs
+                )
+                .animation(reduceMotion ? nil : AppMotion.smooth, value: composerFocused)
         }
         .background(AppPalette.background.ignoresSafeArea())
         .accessibilityIdentifier("ask.view")
@@ -194,7 +196,7 @@ struct AskView: View {
                     Button {
                         HapticEngine.tap(.light)
                         promptTask?.cancel()
-                        withAnimation(AppMotion.smooth) { turns = [] }
+                        withAnimation(reduceMotion ? nil : AppMotion.smooth) { turns = [] }
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "plus.bubble")
@@ -506,7 +508,7 @@ struct AskView: View {
                             let status = AIIntelligenceStatus.current
                             HStack(spacing: 4) {
                                 Image(systemName: status.systemImage).font(.caption2.weight(.bold))
-                                Text(status.isOnDevice ? "Apple Intelligence" : "Basic mode · keyword match")
+                                Text(status.isOnDevice ? "On-device AI" : "On-device search")
                                     .font(.caption2.weight(.semibold))
                                 Text("· \(turn.askedAt.formatted(date: .omitted, time: .shortened))")
                                     .font(.caption2.weight(.semibold))
@@ -517,11 +519,11 @@ struct AskView: View {
                             Button {
                                 HapticEngine.notify(.success)
                                 UIPasteboard.general.string = answer
-                                withAnimation(AppMotion.snappy) { copiedTurnID = turn.id }
+                                withAnimation(reduceMotion ? nil : AppMotion.snappy) { copiedTurnID = turn.id }
                                 Task {
                                     try? await Task.sleep(for: .seconds(2))
                                     if copiedTurnID == turn.id {
-                                        withAnimation(AppMotion.fade) { copiedTurnID = nil }
+                                        withAnimation(reduceMotion ? nil : AppMotion.fade) { copiedTurnID = nil }
                                     }
                                 }
                             } label: {
@@ -661,7 +663,7 @@ struct AskView: View {
                             .accessibilityLabel("Clear")
                         }
                     }
-                    .animation(AppMotion.fade, value: showClearButton)
+                    .animation(reduceMotion ? nil : AppMotion.fade, value: showClearButton)
 
                 Button {
                     if isAnyRunning {
@@ -709,7 +711,7 @@ struct AskView: View {
         promptTask?.cancel()
         let turn = AskTurn(question: cleaned)
         let id = turn.id
-        withAnimation(AppMotion.smooth) { turns.append(turn) }
+        withAnimation(reduceMotion ? nil : AppMotion.smooth) { turns.append(turn) }
         prompt = ""
 
         promptTask = Task {

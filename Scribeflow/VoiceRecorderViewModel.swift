@@ -28,10 +28,14 @@ final class VoiceRecorderViewModel {
     var completedRecording: CompletedVoiceRecording?
     var transcriptionJob: TranscriptionRetryJob?
     var transcriptionResult: TranscriptionResult?
+    var expectedSpeakerCount: Int?
 
     @ObservationIgnored private let recorder: LocalVoiceRecordingService
     @ObservationIgnored private let transcriptionProvider: any TranscriptionProviding
     @ObservationIgnored private var meterTask: Task<Void, Never>?
+    @ObservationIgnored private var operationGeneration: UInt = 0
+    @ObservationIgnored private weak var savedStore: MeetingStore?
+    @ObservationIgnored private var savedMeetingID: Meeting.ID?
 
     init(
         recorder: LocalVoiceRecordingService? = nil,
@@ -51,6 +55,10 @@ final class VoiceRecorderViewModel {
         completedRecording != nil
     }
 
+    var hasUnsavedRecording: Bool {
+        completedRecording != nil || phase == .recording || phase == .paused
+    }
+
     var canRetryTranscript: Bool {
         completedRecording != nil
             && (!transcriptionProvider.requiresSpeechAuthorization || permissions.speech == .ready)
@@ -61,6 +69,10 @@ final class VoiceRecorderViewModel {
 
     var isRecording: Bool {
         phase == .recording
+    }
+
+    var expectedSpeakerCountTitle: String {
+        expectedSpeakerCount.map { "\($0) speaker\($0 == 1 ? "" : "s")" } ?? "Automatic"
     }
 
     var elapsedLabel: String {
@@ -108,13 +120,26 @@ final class VoiceRecorderViewModel {
 
     func requestPermissionsIfNeeded() async {
         guard permissions.microphone == .unknown || permissions.speech == .unknown else { return }
+        let generation = operationGeneration
         phase = .requestingPermission
-        permissions = await VoiceRecordingPermissionService.request()
+        let requestedPermissions = await VoiceRecordingPermissionService.request()
+        guard generation == operationGeneration, !Task.isCancelled else { return }
+        permissions = requestedPermissions
         phase = .idle
     }
 
     func start() async {
+        guard phase != .requestingPermission,
+              phase != .recording,
+              phase != .paused,
+              phase != .processing,
+              phase != .saving
+        else { return }
+
+        operationGeneration &+= 1
+        let generation = operationGeneration
         await requestPermissionsIfNeeded()
+        guard generation == operationGeneration, !Task.isCancelled else { return }
 
         guard permissions.microphone == .ready else {
             phase = .failed(VoiceRecordingError.microphoneDenied.localizedDescription)
@@ -123,18 +148,36 @@ final class VoiceRecorderViewModel {
         }
 
         do {
+            let previousRecording = completedRecording
+            let previousJobID = transcriptionJob?.id
             _ = try recorder.start(title: title)
+            if let previousRecording {
+                RecordingFileStore.deleteFile(
+                    named: RecordingFileStore.fileName(for: previousRecording.fileURL)
+                )
+            }
+            if let previousJobID {
+                Task { await TranscriptionRetryQueue.shared.remove(id: previousJobID) }
+            }
             elapsedSeconds = 0
             inputLevel = 0
             transcript = ""
             transcriptionResult = nil
             completedRecording = nil
+            transcriptionJob = nil
+            savedStore = nil
+            savedMeetingID = nil
             phase = .recording
             statusMessage = "Recording"
             startMetering()
         } catch {
-            phase = .failed(error.localizedDescription)
-            statusMessage = error.localizedDescription
+            if completedRecording != nil {
+                phase = .readyToSave
+                statusMessage = "Couldn't start again. Your previous audio is still ready to save."
+            } else {
+                phase = .failed(error.localizedDescription)
+                statusMessage = error.localizedDescription
+            }
         }
     }
 
@@ -172,6 +215,7 @@ final class VoiceRecorderViewModel {
 
     func stopAndTranscribe() async {
         guard phase == .recording || phase == .paused else { return }
+        let generation = operationGeneration
         meterTask?.cancel()
         inputLevel = 0
 
@@ -181,11 +225,16 @@ final class VoiceRecorderViewModel {
             elapsedSeconds = completed.durationSeconds
             transcriptionJob = TranscriptionRetryJob(
                 recordingID: completed.id,
-                fileName: RecordingFileStore.fileName(for: completed.fileURL)
+                fileName: RecordingFileStore.fileName(for: completed.fileURL),
+                expectedSpeakerCount: expectedSpeakerCount
             )
 
-            if let transcriptionJob, TranscriptionProviderFactory.isRemoteTranscriptionEnabled {
+            if let transcriptionJob {
                 await TranscriptionRetryQueue.shared.upsert(transcriptionJob)
+                guard generation == operationGeneration, !Task.isCancelled else {
+                    await TranscriptionRetryQueue.shared.remove(id: transcriptionJob.id)
+                    return
+                }
             }
 
             guard !transcriptionProvider.requiresSpeechAuthorization || permissions.speech == .ready else {
@@ -197,8 +246,9 @@ final class VoiceRecorderViewModel {
 
             phase = .processing
             statusMessage = "Generating transcript"
-            await generateTranscript(for: completed, retrying: false)
+            await generateTranscript(for: completed, retrying: false, generation: generation)
         } catch {
+            guard generation == operationGeneration, !Task.isCancelled else { return }
             if completedRecording != nil {
                 phase = .readyToSave
                 statusMessage = "Audio ready. Transcript could not be generated."
@@ -210,6 +260,7 @@ final class VoiceRecorderViewModel {
     }
 
     func retryTranscript() async {
+        guard phase != .processing, phase != .saving else { return }
         guard let completedRecording else {
             phase = .failed(VoiceRecordingError.noRecording.localizedDescription)
             statusMessage = VoiceRecordingError.noRecording.localizedDescription
@@ -228,12 +279,18 @@ final class VoiceRecorderViewModel {
             return
         }
 
+        let generation = operationGeneration
         phase = .processing
         statusMessage = "Retrying transcript"
-        await generateTranscript(for: completedRecording, retrying: true)
+        await generateTranscript(
+            for: completedRecording,
+            retrying: true,
+            generation: generation
+        )
     }
 
     func save(into store: MeetingStore, linkedMeetingID: Meeting.ID? = nil) async -> Meeting.ID? {
+        guard phase != .saving else { return nil }
         guard let completedRecording else {
             phase = .failed(VoiceRecordingError.noRecording.localizedDescription)
             statusMessage = VoiceRecordingError.noRecording.localizedDescription
@@ -244,6 +301,9 @@ final class VoiceRecorderViewModel {
         statusMessage = "Saving"
 
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Voice note" : title
+        let validLinkedMeetingID = linkedMeetingID.flatMap { id in
+            store.meeting(withID: id) == nil ? nil : id
+        }
         let attachment = AudioRecordingAttachment(
             id: completedRecording.id,
             title: cleanTitle,
@@ -252,7 +312,7 @@ final class VoiceRecorderViewModel {
             fileName: RecordingFileStore.fileName(for: completedRecording.fileURL),
             transcript: transcript.trimmingCharacters(in: .whitespacesAndNewlines),
             linkedNote: noteText.trimmingCharacters(in: .whitespacesAndNewlines),
-            source: linkedMeetingID == nil ? .voiceNote : .noteAttachment,
+            source: validLinkedMeetingID == nil ? .voiceNote : .noteAttachment,
             fileSizeBytes: completedRecording.fileSizeBytes,
             transcriptionSegments: transcriptionResult?.segments ?? [],
             transcriptionProvider: transcriptionResult?.provider,
@@ -260,7 +320,7 @@ final class VoiceRecorderViewModel {
         )
 
         let savedID: Meeting.ID
-        if let linkedMeetingID {
+        if let linkedMeetingID = validLinkedMeetingID {
             store.attachVoiceRecording(attachment, to: linkedMeetingID, appendTranscriptToNotes: true)
             savedID = linkedMeetingID
         } else {
@@ -272,28 +332,65 @@ final class VoiceRecorderViewModel {
             )
         }
 
+        savedStore = store
+        savedMeetingID = savedID
+
         if var job = transcriptionJob,
-           job.state != .completed,
-           TranscriptionProviderFactory.isRemoteTranscriptionEnabled {
+           job.state != .completed {
             job.meetingID = savedID
+            job.expectedSpeakerCount = expectedSpeakerCount
             transcriptionJob = job
             await TranscriptionRetryQueue.shared.upsert(job)
+            if let latestJob = transcriptionJob, latestJob.id == job.id {
+                if latestJob.state == .completed {
+                    await TranscriptionRetryQueue.shared.remove(id: job.id)
+                } else if latestJob != job {
+                    // Foreground transcription may have changed state while
+                    // this save was awaiting queue persistence. The newest
+                    // state always wins so a stale `running` receipt cannot
+                    // resurrect completed or failed work.
+                    await TranscriptionRetryQueue.shared.upsert(latestJob)
+                }
+            }
         }
 
         phase = .saved(savedID)
-        statusMessage = "Saved"
+        if transcriptionJob?.state == .completed {
+            statusMessage = "Saved with transcript"
+        } else {
+            statusMessage = validLinkedMeetingID == nil && linkedMeetingID != nil
+                ? "Original note unavailable. Saved as a new voice note."
+                : "Saved"
+            scheduleTranscriptionRecovery(using: store)
+        }
         return savedID
     }
 
     func discard() {
+        if case .saved = phase { return }
+        discardUnsavedRecording()
+    }
+
+    private func discardUnsavedRecording() {
+        operationGeneration &+= 1
         let queuedJobID = transcriptionJob?.id
+        let completedFileName = completedRecording.map {
+            RecordingFileStore.fileName(for: $0.fileURL)
+        }
         meterTask?.cancel()
+        meterTask = nil
         recorder.discard()
+        if let completedFileName {
+            RecordingFileStore.deleteFile(named: completedFileName)
+        }
         completedRecording = nil
         transcriptionJob = nil
         transcriptionResult = nil
+        transcript = ""
         elapsedSeconds = 0
         inputLevel = 0
+        savedStore = nil
+        savedMeetingID = nil
         phase = .idle
         statusMessage = "Ready to record"
         if let queuedJobID {
@@ -301,32 +398,70 @@ final class VoiceRecorderViewModel {
         }
     }
 
-    private func generateTranscript(for completed: CompletedVoiceRecording, retrying: Bool) async {
+    private func generateTranscript(
+        for completed: CompletedVoiceRecording,
+        retrying: Bool,
+        generation: UInt
+    ) async {
         recorder.configureTranscriptionContext(
             title: title,
             workspace: workspace,
-            notes: noteText
+            notes: noteText,
+            expectedSpeakerCount: expectedSpeakerCount
         )
         var job = transcriptionJob ?? TranscriptionRetryJob(
             recordingID: completed.id,
-            fileName: RecordingFileStore.fileName(for: completed.fileURL)
+            fileName: RecordingFileStore.fileName(for: completed.fileURL),
+            expectedSpeakerCount: expectedSpeakerCount
         )
         job.markRunning()
         transcriptionJob = job
-        if TranscriptionProviderFactory.isRemoteTranscriptionEnabled {
-            await TranscriptionRetryQueue.shared.upsert(job)
+        await TranscriptionRetryQueue.shared.upsert(job)
+        guard generation == operationGeneration, !Task.isCancelled else {
+            await TranscriptionRetryQueue.shared.remove(id: job.id)
+            return
         }
 
         do {
             var result = try await transcriptionProvider.transcribe(audioURL: completed.fileURL)
+            guard generation == operationGeneration, !Task.isCancelled else {
+                await TranscriptionRetryQueue.shared.remove(id: job.id)
+                return
+            }
             result.segments = SpeakerIdentityResolver.normalizedSegments(result.segments)
+            guard !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw VoiceRecordingError.noTranscription
+            }
             transcriptionResult = result
             transcript = result.text
+
+            if let savedMeetingID, let savedStore {
+                if savedStore.applyRecoveredTranscript(
+                    result,
+                    recordingID: completed.id,
+                    meetingID: savedMeetingID
+                ) {
+                    job.markCompleted()
+                    transcriptionJob = job
+                    await TranscriptionRetryQueue.shared.remove(id: job.id)
+                    _ = await MeetingProcessingNotification.sendReady(
+                        meetingID: savedMeetingID,
+                        title: savedStore.meeting(withID: savedMeetingID)?.title ?? title
+                    )
+                    statusMessage = "Saved with transcript"
+                } else {
+                    job.markFailed(VoiceRecordingError.noTranscription.localizedDescription)
+                    transcriptionJob = job
+                    await TranscriptionRetryQueue.shared.upsert(job)
+                    statusMessage = "Saved. Transcript will retry later."
+                    scheduleTranscriptionRecovery(using: savedStore)
+                }
+                return
+            }
+
             job.markCompleted()
             transcriptionJob = job
-            if TranscriptionProviderFactory.isRemoteTranscriptionEnabled {
-                await TranscriptionRetryQueue.shared.remove(id: job.id)
-            }
+            await TranscriptionRetryQueue.shared.remove(id: job.id)
             phase = .readyToSave
             let speakerCount = result.distinctSpeakerCount
             if transcript.isEmpty {
@@ -338,16 +473,50 @@ final class VoiceRecorderViewModel {
             } else {
                 statusMessage = "Transcript ready via \(result.provider.title) · speaker count unconfirmed"
             }
+        } catch is CancellationError {
+            guard generation == operationGeneration else {
+                await TranscriptionRetryQueue.shared.remove(id: job.id)
+                return
+            }
+            job.markFailed("Transcription was interrupted and will retry later.")
+            transcriptionJob = job
+            await TranscriptionRetryQueue.shared.upsert(job)
+            if savedMeetingID != nil {
+                statusMessage = "Saved. Transcript will retry later."
+                if let savedStore {
+                    scheduleTranscriptionRecovery(using: savedStore)
+                }
+            } else {
+                phase = .readyToSave
+                statusMessage = "Audio ready. Transcript was interrupted."
+            }
         } catch {
+            guard generation == operationGeneration else {
+                await TranscriptionRetryQueue.shared.remove(id: job.id)
+                return
+            }
             job.markFailed(error.localizedDescription)
             transcriptionJob = job
-            if TranscriptionProviderFactory.isRemoteTranscriptionEnabled {
-                await TranscriptionRetryQueue.shared.upsert(job)
+            await TranscriptionRetryQueue.shared.upsert(job)
+
+            if savedMeetingID != nil {
+                statusMessage = "Saved. Transcript will retry later."
+                if let savedStore {
+                    scheduleTranscriptionRecovery(using: savedStore)
+                }
+                return
             }
             phase = .readyToSave
             statusMessage = retrying
                 ? "Transcript retry failed. Audio is still ready to save."
                 : "Audio ready. Transcript could not be generated."
+        }
+    }
+
+    private func scheduleTranscriptionRecovery(using store: MeetingStore) {
+        Task { @MainActor [weak store] in
+            guard let store else { return }
+            await TranscriptionRecoveryCoordinator.shared.processPending(using: store)
         }
     }
 

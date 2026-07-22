@@ -8,6 +8,7 @@ struct SettingsView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var showsDoneButton = true
 
     @AppStorage("hasCompletedLaunchOnboarding") private var hasCompletedLaunchOnboarding = false
@@ -22,7 +23,6 @@ struct SettingsView: View {
     @State private var showingAudioDiagnostics = false
     @State private var showingRecordingPrivacy = false
     @State private var showingDataControls = false
-    @State private var showingAccountSync = false
     @State private var showingLogoutSheet = false
     @State private var showingDeleteAccountConfirm = false
     @State private var showingIntegrations = false
@@ -75,15 +75,6 @@ struct SettingsView: View {
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
 
-                    #if DEBUG
-                    settingsGroup(title: "Home hero") {
-                        HeroStylePicker(selectionRaw: $heroStyleRaw)
-                    }
-                    .motionEntrance(step: 1, active: hasAnimatedIn)
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 24)
-                    #endif
-
                     settingsGroup(title: "Audio") {
                         settingLinkRow(
                             icon: "waveform.and.mic",
@@ -128,7 +119,7 @@ struct SettingsView: View {
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
 
-                    settingsGroup(title: "Privacy") {
+                    settingsGroup(title: "Data & Privacy") {
                         settingLinkRow(
                             icon: "checkmark.shield.fill",
                             iconColor: AppPalette.accent,
@@ -143,8 +134,8 @@ struct SettingsView: View {
                         settingLinkRow(
                             icon: "externaldrive.fill",
                             iconColor: AppPalette.gold,
-                            title: "Storage & backup",
-                            subtitle: "Export, restore, and protect local notes"
+                            title: "Backups & storage",
+                            subtitle: "Back up, restore, export, or free space"
                         ) {
                             showingDataControls = true
                         }
@@ -179,15 +170,6 @@ struct SettingsView: View {
                               )
                           }
 
-                        settingLinkRow(
-                            icon: "icloud.slash",
-                            iconColor: AppPalette.secondaryInk,
-                            title: "Storage & sync",
-                            subtitle: "Where your data lives"
-                        ) {
-                            showingAccountSync = true
-                        }
-
                           if authSession.currentSession != nil {
                               settingLinkRow(
                                   icon: "rectangle.portrait.and.arrow.right",
@@ -212,13 +194,13 @@ struct SettingsView: View {
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
 
-                    settingsGroup(title: "Integrations") {
+                    settingsGroup(title: "Connections") {
                         settingLinkRow(
                             icon: "link.circle.fill",
                             iconColor: AppPalette.accent,
-                            title: "Secure webhooks",
+                            title: "Share to other apps",
                             subtitle: WebhookStore.shared.configs.isEmpty
-                                ? "Post recaps to an HTTPS endpoint"
+                                ? "Set up Slack, Notion, Linear, or Zapier"
                                 : "\(WebhookStore.shared.configs.count) configured"
                         ) {
                             showingIntegrations = true
@@ -229,47 +211,14 @@ struct SettingsView: View {
                     .padding(.bottom, 24)
 
                       settingsGroup(title: "Experience") {
-                          #if DEBUG
-                          settingLinkRow(
-                              icon: "play.fill",
-                            iconColor: AppPalette.accent,
-                            title: "Launch presentation",
-                            subtitle: "A live walkthrough using the current workspace"
-                          ) {
-                              launchInvestorPresentation()
-                          }
-                          #endif
-
                           settingLinkRow(
                             icon: "chart.bar.xaxis",
                             iconColor: AppPalette.success,
-                            title: "Usage impact",
-                            subtitle: "Captures, follow-through, and source-backed outcomes"
+                            title: "Activity summary",
+                            subtitle: "Notes, meetings, tasks, and time saved"
                           ) {
                               showingUsageImpact = true
                           }
-
-                          #if DEBUG
-                          demoModeRow
-
-                        settingLinkRow(
-                            icon: "shippingbox.fill",
-                            iconColor: AppPalette.accent,
-                            title: "Add sample data",
-                            subtitle: "Calendar notes, source proof, reminders, and recall"
-                        ) {
-                            addSampleData()
-                        }
-
-                        settingLinkRow(
-                            icon: "arrow.triangle.2.circlepath",
-                            iconColor: AppPalette.gold,
-                            title: "Reset demo workspace",
-                            subtitle: demoModePreparedSubtitle
-                          ) {
-                              showingReplaceSamplesConfirm = true
-                          }
-                          #endif
 
                         settingLinkRow(
                             icon: "sparkles.rectangle.stack.fill",
@@ -278,7 +227,7 @@ struct SettingsView: View {
                             subtitle: "Replay the first-run guide"
                         ) {
                             HapticEngine.tap(.medium)
-                            withAnimation(AppMotion.smooth) {
+                            withAnimation(reduceMotion ? nil : AppMotion.smooth) {
                                 hasCompletedLaunchOnboarding = false
                             }
                         }
@@ -301,7 +250,7 @@ struct SettingsView: View {
                             icon: "envelope.fill",
                             iconColor: AppPalette.accent,
                             title: "Send feedback",
-                            subtitle: "Email the developer directly"
+                            subtitle: "Email support"
                         ) {
                             if let url = URL(string: "mailto:\(supportEmail)?subject=Scribeflow%20Feedback") {
                                 openURL(url)
@@ -329,6 +278,44 @@ struct SettingsView: View {
                     .motionEntrance(step: 5, active: hasAnimatedIn)
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
+
+                    #if DEBUG
+                    settingsGroup(title: "Developer Tools") {
+                        homeLayoutRow
+
+                        settingLinkRow(
+                            icon: "play.fill",
+                            iconColor: AppPalette.accent,
+                            title: "Launch presentation",
+                            subtitle: "Walk through the current workspace"
+                        ) {
+                            launchInvestorPresentation()
+                        }
+
+                        demoModeRow
+
+                        settingLinkRow(
+                            icon: "shippingbox.fill",
+                            iconColor: AppPalette.accent,
+                            title: "Add sample data",
+                            subtitle: "Add realistic notes, meetings, and tasks"
+                        ) {
+                            addSampleData()
+                        }
+
+                        settingLinkRow(
+                            icon: "arrow.triangle.2.circlepath",
+                            iconColor: AppPalette.gold,
+                            title: "Reset sample workspace",
+                            subtitle: demoModePreparedSubtitle
+                        ) {
+                            showingReplaceSamplesConfirm = true
+                        }
+                    }
+                    .motionEntrance(step: 6, active: hasAnimatedIn)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 24)
+                    #endif
 
                     settingsGroup(title: "About") {
                         settingInfoRow(
@@ -358,7 +345,7 @@ struct SettingsView: View {
 
                     VStack(spacing: 8) {
                         BreathingDot(tint: AppPalette.accent, size: 4)
-                        Text("Built for people who run important meetings.")
+                        Text("Built for meetings and everyday notes.")
                             .font(.system(.caption, design: .serif))
                             .foregroundStyle(AppPalette.tertiaryInk)
                         Text("v\(appVersion)")
@@ -413,10 +400,6 @@ struct SettingsView: View {
             .fullScreenCover(isPresented: $showingInvestorPresentation) {
                 InvestorPresentationView()
             }
-            .sheet(isPresented: $showingAccountSync) {
-                AccountSyncView()
-                    .presentationDragIndicator(.visible)
-            }
             .sheet(isPresented: $showingLogoutSheet) {
                 LogoutConfirmationSheet {
                     showingLogoutSheet = false
@@ -457,7 +440,7 @@ struct SettingsView: View {
                     prepareDemoWorkspace()
                 }
             } message: {
-                Text("This removes local meetings and recordings on this device, then loads the demo workspace for testing calendar prep, reminders, source-backed summaries, transcription states, and recall.")
+                Text("This removes local notes and recordings on this device, then loads a fresh sample workspace.")
             }
             .alert("Sample data", isPresented: Binding(
                 get: { sampleDataMessage != nil },
@@ -523,7 +506,7 @@ struct SettingsView: View {
         let isSelected = appearanceRaw == option.rawValue
         return Button {
             HapticEngine.tap(.light)
-            withAnimation(AppMotion.snappy) {
+            withAnimation(reduceMotion ? nil : AppMotion.snappy) {
                 appearanceRaw = option.rawValue
             }
         } label: {
@@ -808,9 +791,51 @@ struct SettingsView: View {
         return speechLocaleIdentifier.isEmpty ? "Automatic · \(language)" : language
     }
 
+    private var homeLayoutRow: some View {
+        let selectedStyle = HeroStyle(rawValue: heroStyleRaw) ?? .briefing
+        return HStack(spacing: 14) {
+            Image(systemName: selectedStyle.icon)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(AppPalette.accent)
+                .frame(width: 24, height: 24)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Today layout")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(AppPalette.ink)
+                Text("Preview alternate home designs")
+                    .font(.caption)
+                    .foregroundStyle(AppPalette.tertiaryInk)
+            }
+
+            Spacer(minLength: 8)
+
+            Menu {
+                Picker("Today layout", selection: $heroStyleRaw) {
+                    ForEach(HeroStyle.allCases) { style in
+                        Label(style.title, systemImage: style.icon)
+                            .tag(style.rawValue)
+                    }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Text(selectedStyle.title)
+                        .font(.caption.weight(.semibold))
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2.weight(.semibold))
+                }
+                .foregroundStyle(AppPalette.secondaryInk)
+                .frame(minHeight: AppLayout.minimumTapTarget)
+            }
+            .accessibilityLabel("Today layout, \(selectedStyle.title)")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
     private var demoModePreparedSubtitle: String {
         guard demoModePreparedAt > 0 else {
-            return "Load the investor-ready sample workspace"
+            return "Load the sample workspace"
         }
         let date = Date(timeIntervalSince1970: demoModePreparedAt)
         return "Prepared \(date.formatted(date: .abbreviated, time: .shortened))"
@@ -824,10 +849,10 @@ struct SettingsView: View {
                 .frame(width: 24, height: 24)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text("Investor demo mode")
+                Text("Presentation mode")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(AppPalette.ink)
-                Text(investorDemoMode ? demoModePreparedSubtitle : "Keep walkthrough data repeatable")
+                Text(investorDemoMode ? demoModePreparedSubtitle : "Keep sample data repeatable")
                     .font(.caption)
                     .foregroundStyle(AppPalette.tertiaryInk)
                     .fixedSize(horizontal: false, vertical: true)
@@ -851,7 +876,7 @@ struct SettingsView: View {
     private func addSampleData() {
         let added = meetingStore.addSampleData()
         if added == 0 {
-            sampleDataMessage = "The demo workspace is already loaded."
+            sampleDataMessage = "The sample workspace is already loaded."
         } else {
             sampleDataMessage = "Added \(added) sample meetings for testing."
         }
@@ -872,7 +897,7 @@ struct SettingsView: View {
         meetingStore.replaceWithSampleData()
         investorDemoMode = true
         demoModePreparedAt = Date().timeIntervalSince1970
-        sampleDataMessage = "Loaded the investor demo workspace."
+        sampleDataMessage = "Loaded the sample workspace."
         HapticEngine.notify(.success)
     }
 

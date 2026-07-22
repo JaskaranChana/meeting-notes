@@ -17,6 +17,7 @@ struct PendingMeetingRecoveryPayload: Codable, Hashable, Sendable {
     var durationMinutes: Int
     var durationSeconds: Int? = nil
     var selectedTemplate: NoteTemplate
+    var purposeOverride: CapturePurposeKind? = nil
     var meetingMode: MeetingMode
     var consentState: ConsentState
     var retentionPolicy: RetentionPolicy
@@ -1368,9 +1369,15 @@ enum MeetingProcessingBackgroundScheduler {
             UserDefaults.standard.removeObject(forKey: lastSchedulingErrorKey)
             return true
         } catch {
-            let message = error.localizedDescription
-            UserDefaults.standard.set(message, forKey: lastSchedulingErrorKey)
-            AnalyticsLog.shared.log("background.processing.schedule_failed", ["error": message])
+            let failure = error as NSError
+            UserDefaults.standard.set(
+                "\(failure.domain):\(failure.code)",
+                forKey: lastSchedulingErrorKey
+            )
+            AnalyticsLog.shared.log("background.processing.schedule_failed", [
+                "domain": failure.domain,
+                "code": "\(failure.code)"
+            ])
             return false
         }
     }
@@ -1386,5 +1393,13 @@ final class ScribeflowAppDelegate: NSObject, UIApplicationDelegate {
         MeetingProcessingBackgroundScheduler.register()
         MeetingProcessingCoordinator.shared.attach(ScribeflowRuntime.shared.store)
         return true
+    }
+
+    func applicationDidReceiveMemoryWarning(_ application: UIApplication) {
+        ScribeflowRuntime.shared.store.releaseTransientCaches()
+        AnalyticsLog.shared.log("app.memory_warning")
+        Task {
+            await EnhancedMeetingTranscriptionService.shared.releaseModels()
+        }
     }
 }
